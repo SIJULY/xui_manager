@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-UI Manager Pro 一键安装/管理脚本 (Docker + 智能Caddy版)
+# X-UI Manager Pro 一键安装/管理脚本 (最终完美版)
 # GitHub: https://github.com/SIJULY/xui_manager
 # ==============================================================================
 
@@ -32,15 +32,30 @@ check_root() {
     fi
 }
 
+# 关键修复：等待系统释放 APT 锁
+wait_for_apt_lock() {
+    echo -e "${BLUE}[信息] 正在检查系统 APT 锁状态...${PLAIN}"
+    # 只要检测到 apt 或 dpkg 的锁被占用，就循环等待
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/apt/lists/lock >/dev/null 2>&1 ; do
+        echo -e "${YELLOW}[警告] 系统后台正在运行更新进程 (apt/dpkg)，脚本暂停 10 秒等待锁释放...${PLAIN}"
+        sleep 10
+    done
+    echo -e "${GREEN}[成功] APT 锁已释放，继续执行任务。${PLAIN}"
+}
+
 check_docker() {
     if ! command -v docker &> /dev/null; then
         print_info "未检测到 Docker，正在安装..."
+        wait_for_apt_lock # 安装前再次确认锁状态
         curl -fsSL https://get.docker.com | bash
         systemctl enable docker
         systemctl start docker
     fi
     if ! docker compose version &> /dev/null; then
         print_info "未检测到 Docker Compose 插件，正在安装..."
+        wait_for_apt_lock
         apt-get update && apt-get install -y docker-compose-plugin
     fi
 }
@@ -92,6 +107,7 @@ EOF
 install_caddy_if_needed() {
     if ! command -v caddy &> /dev/null; then
         print_info "未检测到 Caddy，正在安装官方版本..."
+        wait_for_apt_lock
         apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
@@ -100,6 +116,11 @@ install_caddy_if_needed() {
         print_success "Caddy 安装完成。"
     else
         print_info "检测到已安装 Caddy，将复用现有环境。"
+    fi
+    
+    # 确保 Caddy 启动
+    if ! systemctl is-active --quiet caddy; then
+        systemctl enable --now caddy || print_warning "Caddy 启动尝试失败，可能端口被占用，稍后重试 reload。"
     fi
 }
 
@@ -115,6 +136,12 @@ configure_caddy() {
 
     # 追加新配置
     print_info "正在追加 Caddy 配置..."
+    
+    # 确保文件以换行符结尾
+    if [ -s "$CADDY_CONFIG_PATH" ] && [ "$(tail -c 1 "$CADDY_CONFIG_PATH")" != "" ]; then
+        echo "" >> "$CADDY_CONFIG_PATH"
+    fi
+
     cat >> "$CADDY_CONFIG_PATH" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
@@ -122,13 +149,23 @@ ${DOMAIN} {
 }
 ${CADDY_MARK_END}
 EOF
-    systemctl reload caddy
-    print_success "Caddy 配置已更新并重载。"
+
+    # 智能重载/启动
+    if systemctl is-active --quiet caddy; then
+        systemctl reload caddy
+        print_success "Caddy 配置已更新并重载。"
+    else
+        systemctl enable --now caddy
+        print_success "Caddy 已启动并加载配置。"
+    fi
 }
 
 # --- 菜单动作 ---
 
 install_panel() {
+    # 第一步先检查锁，防止后面报错
+    wait_for_apt_lock
+    
     deploy_base
 
     echo "------------------------------------------------"
