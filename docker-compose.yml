@@ -1,0 +1,29 @@
+version: '3.8'
+services:
+  xui-manager:
+    build: .
+    container_name: xui_manager
+    restart: always
+    volumes:
+      - ./data/servers.json:/app/servers.json
+      - ./data/subscriptions.json:/app/subscriptions.json
+    environment:
+      - TZ=Asia/Shanghai
+
+  caddy:
+    image: caddy:latest
+    container_name: xui_caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - xui-manager
+
+volumes:
+  caddy_data:
+  caddy_config:

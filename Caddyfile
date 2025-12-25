@@ -1,0 +1,3 @@
+:80 {
+    reverse_proxy xui-manager:8080
+}
