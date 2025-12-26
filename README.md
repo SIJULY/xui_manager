@@ -27,7 +27,7 @@
 复制以下命令在服务器执行即可（需提前安装 Docker）：
 
 ```bash
-bash <(curl -fsSL [https://raw.githubusercontent.com/SIJULY/xui_manager/main/install.sh](https://raw.githubusercontent.com/SIJULY/xui_manager/main/install.sh))
+bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/xui_manager/main/install.sh)
 ```
 
 ## 🛠️ 管理命令
@@ -57,6 +57,10 @@ data/subscriptions.json: 订阅配置
 data/nodes_cache.json: 节点缓存数据
 
 ⚠️ 注意：请定期备份 data 目录以防数据丢失。
+
+
+
+
 
 
 ## 如果觉得项目有用，请点个 ⭐ Star 支持一下！
