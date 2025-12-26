@@ -447,7 +447,9 @@ class InboundEditor:
                     ui.input('密码', value=pwd).classes('flex-1').on_value_change(lambda e: s['accounts'][0].update({'pass': e.value}))
 
     async def save(self, dlg):
-        self.d['remark'] = self.rem.value; self.d['enable'] = self.ena.value
+        # 1. 获取基本表单数据
+        self.d['remark'] = self.rem.value
+        self.d['enable'] = self.ena.value
         try:
             port_val = int(self.prt.value)
             if port_val <= 0 or port_val > 65535: raise ValueError
@@ -455,45 +457,67 @@ class InboundEditor:
         except: safe_notify("请输入有效端口", "negative"); return
         self.d['protocol'] = self.pro.value
         
-        # 确保基础字段存在
+        # 2. 补全必要字段结构
         if 'streamSettings' not in self.d: self.d['streamSettings'] = {}
         if 'sniffing' not in self.d: 
             self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
             
-        self.d['streamSettings']['network'] = self.net.value; self.d['streamSettings']['security'] = self.sec.value
+        self.d['streamSettings']['network'] = self.net.value
+        self.d['streamSettings']['security'] = self.sec.value
         
-        # [VIP通道] 新建 Requests 独立会话
+        # [VIP通道] 独立同步线程
         def _do_save_sync():
             try:
-                # 1. 登录
+                # === 准备工作 ===
                 session = requests.Session()
                 session.verify = False 
                 session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
                 
-                # 构建登录 URL
-                login_urls = []
-                base = self.mgr.original_url
-                if '://' not in base: 
-                    login_urls.append(f"http://{base}/login")
-                    login_urls.append(f"https://{base}/login")
+                # [关键修复]：强力清洗 URL，去除换行符、回车符和空格，防止 UnknownProtocol 错误
+                raw_base = str(self.mgr.original_url).strip()
+                
+                # 处理基础 URL 列表 (同时生成 http 和 https 备选)
+                base_list = []
+                if '://' not in raw_base:
+                    base_list.append(f"http://{raw_base}")
+                    base_list.append(f"https://{raw_base}")
                 else:
-                    login_urls.append(f"{base}/login")
-                
-                success_login_url = None
-                for l_url in login_urls:
-                    try:
-                        r = session.post(l_url, data={'username': self.mgr.username, 'password': self.mgr.password}, timeout=5)
-                        if r.status_code == 200 and r.json().get('success'):
-                            success_login_url = l_url
-                            break
-                    except: pass
-                
-                if not success_login_url: return False, "VIP通道：无法连接或登录失败"
+                    # 即使有协议头，也要清理掉末尾的斜杠
+                    base_list.append(raw_base.rstrip('/'))
+                    # 如果是 http，额外尝试 https（反之亦然，为了健壮性）
+                    if raw_base.startswith('http://'):
+                        base_list.append(raw_base.replace('http://', 'https://'))
 
-                # 2. 准备提交的数据
-                submit_data = self.d.copy()
+                # === 第一步：智能登录 ===
+                login_paths = ['/login', '/xui/login', '/panel/login', '/3x-ui/login']
+                if self.mgr.api_prefix:
+                    clean_prefix = self.mgr.api_prefix.strip().rstrip('/')
+                    if clean_prefix: login_paths.insert(0, f"{clean_prefix}/login")
+
+                success_login_url = None
+                print(f"🚀 [VIP登录] 开始尝试登录 ({len(base_list)} 个基地址)...", flush=True)
                 
-                # 序列化所有对象字段为字符串
+                for b_url in base_list:
+                    if success_login_url: break
+                    for path in login_paths:
+                        target_login_url = f"{b_url}{path}"
+                        try:
+                            # print(f"   Trying: {target_login_url} ...", flush=True)
+                            r = session.post(target_login_url, data={'username': self.mgr.username, 'password': self.mgr.password}, timeout=5)
+                            
+                            if r.status_code == 200 and r.json().get('success'):
+                                print(f"✅ [VIP登录] 成功: {target_login_url}", flush=True)
+                                success_login_url = target_login_url
+                                break
+                        except Exception as e:
+                            # 捕获并忽略连接错误，继续尝试下一个
+                            pass
+
+                if not success_login_url:
+                    return False, "VIP通道：无法连接到服务器，请检查 URL 是否正确或防火墙设置"
+
+                # === 第二步：数据序列化 (防止 JSON Unmarshal 错误) ===
+                submit_data = self.d.copy()
                 if isinstance(submit_data.get('settings'), dict):
                     submit_data['settings'] = json.dumps(submit_data['settings'], ensure_ascii=False)
                 if isinstance(submit_data.get('streamSettings'), dict):
@@ -501,47 +525,44 @@ class InboundEditor:
                 if isinstance(submit_data.get('sniffing'), dict):
                     submit_data['sniffing'] = json.dumps(submit_data['sniffing'], ensure_ascii=False)
 
-                # 3. 提交数据
+                # === 第三步：提交数据 ===
                 action = 'update/' + str(self.d['id']) if self.is_edit else 'add'
+                base_root_url = success_login_url.rsplit('/login', 1)[0]
                 
-                # 生成候选 URL 列表
-                candidates = []
-                candidates.append(success_login_url.replace('/login', f'/inbound/{action}'))
-                try:
-                    parsed = urlparse(success_login_url)
-                    base_root = f"{parsed.scheme}://{parsed.netloc}"
-                    candidates.append(f"{base_root}/xui/inbound/{action}")
-                    candidates.append(f"{base_root}/panel/inbound/{action}")
-                    candidates.append(f"{base_root}/inbound/{action}")
-                except: pass
-
+                save_candidates = []
+                save_candidates.append(f"{base_root_url}/inbound/{action}")
+                save_candidates.append(f"{base_root_url}/xui/inbound/{action}")
+                
                 final_response = None
-                for save_url in dict.fromkeys(candidates): 
-                    print(f"🔵 [VIP保存尝试] {save_url}", flush=True)
+                for save_url in dict.fromkeys(save_candidates): 
+                    print(f"🔵 [VIP保存] 提交至: {save_url}", flush=True)
                     try:
-                        r = session.post(save_url, json=submit_data, timeout=5)
+                        r = session.post(save_url, json=submit_data, timeout=8)
                         if r.status_code != 404:
                             final_response = r
                             break
-                    except: continue
+                    except Exception as e:
+                        print(f"❌ [VIP保存] 网络错误: {e}", flush=True)
+                        continue
                 
                 if final_response:
                     try:
                         resp = final_response.json()
-                        print(f"🟢 响应: {resp}", flush=True)
+                        print(f"🟢 [VIP响应] {resp}", flush=True)
                         return (True, resp.get('msg')) if resp.get('success') else (False, resp.get('msg'))
-                    except: return False, f"响应解析失败: {final_response.text[:50]}"
+                    except: return False, f"响应解析失败 (状态码 {final_response.status_code})"
                 else:
-                    return False, "保存失败：API 路径未找到 (404)"
-            except Exception as e:
-                return False, f"网络异常: {str(e)}"
+                    return False, "保存失败：未找到正确的 API 路径 (404)"
 
+            except Exception as e:
+                return False, f"系统异常: {str(e)}"
+
+        # 执行并处理结果
         success, msg = await run.io_bound(_do_save_sync)
         
         if success: 
             safe_notify("✅ 保存成功", "positive")
             dlg.close()
-            # [关键修复]：正确等待回调函数执行，解决 RuntimeWarning
             if self.cb:
                 res = self.cb()
                 if asyncio.iscoroutine(res):
@@ -552,46 +573,53 @@ class InboundEditor:
 async def open_inbound_dialog(mgr, data, cb):
     with ui.dialog() as d: InboundEditor(mgr, data, cb).ui(d); d.open()
 async def delete_inbound(mgr, id, cb):
-    # 定义增强版同步删除逻辑（包含路径探测和重试）
+    # 定义增强版同步删除逻辑
     def _do_delete_sync():
         try:
             session = requests.Session()
             session.verify = False
             session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
             
-            # 1. 登录
-            login_urls = []
-            base = mgr.original_url
-            if '://' not in base:
-                login_urls.append(f"http://{base}/login")
-                login_urls.append(f"https://{base}/login")
+            # [关键修复]：强力清洗 URL
+            raw_base = str(mgr.original_url).strip()
+            
+            base_list = []
+            if '://' not in raw_base:
+                base_list.append(f"http://{raw_base}")
+                base_list.append(f"https://{raw_base}")
             else:
-                login_urls.append(f"{base}/login")
+                base_list.append(raw_base.rstrip('/'))
+                if raw_base.startswith('http://'):
+                    base_list.append(raw_base.replace('http://', 'https://'))
+            
+            # 1. 登录
+            login_paths = ['/login', '/xui/login', '/panel/login']
+            if mgr.api_prefix:
+                clean_prefix = mgr.api_prefix.strip().rstrip('/')
+                if clean_prefix: login_paths.insert(0, f"{clean_prefix}/login")
             
             success_login_url = None
-            for l_url in login_urls:
-                try:
-                    r = session.post(l_url, data={'username': mgr.username, 'password': mgr.password}, timeout=5)
-                    if r.status_code == 200 and r.json().get('success'):
-                        success_login_url = l_url
-                        break
-                except: pass
+            for b_url in base_list:
+                if success_login_url: break
+                for path in login_paths:
+                    try:
+                        target = f"{b_url}{path}"
+                        r = session.post(target, data={'username': mgr.username, 'password': mgr.password}, timeout=5)
+                        if r.status_code == 200 and r.json().get('success'):
+                            success_login_url = target
+                            break
+                    except: pass
             
             if not success_login_url: return False, "无法连接或登录失败"
 
-            # 2. 尝试删除 (探测多种路径)
+            # 2. 尝试删除
             action = f"del/{id}"
+            base_root = success_login_url.rsplit('/login', 1)[0]
+            
             candidates = []
-            # 猜测1: 根据登录 URL 替换
-            candidates.append(success_login_url.replace('/login', f'/inbound/{action}'))
-            # 猜测2: 强制尝试常见前缀
-            try:
-                parsed = urlparse(success_login_url)
-                base_root = f"{parsed.scheme}://{parsed.netloc}"
-                candidates.append(f"{base_root}/xui/inbound/{action}")
-                candidates.append(f"{base_root}/panel/inbound/{action}")
-                candidates.append(f"{base_root}/inbound/{action}")
-            except: pass
+            candidates.append(f"{base_root}/inbound/{action}")
+            candidates.append(f"{base_root}/xui/inbound/{action}")
+            candidates.append(f"{base_root}/panel/inbound/{action}")
 
             final_response = None
             for del_url in dict.fromkeys(candidates):
@@ -615,12 +643,10 @@ async def delete_inbound(mgr, id, cb):
         except Exception as e:
             return False, f"异常: {str(e)}"
 
-    # 使用 run.io_bound 在后台线程执行删除，避免卡顿 UI
     success, msg = await run.io_bound(_do_delete_sync)
 
     if success:
         safe_notify(f"✅ 删除成功", "positive")
-        # [关键修复] 必须 await 回调函数，否则列表不会刷新
         if cb:
             res = cb()
             if asyncio.iscoroutine(res):
@@ -1025,7 +1051,7 @@ async def load_dashboard_stats():
 @ui.refreshable
 def render_sidebar_content():
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('X-UI 面板').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
 
