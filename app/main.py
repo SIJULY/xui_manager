@@ -31,9 +31,9 @@ CONFIG_FILE = 'servers.json'
 SUBS_FILE = 'subscriptions.json'
 NODES_CACHE_FILE = 'nodes_cache.json'
 
-# --- 登录账号密码配置 ---
-ADMIN_USER = 'admin'
-ADMIN_PASS = 'admin'
+# --- [修复] 优先读取环境变量，没有则默认为 admin ---
+ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
+ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
 
 SERVERS_CACHE = []
 SUBS_CACHE = []
@@ -51,7 +51,7 @@ content_container = None
 
 def init_data():
     global SERVERS_CACHE, SUBS_CACHE, NODES_DATA
-    logger.info("正在初始化数据...")
+    logger.info(f"正在初始化数据... (当前登录账号: {ADMIN_USER})")
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f: SERVERS_CACHE = json.load(f)
@@ -273,11 +273,45 @@ def get_all_groups():
         if g: groups.add(g)
     return sorted(list(groups))
 
+# [修复] 增强版复制功能，兼容 HTTP
 async def safe_copy_to_clipboard(text):
+    # 处理特殊字符防止 JS 报错
+    safe_text = json.dumps(text).replace('"', '\\"') # 简单转义
+    
+    # 注入增强版 JS：先尝试 API，失败则回退到 execCommand
+    js_code = f"""
+    (async () => {{
+        const text = {json.dumps(text)};
+        try {{
+            await navigator.clipboard.writeText(text);
+            return true;
+        }} catch (err) {{
+            // 回退方案
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            try {{
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                return true;
+            }} catch (err2) {{
+                document.body.removeChild(textArea);
+                return false;
+            }}
+        }}
+    }})()
+    """
     try:
-        await ui.run_javascript(f'navigator.clipboard.writeText("{text}")')
-        safe_notify('已复制', 'positive')
-    except: safe_notify('复制失败', 'negative')
+        result = await ui.run_javascript(js_code)
+        if result:
+            safe_notify('已复制到剪贴板', 'positive')
+        else:
+            safe_notify('复制失败，请使用下载按钮 (浏览器安全限制)', 'negative')
+    except:
+        safe_notify('复制功能不可用，建议使用下载按钮', 'negative')
 
 async def open_add_server_dialog():
     with ui.dialog() as d, ui.card().classes('w-2/3 max-w-5xl h-auto flex flex-col gap-4'):
@@ -489,7 +523,6 @@ class InboundEditor:
                 self.net=ui.select(['tcp','ws','grpc'], value=st.get('network','tcp'), label='传输').classes('w-1/3')
                 self.sec=ui.select(['none','tls'], value=st.get('security','none'), label='安全').classes('w-1/3')
             with ui.row().classes('w-full justify-end mt-6'): ui.button('保存', on_click=lambda: self.save(d)).props('color=primary')
-    # [核心修复] 重写刷新逻辑，使用 with 上下文防止无限堆叠
     def refresh_auth(self, e=None):
         self.auth_box.clear()
         with self.auth_box:
@@ -631,7 +664,6 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf); list_container = ui.column().classes('w-full')
     
-    # [新增] 标题栏右侧增加“新建节点”按钮
     with ui.row().classes('w-full justify-end mb-2'):
         ui.button('新建节点', icon='add', color='green', on_click=lambda: open_inbound_dialog(mgr, None, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('dense')
 
@@ -809,13 +841,12 @@ def render_sidebar_content():
     with ui.column().classes('w-full p-2 border-t mt-auto'):
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
 
-# [新增] 登录页面
 @ui.page('/login')
 def login_page():
     def try_login():
         if username.value == ADMIN_USER and password.value == ADMIN_PASS:
             app.storage.user['authenticated'] = True
-            ui.navigate.to('/') # 修复跳转
+            ui.navigate.to('/') 
         else:
             ui.notify('账号或密码错误', color='negative')
 
@@ -827,7 +858,6 @@ def login_page():
 
 @ui.page('/')
 def main_page():
-    # [核心] 登录检查
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
 
