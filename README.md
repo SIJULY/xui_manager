@@ -35,16 +35,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/xui_manager/main/instal
 * 查看日志：
 
 ```bash
-docker logs -f xui-manager
+ docker logs -f --tail 100 xui_manager
 ```
 * 重启服务：
 ```bash
-docker restart xui-manager
+cd /root/xui_manager && docker compose up -d --build
 ```
-* 更新程序：
-```bash
-docker pull python:3.10-slim && docker restart xui-manager
-```
+
 
 ## 📂 数据目录说明
 
