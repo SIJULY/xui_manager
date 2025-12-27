@@ -9,6 +9,7 @@ import urllib3
 import shutil
 import re
 import sys
+import random
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
@@ -380,11 +381,31 @@ class InboundEditor:
     def __init__(self, mgr, data=None, on_success=None):
         self.mgr = mgr; self.cb = on_success; self.is_edit = data is not None
         if not data:
-            self.d = {"enable": True, "remark": "", "port": 0, "protocol": "vmess",
-                "settings": {"clients": [{"id": str(uuid.uuid4()), "alterId": 0}], "disableInsecureEncryption": False},
-                "streamSettings": {"network": "tcp", "security": "none"},
-                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}}
-        else: self.d = data.copy()
+            # [修改] 这里引入 random 生成随机端口 (范围 10000-65000)
+            random_port = random.randint(10000, 65000)
+
+            self.d = {
+                "enable": True, 
+                "remark": "", 
+                "port": random_port,  # <--- 使用随机端口
+                "protocol": "vmess",
+                "settings": {
+                    "clients": [{"id": str(uuid.uuid4()), "alterId": 0}], 
+                    "disableInsecureEncryption": False
+                },
+                "streamSettings": {
+                    "network": "tcp", 
+                    "security": "none"
+                },
+                "sniffing": {
+                    "enabled": True, 
+                    "destOverride": ["http", "tls"]
+                }
+            }
+        else: 
+            self.d = data.copy()
+        
+        # 处理 settings 字符串转字典（兼容性处理）
         if isinstance(self.d.get('settings'), str): 
             try: self.d['settings'] = json.loads(self.d['settings'])
             except: self.d['settings'] = {}
@@ -572,6 +593,7 @@ class InboundEditor:
 
 async def open_inbound_dialog(mgr, data, cb):
     with ui.dialog() as d: InboundEditor(mgr, data, cb).ui(d); d.open()
+
 async def delete_inbound(mgr, id, cb):
     # 定义增强版同步删除逻辑
     def _do_delete_sync():
@@ -862,8 +884,21 @@ async def open_data_mgmt_dialog():
     d.open()
 
 # ================= 渲染逻辑 =================
-TABLE_COLS_CSS = 'grid-template-columns: 150px 2fr 100px 80px 80px 80px 150px; align-items: center;'
-SINGLE_COLS = 'grid-template-columns: 2fr 100px 100px 100px 100px 150px; align-items: center;'
+
+# 辅助函数：格式化流量
+def format_bytes(size):
+    if not size: return '0 B'
+    power = 2**10
+    n = 0
+    power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
+    while size > power:
+        size /= power
+        n += 1
+    return f"{size:.2f} {power_labels[n]}B"
+
+# [修改] 调整列布局：
+TABLE_COLS_CSS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
+SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
 
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     client = ui.context.client
@@ -918,20 +953,34 @@ async def render_single_server_view(server_conf, force_refresh=False):
         except: pass
 
         with list_container:
+            # [修改] 表头顺序调整：备注 -> 所在组 -> 已用流量 -> 协议...
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS):
                 ui.label('备注名称').classes('text-left pl-2')
-                for h in ['所在组', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
+                for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: 
+                    ui.label(h).classes('text-center')
             
             if not res: ui.label('暂无节点或连接失败').classes('text-gray-400 mt-4 text-center w-full'); return
             if not force_refresh: ui.label('本地缓存模式').classes('text-xs text-gray-300 w-full text-right px-2')
             
             for n in res:
+                # [修改] 计算流量
+                traffic = n.get('up', 0) + n.get('down', 0)
+                traffic_str = format_bytes(traffic)
+
                 with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS):
+                    # 1. 备注
                     ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
+                    # 2. 所在组 (移到备注右侧)
                     ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                    # 3. 流量 (新增)
+                    ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
+                    # 4. 协议
                     ui.label(n.get('protocol', 'unknown')).classes('uppercase text-xs font-bold w-full text-center')
+                    # 5. 端口
                     ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
+                    # 6. 状态
                     with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                    # 7. 操作
                     with ui.row().classes('gap-2 justify-center w-full'):
                         link = generate_node_link(n, raw_host)
                         if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
@@ -947,10 +996,12 @@ async def render_aggregated_view(server_list, force_refresh=False):
         list_container.clear()
         
         with list_container:
+            # [修改] 表头顺序调整
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(TABLE_COLS_CSS):
                 ui.label('服务器').classes('text-left pl-2')
                 ui.label('备注名称').classes('text-left pl-2')
-                for h in ['所在组', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
+                for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: 
+                    ui.label(h).classes('text-center')
             
             for i, res in enumerate(results):
                 if i % 2 == 0: await asyncio.sleep(0.01)
@@ -967,19 +1018,30 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 SERVER_UI_MAP[srv['url']] = row_wrapper
                 with row_wrapper:
                     if not res:
+                        # 错误状态行也需要调整列数以匹配 Grid
                         with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-red-50 px-2 items-center').style(TABLE_COLS_CSS):
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                            ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2'); ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate'); ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center')
+                            ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2')
+                            ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                            ui.label('-').classes('w-full text-center') # 流量占位
+                            ui.label('-').classes('w-full text-center') # 协议占位
+                            ui.label('-').classes('w-full text-center') # 端口占位
                             with ui.element('div').classes('flex justify-center w-full'): ui.icon('error', color='red').props('size=xs')
                             with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=grey')
                         continue
 
                     for n in res:
                         try:
+                            # [修改] 计算流量
+                            traffic = n.get('up', 0) + n.get('down', 0)
+                            traffic_str = format_bytes(traffic)
+
                             with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(TABLE_COLS_CSS):
                                 ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                                 ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
                                 ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                                # 新增流量列
+                                ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
                                 ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                                 ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                                 with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
@@ -1051,7 +1113,7 @@ async def load_dashboard_stats():
 @ui.refreshable
 def render_sidebar_content():
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('X-UI 面板').classes('text-xl font-bold mb-4 text-slate-800')
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
 
