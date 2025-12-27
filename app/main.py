@@ -10,6 +10,9 @@ import shutil
 import re
 import sys
 import random
+import pyotp
+import qrcode
+import io
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
@@ -41,6 +44,10 @@ SYNC_SEMAPHORE = asyncio.Semaphore(15)
 CONFIG_FILE = 'data/servers.json'
 SUBS_FILE = 'data/subscriptions.json'
 NODES_CACHE_FILE = 'data/nodes_cache.json'
+ADMIN_CONFIG_FILE = 'data/admin_config.json'
+
+# ✨✨✨ 自动注册密钥 (优先从环境变量获取) ✨✨✨
+AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
 
 ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
 ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
@@ -48,6 +55,7 @@ ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
 SERVERS_CACHE = []
 SUBS_CACHE = []
 NODES_DATA = {}
+ADMIN_CONFIG = {}
 
 FILE_LOCK = asyncio.Lock()
 EXPANDED_GROUPS = set()
@@ -56,8 +64,9 @@ content_container = None
 
 def init_data():
     if not os.path.exists('data'): os.makedirs('data')
-    global SERVERS_CACHE, SUBS_CACHE, NODES_DATA
+    global SERVERS_CACHE, SUBS_CACHE, NODES_DATA, ADMIN_CONFIG
     logger.info(f"正在初始化数据... (当前登录账号: {ADMIN_USER})")
+    logger.info(f"通讯密钥已加载: {AUTO_REGISTER_SECRET[:4]}***")
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -75,6 +84,11 @@ def init_data():
             with open(NODES_CACHE_FILE, 'r', encoding='utf-8') as f: NODES_DATA = json.load(f)
             logger.info(f"✅ 加载节点缓存完毕")
         except: NODES_DATA = {}
+        
+    if os.path.exists(ADMIN_CONFIG_FILE):
+        try:
+            with open(ADMIN_CONFIG_FILE, 'r', encoding='utf-8') as f: ADMIN_CONFIG = json.load(f)
+        except: ADMIN_CONFIG = {}
 
 def _save_file_sync_internal(filename, data):
     temp_file = f"{filename}.{uuid.uuid4()}.tmp"
@@ -93,6 +107,7 @@ async def safe_save(filename, data):
 
 async def save_servers(): await safe_save(CONFIG_FILE, SERVERS_CACHE)
 async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
+async def save_admin_config(): await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
 async def save_nodes_cache():
     try:
         data_snapshot = NODES_DATA.copy()
@@ -179,7 +194,7 @@ class XUIManager:
         base = self.login_path.replace('/login', '/inbound')
         path = f"{base}{suffix}"
         
-        print(f"🔵 [用户操作] 正在提交: {self.url}{path}", flush=True)
+        # print(f"🔵 [用户操作] 正在提交: {self.url}{path}", flush=True)
         r = self._request('POST', path, json=data)
         if r: 
             try: 
@@ -200,19 +215,13 @@ async def run_in_bg_executor(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(BG_EXECUTOR, func, *args)
 
-# [核心] 静默刷新逻辑：修复了强制跳转首页的问题
+# [核心] 静默刷新逻辑
 async def silent_refresh_all():
     safe_notify(f'🚀 开始后台静默刷新 ({len(SERVERS_CACHE)} 个服务器)...')
     tasks = []
-    
-    # 构造所有同步任务
     for srv in SERVERS_CACHE:
         tasks.append(fetch_inbounds_safe(srv, force_refresh=True))
-    
-    # 等待所有任务完成
     await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # [修复] 仅刷新侧边栏数据，不再强制调用 load_dashboard_stats() 跳转页面
     safe_notify('✅ 后台刷新完成', 'positive')
     render_sidebar_content.refresh()
 
@@ -318,6 +327,68 @@ async def group_sub_handler(group_b64: str, request: Request):
                 if l: links.append(l)
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
+# ================= 自动注册接口 (带鉴权) =================
+@app.post('/api/auto_register_node')
+async def auto_register_node(request: Request):
+    try:
+        # 1. 获取并解析数据
+        data = await request.json()
+        
+        # 2. 安全验证
+        secret = data.get('secret')
+        if secret != AUTO_REGISTER_SECRET:
+            logger.warning(f"⚠️ [自动注册] 密钥错误: {secret}")
+            return Response(json.dumps({"success": False, "msg": "密钥错误"}), status_code=403, media_type="application/json")
+
+        # 3. 提取字段
+        ip = data.get('ip')
+        port = data.get('port')
+        username = data.get('username')
+        password = data.get('password')
+        alias = data.get('alias', f'Auto-{ip}')
+
+        if not all([ip, port, username, password]):
+            return Response(json.dumps({"success": False, "msg": "参数不完整"}), status_code=400, media_type="application/json")
+
+        target_url = f"http://{ip}:{port}"
+        
+        new_server_config = {
+            'name': alias,
+            'group': '自动注册',
+            'url': target_url,
+            'user': username,
+            'pass': password,
+            'prefix': ''
+        }
+
+        # 5. 查重逻辑
+        existing_index = -1
+        for idx, srv in enumerate(SERVERS_CACHE):
+            cache_url = srv['url'].replace('http://', '').replace('https://', '')
+            new_url_clean = target_url.replace('http://', '').replace('https://', '')
+            if cache_url == new_url_clean:
+                existing_index = idx
+                break
+
+        action_msg = ""
+        if existing_index != -1:
+            SERVERS_CACHE[existing_index].update(new_server_config)
+            action_msg = f"🔄 更新节点: {alias}"
+        else:
+            SERVERS_CACHE.append(new_server_config)
+            action_msg = f"✅ 新增节点: {alias}"
+
+        await save_servers()
+        try: render_sidebar_content.refresh()
+        except: pass
+        
+        logger.info(f"[自动注册] {action_msg} ({ip})")
+        return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200, media_type="application/json")
+
+    except Exception as e:
+        logger.error(f"❌ [自动注册] 处理异常: {e}")
+        return Response(json.dumps({"success": False, "msg": str(e)}), status_code=500, media_type="application/json")
+
 def show_loading(container):
     try:
         container.clear()
@@ -328,7 +399,7 @@ def show_loading(container):
     except: pass
 
 def get_all_groups():
-    groups = {'默认分组'}
+    groups = {'默认分组', '自动注册'}
     for s in SERVERS_CACHE:
         g = s.get('group')
         if g: groups.add(g)
@@ -381,31 +452,19 @@ class InboundEditor:
     def __init__(self, mgr, data=None, on_success=None):
         self.mgr = mgr; self.cb = on_success; self.is_edit = data is not None
         if not data:
-            # [修改] 这里引入 random 生成随机端口 (范围 10000-65000)
             random_port = random.randint(10000, 65000)
-
             self.d = {
                 "enable": True, 
                 "remark": "", 
-                "port": random_port,  # <--- 使用随机端口
+                "port": random_port,
                 "protocol": "vmess",
-                "settings": {
-                    "clients": [{"id": str(uuid.uuid4()), "alterId": 0}], 
-                    "disableInsecureEncryption": False
-                },
-                "streamSettings": {
-                    "network": "tcp", 
-                    "security": "none"
-                },
-                "sniffing": {
-                    "enabled": True, 
-                    "destOverride": ["http", "tls"]
-                }
+                "settings": {"clients": [{"id": str(uuid.uuid4()), "alterId": 0}], "disableInsecureEncryption": False},
+                "streamSettings": {"network": "tcp", "security": "none"},
+                "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
             }
         else: 
             self.d = data.copy()
         
-        # 处理 settings 字符串转字典（兼容性处理）
         if isinstance(self.d.get('settings'), str): 
             try: self.d['settings'] = json.loads(self.d['settings'])
             except: self.d['settings'] = {}
@@ -468,7 +527,6 @@ class InboundEditor:
                     ui.input('密码', value=pwd).classes('flex-1').on_value_change(lambda e: s['accounts'][0].update({'pass': e.value}))
 
     async def save(self, dlg):
-        # 1. 获取基本表单数据
         self.d['remark'] = self.rem.value
         self.d['enable'] = self.ena.value
         try:
@@ -478,7 +536,6 @@ class InboundEditor:
         except: safe_notify("请输入有效端口", "negative"); return
         self.d['protocol'] = self.pro.value
         
-        # 2. 补全必要字段结构
         if 'streamSettings' not in self.d: self.d['streamSettings'] = {}
         if 'sniffing' not in self.d: 
             self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
@@ -486,58 +543,41 @@ class InboundEditor:
         self.d['streamSettings']['network'] = self.net.value
         self.d['streamSettings']['security'] = self.sec.value
         
-        # [VIP通道] 独立同步线程
         def _do_save_sync():
             try:
-                # === 准备工作 ===
                 session = requests.Session()
                 session.verify = False 
                 session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
-                
-                # [关键修复]：强力清洗 URL，去除换行符、回车符和空格，防止 UnknownProtocol 错误
                 raw_base = str(self.mgr.original_url).strip()
-                
-                # 处理基础 URL 列表 (同时生成 http 和 https 备选)
                 base_list = []
                 if '://' not in raw_base:
                     base_list.append(f"http://{raw_base}")
                     base_list.append(f"https://{raw_base}")
                 else:
-                    # 即使有协议头，也要清理掉末尾的斜杠
                     base_list.append(raw_base.rstrip('/'))
-                    # 如果是 http，额外尝试 https（反之亦然，为了健壮性）
                     if raw_base.startswith('http://'):
                         base_list.append(raw_base.replace('http://', 'https://'))
 
-                # === 第一步：智能登录 ===
                 login_paths = ['/login', '/xui/login', '/panel/login', '/3x-ui/login']
                 if self.mgr.api_prefix:
                     clean_prefix = self.mgr.api_prefix.strip().rstrip('/')
                     if clean_prefix: login_paths.insert(0, f"{clean_prefix}/login")
 
                 success_login_url = None
-                print(f"🚀 [VIP登录] 开始尝试登录 ({len(base_list)} 个基地址)...", flush=True)
                 
                 for b_url in base_list:
                     if success_login_url: break
                     for path in login_paths:
                         target_login_url = f"{b_url}{path}"
                         try:
-                            # print(f"   Trying: {target_login_url} ...", flush=True)
                             r = session.post(target_login_url, data={'username': self.mgr.username, 'password': self.mgr.password}, timeout=5)
-                            
                             if r.status_code == 200 and r.json().get('success'):
-                                print(f"✅ [VIP登录] 成功: {target_login_url}", flush=True)
                                 success_login_url = target_login_url
                                 break
-                        except Exception as e:
-                            # 捕获并忽略连接错误，继续尝试下一个
-                            pass
+                        except Exception as e: pass
 
-                if not success_login_url:
-                    return False, "VIP通道：无法连接到服务器，请检查 URL 是否正确或防火墙设置"
+                if not success_login_url: return False, "VIP通道：无法连接到服务器"
 
-                # === 第二步：数据序列化 (防止 JSON Unmarshal 错误) ===
                 submit_data = self.d.copy()
                 if isinstance(submit_data.get('settings'), dict):
                     submit_data['settings'] = json.dumps(submit_data['settings'], ensure_ascii=False)
@@ -546,65 +586,48 @@ class InboundEditor:
                 if isinstance(submit_data.get('sniffing'), dict):
                     submit_data['sniffing'] = json.dumps(submit_data['sniffing'], ensure_ascii=False)
 
-                # === 第三步：提交数据 ===
                 action = 'update/' + str(self.d['id']) if self.is_edit else 'add'
                 base_root_url = success_login_url.rsplit('/login', 1)[0]
                 
-                save_candidates = []
-                save_candidates.append(f"{base_root_url}/inbound/{action}")
-                save_candidates.append(f"{base_root_url}/xui/inbound/{action}")
+                save_candidates = [f"{base_root_url}/inbound/{action}", f"{base_root_url}/xui/inbound/{action}"]
                 
                 final_response = None
                 for save_url in dict.fromkeys(save_candidates): 
-                    print(f"🔵 [VIP保存] 提交至: {save_url}", flush=True)
                     try:
                         r = session.post(save_url, json=submit_data, timeout=8)
                         if r.status_code != 404:
                             final_response = r
                             break
-                    except Exception as e:
-                        print(f"❌ [VIP保存] 网络错误: {e}", flush=True)
-                        continue
+                    except Exception as e: continue
                 
                 if final_response:
                     try:
                         resp = final_response.json()
-                        print(f"🟢 [VIP响应] {resp}", flush=True)
                         return (True, resp.get('msg')) if resp.get('success') else (False, resp.get('msg'))
                     except: return False, f"响应解析失败 (状态码 {final_response.status_code})"
-                else:
-                    return False, "保存失败：未找到正确的 API 路径 (404)"
+                else: return False, "保存失败：未找到正确的 API 路径 (404)"
 
-            except Exception as e:
-                return False, f"系统异常: {str(e)}"
+            except Exception as e: return False, f"系统异常: {str(e)}"
 
-        # 执行并处理结果
         success, msg = await run.io_bound(_do_save_sync)
-        
         if success: 
             safe_notify("✅ 保存成功", "positive")
             dlg.close()
             if self.cb:
                 res = self.cb()
-                if asyncio.iscoroutine(res):
-                    await res
-        else: 
-            safe_notify(f"❌ 失败: {msg}", "negative", timeout=6000)
+                if asyncio.iscoroutine(res): await res
+        else: safe_notify(f"❌ 失败: {msg}", "negative", timeout=6000)
 
 async def open_inbound_dialog(mgr, data, cb):
     with ui.dialog() as d: InboundEditor(mgr, data, cb).ui(d); d.open()
 
 async def delete_inbound(mgr, id, cb):
-    # 定义增强版同步删除逻辑
     def _do_delete_sync():
         try:
             session = requests.Session()
             session.verify = False
             session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
-            
-            # [关键修复]：强力清洗 URL
             raw_base = str(mgr.original_url).strip()
-            
             base_list = []
             if '://' not in raw_base:
                 base_list.append(f"http://{raw_base}")
@@ -614,7 +637,6 @@ async def delete_inbound(mgr, id, cb):
                 if raw_base.startswith('http://'):
                     base_list.append(raw_base.replace('http://', 'https://'))
             
-            # 1. 登录
             login_paths = ['/login', '/xui/login', '/panel/login']
             if mgr.api_prefix:
                 clean_prefix = mgr.api_prefix.strip().rstrip('/')
@@ -634,18 +656,13 @@ async def delete_inbound(mgr, id, cb):
             
             if not success_login_url: return False, "无法连接或登录失败"
 
-            # 2. 尝试删除
             action = f"del/{id}"
             base_root = success_login_url.rsplit('/login', 1)[0]
             
-            candidates = []
-            candidates.append(f"{base_root}/inbound/{action}")
-            candidates.append(f"{base_root}/xui/inbound/{action}")
-            candidates.append(f"{base_root}/panel/inbound/{action}")
+            candidates = [f"{base_root}/inbound/{action}", f"{base_root}/xui/inbound/{action}", f"{base_root}/panel/inbound/{action}"]
 
             final_response = None
             for del_url in dict.fromkeys(candidates):
-                print(f"🔵 [删除尝试] {del_url}", flush=True)
                 try:
                     r = session.post(del_url, json={}, timeout=5)
                     if r.status_code != 404:
@@ -659,22 +676,17 @@ async def delete_inbound(mgr, id, cb):
                     if resp.get('success'): return True, resp.get('msg')
                     else: return False, resp.get('msg')
                 except: return False, f"响应解析失败: {final_response.text[:30]}"
-            else:
-                return False, "删除失败：API 路径未找到 (404)"
+            else: return False, "删除失败：API 路径未找到 (404)"
 
-        except Exception as e:
-            return False, f"异常: {str(e)}"
+        except Exception as e: return False, f"异常: {str(e)}"
 
     success, msg = await run.io_bound(_do_delete_sync)
-
     if success:
         safe_notify(f"✅ 删除成功", "positive")
         if cb:
             res = cb()
-            if asyncio.iscoroutine(res):
-                await res
-    else:
-        safe_notify(f"❌ 删除失败: {msg}", "negative")
+            if asyncio.iscoroutine(res): await res
+    else: safe_notify(f"❌ 删除失败: {msg}", "negative")
 
 class SubEditor:
     def __init__(self, data=None):
@@ -814,23 +826,17 @@ def open_create_group_dialog():
     d.open()
 
 async def open_data_mgmt_dialog():
-    # 修复：增加 max-h-[90vh] 限制高度，增加 overflow-hidden 防止外层溢出
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         with ui.tabs().classes('w-full bg-gray-50 flex-shrink-0') as tabs:
             tab_export = ui.tab('导出')
             tab_import = ui.tab('导入')
-        
-        # 修复：内容区域增加 overflow-y-auto 允许滚动
         with ui.tab_panels(tabs, value=tab_export).classes('w-full p-6 overflow-y-auto flex-grow'):
-            # 导出页
             with ui.tab_panel(tab_export).classes('flex flex-col gap-4'):
                 full_backup = {"version": "2.0", "servers": SERVERS_CACHE, "cache": NODES_DATA}
                 json_str = json.dumps(full_backup, indent=2, ensure_ascii=False)
                 ui.textarea('备份内容', value=json_str).props('readonly').classes('w-full h-48 font-mono text-xs')
                 ui.button('复制到剪贴板', icon='content_copy', on_click=lambda: safe_copy_to_clipboard(json_str)).classes('w-full bg-blue-600 text-white')
                 ui.button('下载 .json', icon='download', on_click=lambda: ui.download(json_str.encode('utf-8'), 'xui_backup.json')).classes('w-full bg-green-600 text-white')
-        
-            # 导入页
             with ui.tab_panel(tab_import).classes('flex flex-col gap-4 items-stretch'):
                 ui.label('方式一：粘贴 JSON 内容').classes('font-bold')
                 import_text = ui.textarea(placeholder='在此粘贴备份 JSON...').classes('w-full h-32 font-mono text-xs')
@@ -851,10 +857,7 @@ async def open_data_mgmt_dialog():
                     except Exception as e: safe_notify(f"JSON 格式错误: {e}", 'negative')
                 
                 ui.button('恢复数据', icon='restore', on_click=process_json_import).classes('w-full bg-green-600 text-white h-12')
-                
                 ui.separator().classes('my-2')
-                
-                # 方式二弹窗逻辑
                 async def open_url_import_sub_dialog():
                     with ui.dialog() as sub_d, ui.card().classes('w-full max-w-md flex flex-col gap-4 p-6'):
                         ui.label('批量添加 URL').classes('text-lg font-bold')
@@ -879,7 +882,6 @@ async def open_data_mgmt_dialog():
                             else: safe_notify("没有添加新服务器", 'warning')
                         ui.button('确认添加', on_click=run_url_import).classes('w-full bg-blue-600 text-white')
                     sub_d.open()
-                
                 ui.button('方式二：批量 URL 导入', on_click=open_url_import_sub_dialog).props('outline').classes('w-full text-blue-600 h-12')
     d.open()
 
@@ -996,7 +998,6 @@ async def render_aggregated_view(server_list, force_refresh=False):
         list_container.clear()
         
         with list_container:
-            # [修改] 表头顺序调整
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(TABLE_COLS_CSS):
                 ui.label('服务器').classes('text-left pl-2')
                 ui.label('备注名称').classes('text-left pl-2')
@@ -1018,21 +1019,19 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 SERVER_UI_MAP[srv['url']] = row_wrapper
                 with row_wrapper:
                     if not res:
-                        # 错误状态行也需要调整列数以匹配 Grid
                         with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-red-50 px-2 items-center').style(TABLE_COLS_CSS):
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                             ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2')
                             ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                            ui.label('-').classes('w-full text-center') # 流量占位
-                            ui.label('-').classes('w-full text-center') # 协议占位
-                            ui.label('-').classes('w-full text-center') # 端口占位
+                            ui.label('-').classes('w-full text-center')
+                            ui.label('-').classes('w-full text-center')
+                            ui.label('-').classes('w-full text-center')
                             with ui.element('div').classes('flex justify-center w-full'): ui.icon('error', color='red').props('size=xs')
                             with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=grey')
                         continue
 
                     for n in res:
                         try:
-                            # [修改] 计算流量
                             traffic = n.get('up', 0) + n.get('down', 0)
                             traffic_str = format_bytes(traffic)
 
@@ -1040,7 +1039,6 @@ async def render_aggregated_view(server_list, force_refresh=False):
                                 ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                                 ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
                                 ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                                # 新增流量列
                                 ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
                                 ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                                 ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
@@ -1113,7 +1111,7 @@ async def load_dashboard_stats():
 @ui.refreshable
 def render_sidebar_content():
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('X-UI 面板').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('X-UI Manager Pro').classes('text-xl font-bold mb-4 text-slate-800')
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
 
@@ -1146,20 +1144,112 @@ def render_sidebar_content():
     with ui.column().classes('w-full p-2 border-t mt-auto'):
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
 
+# ================== 登录与 MFA 逻辑 ==================
 @ui.page('/login')
 def login_page():
-    def try_login():
-        if username.value == ADMIN_USER and password.value == ADMIN_PASS:
-            app.storage.user['authenticated'] = True
-            ui.navigate.to('/') 
-        else:
-            ui.notify('账号或密码错误', color='negative')
+    # 容器：用于切换登录步骤 (账号密码 -> MFA)
+    container = ui.card().classes('absolute-center w-full max-w-sm p-8 shadow-2xl rounded-xl bg-white')
 
-    with ui.card().classes('absolute-center w-80 p-6'):
-        ui.label('请登录').classes('text-xl font-bold mb-4 w-full text-center')
-        username = ui.input('账号').classes('w-full mb-2')
-        password = ui.input('密码', password=True).classes('w-full mb-4').on('keydown.enter', try_login)
-        ui.button('登录', on_click=try_login).classes('w-full')
+    # --- 步骤 1: 账号密码验证 ---
+    def render_step1():
+        container.clear()
+        with container:
+            ui.label('X-UI Manager').classes('text-2xl font-extrabold mb-2 w-full text-center text-slate-800')
+            ui.label('请登录以继续').classes('text-sm text-gray-400 mb-6 w-full text-center')
+            
+            username = ui.input('账号').props('outlined dense').classes('w-full mb-3')
+            password = ui.input('密码', password=True).props('outlined dense').classes('w-full mb-6').on('keydown.enter', lambda: check_cred())
+            
+            def check_cred():
+                if username.value == ADMIN_USER and password.value == ADMIN_PASS:
+                    # 账号密码正确，进入 MFA 流程
+                    check_mfa()
+                else:
+                    ui.notify('账号或密码错误', color='negative', position='top')
+
+            ui.button('下一步', on_click=check_cred).classes('w-full bg-slate-900 text-white shadow-lg h-10')
+
+    # --- 步骤 2: MFA 验证或设置 ---
+    def check_mfa():
+        secret = ADMIN_CONFIG.get('mfa_secret')
+        if not secret:
+            # 如果没有密钥，进入初始化流程 (生成新密钥)
+            new_secret = pyotp.random_base32()
+            render_setup(new_secret)
+        else:
+            # 已有密钥，进入验证流程
+            render_verify(secret)
+
+    # 渲染 MFA 设置页面 (首次登录)
+    def render_setup(secret):
+        container.clear()
+        
+        # 生成二维码图片 Base64
+        totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=ADMIN_USER, issuer_name="X-UI Manager")
+        qr = qrcode.make(totp_uri)
+        img_buffer = io.BytesIO()
+        qr.save(img_buffer, format='PNG')
+        img_b64 = base64.b64encode(img_buffer.getvalue()).decode('utf-8')
+
+        with container:
+            ui.label('绑定二次验证 (MFA)').classes('text-xl font-bold mb-2 w-full text-center')
+            ui.label('请使用 Authenticator App 扫描').classes('text-xs text-gray-400 mb-2 w-full text-center')
+            
+            with ui.row().classes('w-full justify-center mb-2'):
+                ui.image(f'data:image/png;base64,{img_b64}').style('width: 180px; height: 180px')
+            
+            # 点击复制密钥功能
+            with ui.row().classes('w-full justify-center items-center gap-1 mb-4 bg-gray-100 p-1 rounded cursor-pointer').on('click', lambda: safe_copy_to_clipboard(secret)):
+                ui.label(secret).classes('text-xs font-mono text-gray-600')
+                ui.icon('content_copy').classes('text-gray-400 text-xs')
+
+            code = ui.input('验证码', placeholder='6位数字').props('outlined dense input-class=text-center').classes('w-full mb-4')
+            
+            async def confirm():
+                totp = pyotp.TOTP(secret)
+                if totp.verify(code.value):
+                    # 验证成功，保存密钥
+                    ADMIN_CONFIG['mfa_secret'] = secret
+                    await save_admin_config()
+                    ui.notify('绑定成功', type='positive')
+                    finish()
+                else:
+                    ui.notify('验证码错误', type='negative')
+
+            ui.button('确认绑定', on_click=confirm).classes('w-full bg-green-600 text-white h-10')
+
+    # 渲染 MFA 验证页面 (日常登录)
+    def render_verify(secret):
+        container.clear()
+        with container:
+            ui.label('安全验证').classes('text-xl font-bold mb-6 w-full text-center')
+            
+            with ui.column().classes('w-full items-center mb-6'):
+                ui.icon('verified_user').classes('text-6xl text-blue-600 mb-2')
+                ui.label('请输入 Authenticator 动态码').classes('text-xs text-gray-400')
+
+            code = ui.input(placeholder='------').props('outlined input-class=text-center text-xl tracking-widest').classes('w-full mb-6')
+            code.on('keydown.enter', lambda: verify())
+            
+            # 自动聚焦输入框 (JS)
+            ui.timer(0.1, lambda: ui.run_javascript(f'document.querySelector(".q-field__native").focus()'), once=True)
+
+            def verify():
+                totp = pyotp.TOTP(secret)
+                if totp.verify(code.value):
+                    finish()
+                else:
+                    ui.notify('无效的验证码', type='negative', position='top')
+                    code.value = ''
+
+            ui.button('验证登录', on_click=verify).classes('w-full bg-slate-900 text-white h-10')
+            ui.button('返回', on_click=render_step1).props('flat dense').classes('w-full mt-2 text-gray-400 text-xs')
+
+    def finish():
+        app.storage.user['authenticated'] = True
+        ui.navigate.to('/')
+
+    render_step1()
 
 @ui.page('/')
 def main_page():
@@ -1168,7 +1258,14 @@ def main_page():
 
     with ui.header().classes('bg-slate-900 text-white h-14'):
         with ui.row().classes('w-full items-center justify-between'):
-            ui.label('X-UI Manager Pro').classes('text-lg font-bold ml-4')
+            with ui.row().classes('items-center'):
+                ui.label('X-UI Manager Pro').classes('text-lg font-bold ml-4 mr-4')
+                
+                # --- ✨✨✨ 新增：右上角复制密钥按钮 ✨✨✨ ---
+                with ui.button(icon='vpn_key', on_click=lambda: safe_copy_to_clipboard(AUTO_REGISTER_SECRET)).props('flat dense round').tooltip('点击复制通讯密钥'):
+                    ui.badge('Key', color='red').props('floating')
+                # ---------------------------------------------
+
             ui.button(icon='logout', on_click=lambda: (app.storage.user.clear(), ui.navigate.to('/login'))).props('flat round dense')
 
     global content_container
