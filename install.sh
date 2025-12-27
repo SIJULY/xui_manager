@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-UI Manager Pro 一键安装/管理脚本 (支持 MFA & 随机密钥)
+# X-UI Manager Pro 一键安装/管理脚本 (稳定版 - 强提醒模式)
 # GitHub: https://github.com/SIJULY/xui_manager
 # ==============================================================================
 
@@ -97,7 +97,7 @@ deploy_base() {
 
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
-    # [新增] 确保 admin_config.json 存在
+    # 确保 admin_config.json 存在
     if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
 }
 
@@ -106,7 +106,7 @@ generate_compose() {
     local PORT=$2
     local USER=$3
     local PASS=$4
-    local SECRET=$5  # [新增] 接收密钥参数
+    local SECRET=$5 
 
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
@@ -176,7 +176,7 @@ install_panel() {
     read -p "请设置面板登录密码 [admin]: " admin_pass
     admin_pass=${admin_pass:-admin}
     
-    # --- [新增] 生成/设置通讯密钥 ---
+    # --- 生成/设置通讯密钥 ---
     rand_key=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
     echo "------------------------------------------------"
     echo -e "${YELLOW}配置自动注册通讯密钥 (用于 OCI 开机面板对接)${PLAIN}"
@@ -185,9 +185,16 @@ install_panel() {
     secret_key=${input_key:-$rand_key}
     echo "------------------------------------------------"
 
+    # --- ✨✨✨ 重点警告 ✨✨✨ ---
+    echo -e "${YELLOW}================================================================${PLAIN}"
+    echo -e "${RED}⚠️  特别提示 / IMPORTANT WARNING  ⚠️${PLAIN}"
+    echo -e "${YELLOW}如果您的VPS已经部署了其他网站（例如使用了 Nginx, NPM, Caddy 等），${PLAIN}"
+    echo -e "${RED}请务必选择 [1] IP + 端口模式${PLAIN}${YELLOW}，否则会导致 80/443 端口冲突！${PLAIN}"
+    echo -e "${YELLOW}================================================================${PLAIN}"
+    
     echo "请选择访问方式："
-    echo "  1) IP + 端口访问"
-    echo "  2) 域名访问 (自动HTTPS)"
+    echo "  1) IP + 端口访问 (安全，适合已有 Web 服务的环境)"
+    echo "  2) 域名访问 (自动申请 HTTPS，适合纯净环境)"
     read -p "请输入选项 [2]: " net_choice
     net_choice=${net_choice:-2}
 
@@ -195,7 +202,6 @@ install_panel() {
         read -p "请输入开放端口 [8081]: " port
         port=${port:-8081}
         
-        # [修改] 传递 secret_key
         generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key"
         
         print_info "正在启动容器..."
@@ -210,7 +216,6 @@ install_panel() {
         read -p "请输入内部运行端口 [8081]: " port
         port=${port:-8081}
 
-        # [修改] 传递 secret_key
         generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key"
         
         print_info "正在启动容器..."
@@ -232,15 +237,28 @@ install_panel() {
 }
 
 update_panel() {
-    if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录。"; fi
-    print_info "正在更新代码..."
+    if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录，请先执行安装。"; fi
+    
+    # 检查是否存在配置文件，防止误操作
+    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then
+        print_error "配置文件 docker-compose.yml 丢失，无法更新。"
+    fi
+
+    echo -e "${BLUE}=================================================${PLAIN}"
+    print_info "检测到现有配置，正在执行安全更新..."
+    print_info "此操作将保留您原有的访问方式（IP或域名），不修改配置。"
+    echo -e "${BLUE}=================================================${PLAIN}"
+
     cd ${INSTALL_DIR}
     docker compose down
+    
     # 更新代码
+    print_info "正在拉取最新代码..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
+    
     print_info "正在重建容器..."
     docker compose up -d --build
-    print_success "更新完成！"
+    print_success "更新完成！服务已重启。"
 }
 
 uninstall_panel() {
