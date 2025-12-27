@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-UI Manager Pro 一键安装/管理脚本 (修复下载缺失问题)
+# X-UI Manager Pro 一键安装/管理脚本 (支持 MFA & 随机密钥)
 # GitHub: https://github.com/SIJULY/xui_manager
 # ==============================================================================
 
@@ -88,17 +88,17 @@ deploy_base() {
     curl -sS -O ${REPO_URL}/Dockerfile
     curl -sS -O ${REPO_URL}/requirements.txt
 
-    # [关键修复] 必须确保这行代码存在且未被注释！
     print_info "正在下载主程序..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
 
-    # 检查文件是否真的下载成功
     if [ ! -f "app/main.py" ]; then
         print_error "主程序下载失败！请检查 GitHub 仓库中是否包含 app/main.py 文件。"
     fi
 
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
+    # [新增] 确保 admin_config.json 存在
+    if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
 }
 
 generate_compose() {
@@ -106,6 +106,7 @@ generate_compose() {
     local PORT=$2
     local USER=$3
     local PASS=$4
+    local SECRET=$5  # [新增] 接收密钥参数
 
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
@@ -120,10 +121,12 @@ services:
       - ./data/servers.json:/app/data/servers.json
       - ./data/subscriptions.json:/app/data/subscriptions.json
       - ./data/nodes_cache.json:/app/data/nodes_cache.json
+      - ./data/admin_config.json:/app/data/admin_config.json
     environment:
       - TZ=Asia/Shanghai
       - XUI_USERNAME=${USER}
       - XUI_PASSWORD=${PASS}
+      - XUI_SECRET_KEY=${SECRET}
 EOF
 }
 
@@ -172,6 +175,14 @@ install_panel() {
     admin_user=${admin_user:-admin}
     read -p "请设置面板登录密码 [admin]: " admin_pass
     admin_pass=${admin_pass:-admin}
+    
+    # --- [新增] 生成/设置通讯密钥 ---
+    rand_key=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
+    echo "------------------------------------------------"
+    echo -e "${YELLOW}配置自动注册通讯密钥 (用于 OCI 开机面板对接)${PLAIN}"
+    echo -e "系统已生成随机密钥: ${GREEN}${rand_key}${PLAIN}"
+    read -p "按回车使用此密钥，或输入自定义密钥: " input_key
+    secret_key=${input_key:-$rand_key}
     echo "------------------------------------------------"
 
     echo "请选择访问方式："
@@ -184,7 +195,8 @@ install_panel() {
         read -p "请输入开放端口 [8081]: " port
         port=${port:-8081}
         
-        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass"
+        # [修改] 传递 secret_key
+        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key"
         
         print_info "正在启动容器..."
         docker compose up -d --build
@@ -192,15 +204,14 @@ install_panel() {
         ip_addr=$(curl -s ifconfig.me)
         print_success "安装成功！"
         echo -e "登录地址: http://${ip_addr}:${port}"
-        echo -e "账号: ${admin_user}"
-        echo -e "密码: ${admin_pass}"
     else
         read -p "请输入您的域名: " domain
         if [ -z "$domain" ]; then print_error "域名不能为空"; fi
         read -p "请输入内部运行端口 [8081]: " port
         port=${port:-8081}
 
-        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass"
+        # [修改] 传递 secret_key
+        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key"
         
         print_info "正在启动容器..."
         docker compose up -d --build
@@ -210,9 +221,14 @@ install_panel() {
 
         print_success "安装成功！"
         echo -e "登录地址: https://${domain}"
-        echo -e "账号: ${admin_user}"
-        echo -e "密码: ${admin_pass}"
     fi
+    
+    echo -e "账号: ${BLUE}${admin_user}${PLAIN}"
+    echo -e "密码: ${BLUE}${admin_pass}${PLAIN}"
+    echo -e "------------------------------------------------"
+    echo -e "${RED}⚠️ 重要：请复制下方密钥到 OCI 开机面板脚本中 ⚠️${PLAIN}"
+    echo -e "通讯密钥: ${GREEN}${secret_key}${PLAIN}"
+    echo -e "------------------------------------------------"
 }
 
 update_panel() {
