@@ -56,11 +56,50 @@ SERVERS_CACHE = []
 SUBS_CACHE = []
 NODES_DATA = {}
 ADMIN_CONFIG = {}
+# ================= 智能分组配置 (修复版) =================
+# 移除了容易与单词冲突的2字母缩写 (如 CL 冲突 Oracle)
+AUTO_COUNTRY_MAP = {
+    '🇭🇰': '🇭🇰 香港', 'HK': '🇭🇰 香港', '香港': '🇭🇰 香港',
+    '🇹🇼': '🇹🇼 台湾', 'TW': '🇹🇼 台湾', '台湾': '🇹🇼 台湾',
+    '🇯🇵': '🇯🇵 日本', 'JP': '🇯🇵 日本', '日本': '🇯🇵 日本',
+    '🇸🇬': '🇸🇬 新加坡', 'SG': '🇸🇬 新加坡', '新加坡': '🇸🇬 新加坡',
+    '🇺🇸': '🇺🇸 美国', '美国': '🇺🇸 美国', # 移除 US 防止冲突
+    '🇰🇷': '🇰🇷 韩国', 'KR': '🇰🇷 韩国', '首尔': '🇰🇷 韩国', '春川': '🇰🇷 韩国',
+    '🇬🇧': '🇬🇧 英国', 'UK': '🇬🇧 英国', '伦敦': '🇬🇧 英国',
+    '🇩🇪': '🇩🇪 德国', 'DE': '🇩🇪 德国', '法兰克福': '🇩🇪 德国',
+    '🇫🇷': '🇫🇷 法国', 'FR': '🇫🇷 法国', '巴黎': '🇫🇷 法国',
+    '🇦🇺': '🇦🇺 澳大利亚', 'AU': '🇦🇺 澳大利亚', '悉尼': '🇦🇺 澳大利亚',
+    '🇨🇦': '🇨🇦 加拿大', '加拿大': '🇨🇦 加拿大', # 移除 CA
+    '🇮🇳': '🇮🇳 印度', 'IN': '🇮🇳 印度', '海得拉巴': '🇮🇳 印度',
+    '🇮🇩': '🇮🇩 印尼', 'ID': '🇮🇩 印尼', '巴淡': '🇮🇩 印尼',
+    '🇧🇷': '🇧🇷 巴西', 'BR': '🇧🇷 巴西',
+    '🇳🇱': '🇳🇱 荷兰', 'NL': '🇳🇱 荷兰', '阿姆斯特丹': '🇳🇱 荷兰',
+    '🇸🇪': '🇸🇪 瑞典', 'SE': '🇸🇪 瑞典', '斯德哥尔摩': '🇸🇪 瑞典',
+    '🇨🇭': '🇨🇭 瑞士', 'CH': '🇨🇭 瑞士', '苏黎世': '🇨🇭 瑞士',
+    '🇦🇪': '🇦🇪 阿联酋', '迪拜': '🇦🇪 阿联酋', '阿布扎比': '🇦🇪 阿联酋',
+    '🇹🇷': '🇹🇷 土耳其', 'TR': '🇹🇷 土耳其',
+    '🇮🇹': '🇮🇹 意大利', 'IT': '🇮🇹 意大利', '米兰': '🇮🇹 意大利',
+    '🇨🇱': '🇨🇱 智利', '智利': '🇨🇱 智利', # 移除 CL (冲突 Oracle)
+    '🇪🇸': '🇪🇸 西班牙', 'ES': '🇪🇸 西班牙', '马德里': '🇪🇸 西班牙',
+    '🇲🇽': '🇲🇽 墨西哥', 'MX': '🇲🇽 墨西哥',
+    '🇮🇱': '🇮🇱 以色列', 'IL': '🇮🇱 以色列',
+    '🇷🇺': '🇷🇺 俄罗斯', 'RU': '🇷🇺 俄罗斯',
+}
+
+def detect_country_group(name):
+    name_upper = name.upper()
+    for key, val in AUTO_COUNTRY_MAP.items():
+        if key in name_upper:
+            return val
+    return '🏳️ 其他地区'
 
 FILE_LOCK = asyncio.Lock()
 EXPANDED_GROUPS = set()
 SERVER_UI_MAP = {}
 content_container = None
+
+
+
 
 def init_data():
     if not os.path.exists('data'): os.makedirs('data')
@@ -881,38 +920,144 @@ async def open_edit_server_dialog(idx):
     d.open()
 
 def open_group_mgmt_dialog(group_name):
-    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-[400px] flex flex-col p-4 gap-4 items-stretch'):
-        with ui.element('div').classes('flex justify-between items-center w-full'):
-            ui.label(f'管理: {group_name}').classes('text-lg font-bold')
+    # 只用于管理自定义分组 (Tags)
+    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-[500px] flex flex-col p-0 gap-0 overflow-hidden'):
+        with ui.row().classes('w-full justify-between items-center p-4 bg-gray-50 border-b'):
+            ui.label(f'管理分组: {group_name}').classes('text-lg font-bold')
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
-        new_name = ui.input('重命名组', value=group_name).classes('w-full')
-        ui.label('包含的服务器:').classes('text-sm text-gray-500 mt-2')
-        sel_urls = {s['url'] for s in SERVERS_CACHE if s.get('group')==group_name}
-        with ui.column().classes('w-full flex-grow overflow-y-auto border rounded p-2 gap-2 h-[50vh]'):
+
+        with ui.column().classes('w-full p-4 gap-4'):
+            new_name_inp = ui.input('分组名称', value=group_name).classes('w-full').props('outlined')
+            ui.label('包含的服务器 (多选):').classes('text-sm font-bold text-gray-500 mt-2')
+            
+            scroll_area = ui.column().classes('w-full flex-grow overflow-y-auto border rounded p-2 gap-1 h-[40vh]')
+            
+            # 这里的逻辑纯粹是：Tag 有没有打上
+            current_sel_urls = set()
             for s in SERVERS_CACHE:
-                def toggle(e, u=s.get('url')): 
-                    if e.value: sel_urls.add(u)
-                    else: sel_urls.discard(u)
-                ui.checkbox(s.get('name', '未命名'), value=(s.get('url') in sel_urls), on_change=toggle).classes('w-full text-sm')
-        async def save():
-            for s in SERVERS_CACHE:
-                if s['url'] in sel_urls: s['group'] = new_name.value
-                elif s.get('group') == group_name: s['group'] = '默认分组'
-            await save_servers(); d.close(); render_sidebar_content.refresh(); await refresh_content('GROUP', new_name.value)
-        ui.button('保存修改', on_click=save).classes('w-full bg-primary text-white h-10')
+                if group_name in s.get('tags', []):
+                    current_sel_urls.add(s['url'])
+            
+            # 列表显示时，加上自动计算的国家前缀，方便识别
+            sorted_servers = sorted(SERVERS_CACHE, key=lambda x: x['name'])
+            
+            with scroll_area:
+                for s in sorted_servers:
+                    # 显示：[🇬🇧 英国] 微软云...
+                    country = detect_country_group(s['name'])
+                    label_text = f"[{country}] {s['name']}"
+                    
+                    def toggle(e, u=s['url']): 
+                        if e.value: current_sel_urls.add(u)
+                        else: current_sel_urls.discard(u)
+                    ui.checkbox(label_text, value=(s['url'] in current_sel_urls), on_change=toggle).classes('w-full text-sm dense').style('margin-left: 0;')
+
+        with ui.row().classes('w-full p-4 border-t gap-4 justify-end'):
+            async def delete_this_group():
+                with ui.dialog() as confirm_d, ui.card():
+                    ui.label(f'删除 "{group_name}" ?').classes('text-lg font-bold')
+                    with ui.row().classes('w-full justify-end mt-4'):
+                        ui.button('取消', on_click=confirm_d.close).props('flat')
+                        async def real_delete():
+                            if 'custom_groups' in ADMIN_CONFIG:
+                                if group_name in ADMIN_CONFIG['custom_groups']:
+                                    ADMIN_CONFIG['custom_groups'].remove(group_name)
+                                await save_admin_config()
+                            for s in SERVERS_CACHE:
+                                if group_name in s.get('tags', []):
+                                    s['tags'].remove(group_name)
+                            await save_servers()
+                            confirm_d.close(); d.close()
+                            render_sidebar_content.refresh()
+                            if content_container: content_container.clear() # 清空右侧
+                            safe_notify(f'分组已删除', 'positive')
+                        ui.button('确定', color='red', on_click=real_delete)
+                confirm_d.open()
+
+            ui.button('删除分组', on_click=delete_this_group, color='red').props('flat').classes('mr-auto')
+
+            async def save():
+                target_name = new_name_inp.value.strip()
+                if not target_name: return
+                
+                # 1. 更新配置列表
+                if group_name != target_name:
+                    if 'custom_groups' in ADMIN_CONFIG:
+                        if group_name in ADMIN_CONFIG['custom_groups']:
+                            idx = ADMIN_CONFIG['custom_groups'].index(group_name)
+                            ADMIN_CONFIG['custom_groups'][idx] = target_name
+                        else:
+                            ADMIN_CONFIG['custom_groups'].append(target_name)
+                    await save_admin_config()
+
+                # 2. 更新所有服务器的 Tag
+                for s in SERVERS_CACHE:
+                    if 'tags' not in s: s['tags'] = []
+                    
+                    if s['url'] in current_sel_urls:
+                        # 选中：确保有新 tag，移除旧 tag
+                        if target_name not in s['tags']: s['tags'].append(target_name)
+                        if group_name != target_name and group_name in s['tags']: s['tags'].remove(group_name)
+                    else:
+                        # 未选中：移除 tag
+                        if target_name in s['tags']: s['tags'].remove(target_name)
+                        if group_name in s['tags']: s['tags'].remove(group_name)
+
+                await save_servers()
+                d.close()
+                render_sidebar_content.refresh()
+                await refresh_content('TAG', target_name) # 刷新右侧视图
+                safe_notify('分组已保存', 'positive')
+
+            ui.button('保存修改', on_click=save).classes('bg-slate-900 text-white')
     d.open()
+
+# 辅助函数：获取所有唯一分组名（包括主分组、Tags和自定义空分组）
+def get_all_groups_set():
+    groups = set()
+    # 1. 现有服务器的主分组和Tags
+    for s in SERVERS_CACHE:
+        if s.get('group'): groups.add(s['group'])
+        if s.get('tags'): groups.update(s['tags'])
+    # 2. 预设的自定义分组
+    if 'custom_groups' in ADMIN_CONFIG:
+        groups.update(ADMIN_CONFIG['custom_groups'])
+    
+    # 3. 保证基本分组存在
+    groups.add('默认分组')
+    return groups
 
 def open_create_group_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
-        ui.label('新建分组').classes('text-lg font-bold mb-4')
-        name_input = ui.input('分组名称').classes('w-full')
-        server_select = ui.select({s['url']: s.get('name', '未命名') for s in SERVERS_CACHE}, label='选择服务器', multiple=True).classes('w-full').props('use-chips')
+        ui.label('新建自定义分组').classes('text-lg font-bold mb-2')
+        
+        # ✨ 修改点：只保留名称输入框，去掉了 server_select 下拉框
+        name_input = ui.input('分组名称', placeholder='例如: 微软云 / 生产环境').classes('w-full').props('outlined')
+        
         async def save_new_group():
-            if not name_input.value: return
-            for s in SERVERS_CACHE:
-                if s['url'] in (server_select.value or []): s['group'] = name_input.value
-            await save_servers(); d.close(); render_sidebar_content.refresh(); await refresh_content('GROUP', name_input.value)
-        ui.button('保存', on_click=save_new_group).classes('w-full bg-blue-600 text-white mt-4')
+            new_name = name_input.value.strip()
+            if not new_name:
+                safe_notify("分组名称不能为空", "warning")
+                return
+            
+            # 检查是否重名
+            existing_groups = get_all_groups_set()
+            if new_name in existing_groups:
+                safe_notify("该分组已存在", "warning")
+                return
+
+            # ✨ 修改点：保存到 ADMIN_CONFIG，而不是去修改服务器数据
+            if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
+            ADMIN_CONFIG['custom_groups'].append(new_name)
+            await save_admin_config()
+            
+            d.close()
+            render_sidebar_content.refresh()
+            safe_notify(f"已创建分组: {new_name}", "positive")
+
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+             ui.button('取消', on_click=d.close).props('flat color=grey')
+             ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
     d.open()
 
 async def open_data_mgmt_dialog():
@@ -996,40 +1141,47 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
     client = ui.context.client
     with client: show_loading(content_container)
     
+    targets = []
+    title = ""
+    is_group_view = False
+    
+    # A. 所有服务器
+    if scope == 'ALL':
+        targets = list(SERVERS_CACHE)
+        title = f"🌍 所有服务器 ({len(targets)})"
+    
+    # B. 自定义分组
+    elif scope == 'TAG':
+        targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
+        title = f"🏷️ 自定义分组: {data} ({len(targets)})"
+        is_group_view = True
+        
+    # C. 国家分组
+    elif scope == 'COUNTRY':
+        targets = [s for s in SERVERS_CACHE if detect_country_group(s.get('name', '')) == data]
+        title = f"🏳️ 区域: {data} ({len(targets)})"
+        is_group_view = True
+        
+    # D. 单个服务器
+    elif scope == 'SINGLE':
+        targets = [data]
+        title = f"🖥️ {data['name']}"
+
+    # 排序
+    if scope != 'SINGLE':
+        targets.sort(key=lambda x: x.get('name', '').lower())
+
     if force_refresh:
-        count = len(SERVERS_CACHE)
-        if scope == 'GROUP': count = len([s for s in SERVERS_CACHE if s.get('group', '默认分组') == data])
-        elif scope == 'SINGLE': count = 1
-        safe_notify(f'正在同步 {count} 个服务器 (并发: 15)...')
+        safe_notify(f'正在同步 {len(targets)} 个服务器...')
 
     async def _render():
         await asyncio.sleep(0.1)
-        targets = []
-        title = ""
-        is_group_view = False
-        
-        if scope == 'ALL': 
-            targets = list(SERVERS_CACHE)
-            # ✨✨✨ [修改] 所有节点视图：按名称排序 ✨✨✨
-            targets.sort(key=lambda x: str(x.get('name', '')).strip().lower())
-            title = f"🌍 所有节点 ({len(targets)})"
-            
-        elif scope == 'GROUP': 
-            targets = [s for s in SERVERS_CACHE if s.get('group', '默认分组') == data]
-            # ✨✨✨ [修改] 分组视图：按名称排序 ✨✨✨
-            targets.sort(key=lambda x: str(x.get('name', '')).strip().lower())
-            title = f"📁 分组: {data} ({len(targets)})"
-            is_group_view = True
-            
-        elif scope == 'SINGLE': 
-            targets = [data]
-            title = f"🖥️ {data['name']}"
-
         with client:
             content_container.clear()
             SERVER_UI_MAP.clear()
             
             with content_container:
+                # 顶部
                 with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
                     with ui.row().classes('items-center gap-4'):
                         ui.label(title).classes('text-2xl font-bold')
@@ -1037,10 +1189,14 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                             ui.button('复制订阅', icon='link', on_click=lambda g=data: copy_group_link(g)).props('outline dense size=sm').classes('text-blue-600')
                     ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
                 
-                if scope == 'SINGLE': await render_single_server_view(data, force_refresh)
-                else: await render_aggregated_view(targets, force_refresh)
-    asyncio.create_task(_render())
+                # 渲染内容
+                if scope == 'SINGLE': 
+                    await render_single_server_view(data, force_refresh)
+                else: 
+                    await render_aggregated_view(targets, force_refresh)
 
+    asyncio.create_task(_render())
+    
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf); list_container = ui.column().classes('w-full')
     with ui.row().classes('w-full justify-end mb-2'):
@@ -1211,44 +1367,88 @@ async def load_dashboard_stats():
 
 @ui.refreshable
 def render_sidebar_content():
+    # 1. 顶部区域
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('X-UI Manager').classes('text-xl font-bold mb-4 text-slate-800')
+        # 大按钮样式
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
 
+    # 2. 列表区域
     with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-1'):
-        ui.label('资源列表').classes('font-bold text-xs text-gray-400 mt-2 mb-1 px-2 uppercase')
-        with ui.row().classes('w-full gap-2 px-1 mb-2'):
+        
+        # 操作按钮
+        with ui.row().classes('w-full gap-2 px-1 mb-4'):
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes('flex-grow bg-blue-600 text-white text-xs')
             ui.button('添加服务器', icon='add', color='green', on_click=open_add_server_dialog).props('dense unelevated').classes('flex-grow text-xs')
-        ui.button('🌍 所有节点', icon='public', on_click=lambda: refresh_content('ALL')).props('flat align=left').classes('w-full font-bold mb-2')
+
+        # --- A. 全部节点 (修复点击) ---
+        all_count = len(SERVERS_CACHE)
+        # 注意：使用 lambda _ 忽略点击事件参数，防止报错
+        with ui.row().classes('w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer').on('click', lambda _: refresh_content('ALL')):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('dns', color='primary')
+                ui.label('所有服务器').classes('font-bold')
+            ui.badge(str(all_count), color='blue')
+
+        # --- B. 自定义分组 (Tags) ---
+        if 'custom_groups' in ADMIN_CONFIG and ADMIN_CONFIG['custom_groups']:
+            ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
+            for tag_group in ADMIN_CONFIG['custom_groups']:
+                tag_servers = [s for s in SERVERS_CACHE if tag_group in s.get('tags', [])]
+                
+                is_open = tag_group in EXPANDED_GROUPS
+                # ✨ 修复点：使用 'as exp' 获取对象
+                with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
+                    # ✨ 修复点：使用 exp.add_slot('header')
+                    with exp.add_slot('header'):
+                        with ui.row().classes('w-full items-center justify-between no-wrap'):
+                            # 组名 (点击只刷新右侧)
+                            ui.label(tag_group).classes('flex-grow font-bold truncate').on('click.stop', lambda _, g=tag_group: refresh_content('TAG', g))
+                            # 组管理按钮
+                            ui.button(icon='edit', on_click=lambda _, g=tag_group: open_group_mgmt_dialog(g)).props('flat dense round size=xs color=grey').on('click.stop')
+                            # 数量
+                            ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
+                    
+                    # 内容区
+                    with ui.column().classes('w-full gap-0 bg-gray-50'):
+                        if not tag_servers:
+                            ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
+                        for s in tag_servers:
+                            with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                                ui.label(s['name']).classes('text-sm truncate flex-grow')
+                                ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+
+        # --- C. 自动国家分组 (Auto) ---
+        ui.label('区域分组 (自动)').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
         
-        groups = {}
+        country_buckets = {}
         for s in SERVERS_CACHE:
-            g = s.get('group', '默认分组') or '默认分组'
-            groups.setdefault(g, []).append(s)
-
-        # --- ✨✨✨ 侧边栏排序逻辑 ✨✨✨ ---
-        sorted_group_keys = sorted(groups.keys()) # 1. 组名排序
-
-        for gname in sorted_group_keys:
-            gservers = groups[gname]
-            # 2. 组内节点名排序 (与右侧逻辑保持一致)
-            gservers.sort(key=lambda x: str(x.get('name', '')).strip().lower())
-
-            is_open = gname in EXPANDED_GROUPS
-            with ui.expansion('', icon='folder', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-class=hidden').on_value_change(lambda e, g=gname: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                with exp.add_slot('header'):
+            c_group = detect_country_group(s.get('name', ''))
+            if c_group not in country_buckets: country_buckets[c_group] = []
+            country_buckets[c_group].append(s)
+        
+        for c_name in sorted(country_buckets.keys()):
+            c_servers = country_buckets[c_name]
+            c_servers.sort(key=lambda x: x['name'])
+            
+            is_open = c_name in EXPANDED_GROUPS
+            # ✨ 修复点：使用 'as exp' 获取对象
+            with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
+                 # ✨ 修复点：使用 exp.add_slot('header')
+                 with exp.add_slot('header'):
                     with ui.row().classes('w-full items-center justify-between no-wrap'):
-                        ui.label(gname).classes('flex-grow cursor-pointer font-bold truncate').on('click', lambda g=gname: refresh_content('GROUP', g))
-                        ui.button(icon='edit', on_click=lambda g=gname: open_group_mgmt_dialog(g)).props('flat dense round size=xs color=grey').on('click.stop')
-                        ui.label(str(len(gservers))).classes('text-xs bg-gray-200 px-2 rounded-full')
-                with ui.column().classes('w-full gap-0'):
-                    for srv in gservers:
-                        with ui.row().classes('w-full justify-between p-2 pl-4 cursor-pointer hover:bg-blue-50 items-center border-t border-gray-100 no-wrap'):
-                            ui.label(srv['name']).classes('text-sm flex-grow truncate').on('click', lambda s=srv: refresh_content('SINGLE', s))
-                            ui.button(icon='edit', on_click=lambda idx=SERVERS_CACHE.index(srv): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey')
-    
+                        ui.label(c_name).classes('flex-grow font-bold truncate').on('click.stop', lambda _, g=c_name: refresh_content('COUNTRY', g))
+                        ui.badge(str(len(c_servers)), color='green')
+                 
+                 # 内容区
+                 with ui.column().classes('w-full gap-0 bg-gray-50'):
+                    for s in c_servers:
+                         with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                                ui.label(s['name']).classes('text-sm truncate flex-grow')
+                                ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+
+    # 3. 底部
     with ui.column().classes('w-full p-2 border-t mt-auto'):
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
         
