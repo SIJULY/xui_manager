@@ -406,6 +406,62 @@ def generate_detail_config(node, server_host):
         # logger.error(f"格式转换失败: {e}")
         return ""
 
+# ================= 新增：延迟测试核心逻辑 =================
+import subprocess
+import platform
+
+# 缓存延迟结果 { 'host:port': {'ping': 120, 'time': 12345678} }
+PING_CACHE = {}
+
+async def ping_host(host, port):
+    """
+    对指定 Host 进行 TCP Ping (更准确反映节点连通性)
+    如果 host 是域名，会先解析 IP；如果 ping 失败返回 -1
+    """
+    key = f"{host}:{port}"
+    
+    # 简单的 ICMP Ping 实现 (兼容 Linux/Windows)
+    # 注意：更严格的节点检测应该用 TCP Ping (连接端口)，这里为了通用性先用 ICMP
+    # 如果你的服务器是在 Docker 里，确保容器安装了 iputils-ping (apt update && apt install -iputils-ping)
+    
+    # 更好的方式：使用 asyncio 打开 TCP 连接测试握手时间
+    try:
+        start_time = asyncio.get_running_loop().time()
+        try:
+            # 尝试建立 TCP 连接 (超时 2秒)
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), 
+                timeout=2.0
+            )
+            writer.close()
+            await writer.wait_closed()
+            
+            end_time = asyncio.get_running_loop().time()
+            latency = int((end_time - start_time) * 1000) # 毫秒
+            PING_CACHE[key] = latency
+            return latency
+        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+            PING_CACHE[key] = -1
+            return -1
+    except:
+        return -1
+
+# 批量测试函数
+async def batch_ping_nodes(nodes, raw_host):
+    tasks = []
+    for n in nodes:
+        # 获取节点真实地址
+        add = n.get('listen')
+        if not add or add == '0.0.0.0': 
+            add = raw_host # 回退到服务器地址
+        
+        port = n.get('port')
+        tasks.append(ping_host(add, port))
+    
+    # 并发执行所有 Ping
+    await asyncio.gather(*tasks)
+
+
 # ================= 接口处理 =================
 @app.get('/sub/{token}')
 async def sub_handler(token: str, request: Request):
@@ -1214,9 +1270,12 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}B"
 
-# [修改] 调整列布局：
-TABLE_COLS_CSS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
-SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
+# [修改] 调整列布局：增加了一列 "90px" 用于显示延迟
+# 原: 150px 200px 1fr 100px 80px 80px 50px 150px
+TABLE_COLS_CSS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
+
+# 原: 200px 1fr 100px 80px 80px 50px 150px
+SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
 
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     client = ui.context.client
@@ -1286,121 +1345,211 @@ async def render_single_server_view(server_conf, force_refresh=False):
     try:
         res = await fetch_inbounds_safe(server_conf, force_refresh=force_refresh)
         list_container.clear()
+        
         raw_host = server_conf['url']
         try:
             if '://' not in raw_host: raw_host = f'http://{raw_host}'
             p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
         except: pass
 
+        # 1. 强制清除旧缓存 & 触发新 Ping
+        if res:
+            for n in res:
+                t_host = n.get('listen') or raw_host
+                t_port = n.get('port')
+                k = f"{t_host}:{t_port}"
+                if k in PING_CACHE: del PING_CACHE[k]
+            asyncio.create_task(batch_ping_nodes(res, raw_host))
+
         with list_container:
             # 表头
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS):
                 ui.label('备注名称').classes('text-left pl-2')
-                for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: 
+                for h in ['所在组', '已用流量', '协议', '端口', '延迟', '状态', '操作']: 
                     ui.label(h).classes('text-center')
             
             if not res: ui.label('暂无节点或连接失败').classes('text-gray-400 mt-4 text-center w-full'); return
             if not force_refresh: ui.label('本地缓存模式').classes('text-xs text-gray-300 w-full text-right px-2')
             
             for n in res:
-                traffic = n.get('up', 0) + n.get('down', 0)
-                traffic_str = format_bytes(traffic)
+                traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+                target_host = n.get('listen') or raw_host
+                target_port = n.get('port')
+                ping_key = f"{target_host}:{target_port}"
 
                 with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS):
-                    # 1. 备注
                     ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                    # 2. 所在组
                     ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                    # 3. 流量
-                    ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
-                    # 4. 协议
+                    ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
                     ui.label(n.get('protocol', 'unknown')).classes('uppercase text-xs font-bold w-full text-center')
-                    # 5. 端口
                     ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
-                    # 6. 状态
+                    
+                    # ✨✨✨ [修复对齐] 延迟列 ✨✨✨
+                    with ui.row().classes('w-full justify-center items-center gap-1 no-wrap'):
+                        spinner = ui.spinner('dots', size='1em', color='primary') 
+                        spinner.set_visibility(False)
+                        lbl_ping = ui.label('').classes('text-xs font-mono font-bold text-center')
+
+                    def update_ping_display(l=lbl_ping, s=spinner, k=ping_key):
+                        val = PING_CACHE.get(k, None)
+                        if val is None:
+                            s.set_visibility(True)
+                            l.set_visibility(False)
+                        elif val == -1: 
+                            s.set_visibility(False)
+                            l.set_visibility(True)
+                            l.set_text('超时')
+                            l.classes(replace='text-red-500')
+                        else:
+                            s.set_visibility(False)
+                            l.set_visibility(True)
+                            l.set_text(f"{val} ms")
+                            l.classes(remove='text-red-500 text-green-600 text-yellow-600 text-red-400')
+                            if val < 100: l.classes(add='text-green-600')
+                            elif val < 200: l.classes(add='text-yellow-600')
+                            else: l.classes(add='text-red-400')
+                    
+                    ui.timer(0.5, update_ping_display)
+                    
                     with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
-                    # 7. 操作 (✨✨✨ 修改重点在此 ✨✨✨)
+                    
+                    # 操作栏
                     with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                        # 原有的标准链接复制
                         link = generate_node_link(n, raw_host)
-                        if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接 (Standard)')
+                        if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
                         
-                        # ✨ 新增：明文配置复制按钮
                         detail_conf = generate_detail_config(n, raw_host)
-                        if detail_conf:
-                            ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制明文配置 (Surge/Loon)')
+                        if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
 
                         ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
                         ui.button(icon='delete', on_click=lambda i=n: delete_inbound(mgr, i['id'], lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
     except: pass
-
+    
 async def render_aggregated_view(server_list, force_refresh=False):
     list_container = ui.column().classes('w-full gap-4')
-    try:
-        tasks = [fetch_inbounds_safe(s, force_refresh=force_refresh) for s in server_list]
+    
+    # === ✨✨✨ [核心优化] 数据获取逻辑完全分离 ✨✨✨ ===
+    # 以前：无论是否强制刷新，都调用 fetch_inbounds_safe (导致后台可能偷偷同步)
+    # 现在：严格区分“查看”和“同步”
+    
+    results = []
+    if force_refresh:
+        # 情况 A: 用户点击了右上角“同步”按钮 -> 强制走网络
+        tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in server_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        list_container.clear()
+    else:
+        # 情况 B: 用户点击侧边栏切换视图 -> 纯内存读取 (0网络开销，0日志)
+        # 如果缓存里没数据，就显示空，等待后台定时任务去填补
+        for s in server_list:
+            results.append(NODES_DATA.get(s['url'], []))
+
+    list_container.clear()
+    
+    with list_container:
+        # 表头
+        with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(TABLE_COLS_CSS):
+            ui.label('服务器').classes('text-left pl-2')
+            ui.label('备注名称').classes('text-left pl-2')
+            for h in ['所在组', '已用流量', '协议', '端口', '延迟', '状态', '操作']: 
+                ui.label(h).classes('text-center')
         
-        with list_container:
-            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(TABLE_COLS_CSS):
-                ui.label('服务器').classes('text-left pl-2')
-                ui.label('备注名称').classes('text-left pl-2')
-                for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: 
-                    ui.label(h).classes('text-center')
+        for i, res in enumerate(results):
+            # 为了避免渲染大量数据卡顿，稍微让出一点 CPU 时间
+            if i % 5 == 0: await asyncio.sleep(0.001)
             
-            for i, res in enumerate(results):
-                if i % 2 == 0: await asyncio.sleep(0.01)
-                srv = server_list[i]
-                if res is None or isinstance(res, Exception): res = NODES_DATA.get(srv['url'], [])
-                mgr = get_manager(srv)
-                raw_host = srv['url']
-                try:
-                    if '://' not in raw_host: raw_host = f'http://{raw_host}'
-                    p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
-                except: pass
+            srv = server_list[i]
+            # 兼容处理：如果是异常对象（来自 force_refresh 的网络错误），回退到空列表
+            if isinstance(res, Exception): res = []
+            if res is None: res = []
 
-                row_wrapper = ui.element('div').classes('w-full')
-                SERVER_UI_MAP[srv['url']] = row_wrapper
-                with row_wrapper:
-                    if not res:
-                        # ... (连接失败的渲染代码保持不变，为节省篇幅略过，请保留你原有的逻辑) ...
-                        with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-red-50 px-2 items-center').style(TABLE_COLS_CSS):
-                            ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
+            mgr = get_manager(srv)
+            raw_host = srv['url']
+            try:
+                if '://' not in raw_host: raw_host = f'http://{raw_host}'
+                p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
+            except: pass
+
+            # 1. 强制清除旧缓存 & 触发新 Ping (Ping 是轻量级的，保留)
+            if res:
+                for n in res:
+                    t_host = n.get('listen') or raw_host
+                    t_port = n.get('port')
+                    k = f"{t_host}:{t_port}"
+                    if k in PING_CACHE: del PING_CACHE[k]
+                asyncio.create_task(batch_ping_nodes(res, raw_host))
+
+            row_wrapper = ui.element('div').classes('w-full')
+            SERVER_UI_MAP[srv['url']] = row_wrapper
+            with row_wrapper:
+                # 如果没有节点数据 (连接失败 或 还没同步过)
+                if not res:
+                    with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(TABLE_COLS_CSS):
+                        ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
+                        # 如果是强制刷新失败，显示红色；如果是缓存为空，显示灰色提示
+                        if force_refresh:
                             ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2')
+                        else:
+                            ui.label('⏳ 等待同步...').classes('text-gray-400 font-bold w-full text-left pl-2')
+                        
+                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                        ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center')
+                        with ui.element('div').classes('flex justify-center w-full'): ui.icon('help_outline', color='grey').props('size=xs')
+                        with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary').tooltip('单独同步此节点')
+                    continue
+
+                for n in res:
+                    try:
+                        traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+                        
+                        target_host = n.get('listen') or raw_host
+                        target_port = n.get('port')
+                        ping_key = f"{target_host}:{target_port}"
+
+                        with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(TABLE_COLS_CSS):
+                            ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
+                            ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
                             ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                            ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center')
-                            with ui.element('div').classes('flex justify-center w-full'): ui.icon('error', color='red').props('size=xs')
-                            with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=grey')
-                        continue
+                            ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
+                            ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
+                            ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
+                            
+                            # 延迟列 (修复对齐)
+                            with ui.row().classes('w-full justify-center items-center gap-1 no-wrap'):
+                                spinner = ui.spinner('dots', size='1em', color='primary')
+                                spinner.set_visibility(False)
+                                lbl_ping = ui.label('').classes('text-xs font-mono font-bold text-center')
 
-                    for n in res:
-                        try:
-                            traffic = n.get('up', 0) + n.get('down', 0)
-                            traffic_str = format_bytes(traffic)
+                            def update_ping_display(l=lbl_ping, s=spinner, k=ping_key):
+                                val = PING_CACHE.get(k, None)
+                                if val is None:
+                                    s.set_visibility(True); l.set_visibility(False)
+                                elif val == -1: 
+                                    s.set_visibility(False); l.set_visibility(True)
+                                    l.set_text('超时'); l.classes(replace='text-red-500')
+                                else:
+                                    s.set_visibility(False); l.set_visibility(True)
+                                    l.set_text(f"{val} ms")
+                                    l.classes(remove='text-red-500 text-green-600 text-yellow-600 text-red-400')
+                                    if val < 100: l.classes(add='text-green-600')
+                                    elif val < 200: l.classes(add='text-yellow-600')
+                                    else: l.classes(add='text-red-400')
+                            
+                            ui.timer(0.5, update_ping_display)
 
-                            with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(TABLE_COLS_CSS):
-                                ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                                ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                                ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                                ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
-                                ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
-                                ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
-                                with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                            with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                            
+                            # 操作栏
+                            with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                                link = generate_node_link(n, raw_host)
+                                if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
                                 
-                                # ✨✨✨ 操作栏修改 ✨✨✨
-                                with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                                    link = generate_node_link(n, raw_host)
-                                    if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
-                                    
-                                    # ✨ 新增：明文配置复制
-                                    detail_conf = generate_detail_config(n, raw_host)
-                                    if detail_conf:
-                                        ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制明文配置')
+                                detail_conf = generate_detail_config(n, raw_host)
+                                if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
 
-                                    ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
-                                    ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound(m, i['id'], lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
-                        except: continue
-    except: pass
+                                ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
+                                ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound(m, i['id'], lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
+                    except: continue
+
 
 async def load_dashboard_stats():
     async def _render():
@@ -1685,6 +1834,34 @@ def main_page():
     
     ui.timer(0.1, lambda: asyncio.create_task(load_dashboard_stats()), once=True)
     logger.info("✅ UI 已就绪")
+
+# ================= 全局定时 Ping 任务 =================
+async def run_global_ping_task():
+    while True:
+        try:
+            logger.info("📡 开始全局节点延迟测试...")
+            tasks = []
+            for srv in SERVERS_CACHE:
+                raw_host = srv['url']
+                try:
+                    if '://' not in raw_host: raw_host = f'http://{raw_host}'
+                    p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
+                except: continue
+                
+                nodes = NODES_DATA.get(srv['url'], [])
+                if nodes:
+                    tasks.append(batch_ping_nodes(nodes, raw_host))
+            
+            if tasks:
+                await asyncio.gather(*tasks)
+            logger.info("✅ 全局延迟测试完成")
+        except Exception as e:
+            logger.error(f"Ping 任务异常: {e}")
+        
+        await asyncio.sleep(300) # 5分钟 = 300秒
+
+# 在 app 启动时运行
+app.on_startup(lambda: asyncio.create_task(run_global_ping_task()))
 
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("🚀 系统正在初始化...")
