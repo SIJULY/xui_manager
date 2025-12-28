@@ -325,6 +325,87 @@ def generate_node_link(node, server_host):
     except: return ""
     return ""
 
+# ================= 新增：生成 Surge/Loon 格式明文配置 =================
+def generate_detail_config(node, server_host):
+    try:
+        p = node['protocol']
+        remark = node['remark']
+        port = node['port']
+        add = node.get('listen') or server_host
+        
+        # 解析设置
+        s = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
+        st = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
+        
+        # 基础流控设置
+        net = st.get('network', 'tcp')
+        security = st.get('security', 'none')
+        tls = (security == 'tls')
+        
+        # 构造基础头部
+        # 格式: protocol=host:port
+        base = f"{p}={add}:{port}"
+        params = []
+
+        if p == 'vmess':
+            uuid = s['clients'][0]['id']
+            # VMess 默认参数
+            params.append("method=auto")
+            params.append(f"password={uuid}")
+            params.append("fast-open=false")
+            params.append("udp-relay=false")
+            params.append("aead=true") # 现代客户端通常开启 AEAD
+            
+            # 传输协议处理
+            if net == 'ws':
+                ws_set = st.get('wsSettings', {})
+                path = ws_set.get('path', '/')
+                host = ws_set.get('headers', {}).get('Host', '')
+                params.append("obfs=websocket")
+                params.append(f"obfs-uri={path}")
+                if host: params.append(f"obfs-host={host}")
+            
+            if tls:
+                params.append("tls=true")
+                # 尝试获取 SNI
+                tls_set = st.get('tlsSettings', {})
+                sni = tls_set.get('serverName', '')
+                if sni: params.append(f"sni={sni}")
+
+        elif p == 'shadowsocks':
+            method = s.get('method', 'aes-256-gcm')
+            pwd = s.get('password', '')
+            params.append(f"method={method}")
+            params.append(f"password={pwd}")
+            params.append("fast-open=false")
+            params.append("udp-relay=true")
+            
+            # Simple-obfs / v2ray-plugin 处理 (X-UI通常是标准SS，这里只做基础处理)
+
+        elif p == 'trojan':
+            pwd = s['clients'][0]['password']
+            params.append(f"password={pwd}")
+            params.append("fast-open=false")
+            params.append("udp-relay=false")
+            if tls:
+                params.append("tls=true")
+                sni = st.get('tlsSettings', {}).get('serverName', '')
+                if sni: params.append(f"sni={sni}")
+        
+        else:
+            # VLESS 等协议 Surge 格式支持较复杂，暂返回空或标准链接
+            return ""
+
+        # 最后加上 Tag
+        params.append(f"tag={remark}")
+        
+        # 拼接
+        return f"{base}, {', '.join(params)}"
+
+    except Exception as e:
+        # logger.error(f"格式转换失败: {e}")
+        return ""
+
 # ================= 接口处理 =================
 @app.get('/sub/{token}')
 async def sub_handler(token: str, request: Request):
@@ -1212,7 +1293,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
         except: pass
 
         with list_container:
-            # [修改] 表头顺序调整：备注 -> 所在组 -> 已用流量 -> 协议...
+            # 表头
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS):
                 ui.label('备注名称').classes('text-left pl-2')
                 for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: 
@@ -1222,16 +1303,15 @@ async def render_single_server_view(server_conf, force_refresh=False):
             if not force_refresh: ui.label('本地缓存模式').classes('text-xs text-gray-300 w-full text-right px-2')
             
             for n in res:
-                # [修改] 计算流量
                 traffic = n.get('up', 0) + n.get('down', 0)
                 traffic_str = format_bytes(traffic)
 
                 with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS):
                     # 1. 备注
                     ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                    # 2. 所在组 (移到备注右侧)
+                    # 2. 所在组
                     ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                    # 3. 流量 (新增)
+                    # 3. 流量
                     ui.label(traffic_str).classes('text-xs text-gray-600 w-full text-center font-mono')
                     # 4. 协议
                     ui.label(n.get('protocol', 'unknown')).classes('uppercase text-xs font-bold w-full text-center')
@@ -1239,10 +1319,17 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                     # 6. 状态
                     with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
-                    # 7. 操作
-                    with ui.row().classes('gap-2 justify-center w-full'):
+                    # 7. 操作 (✨✨✨ 修改重点在此 ✨✨✨)
+                    with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                        # 原有的标准链接复制
                         link = generate_node_link(n, raw_host)
-                        if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
+                        if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接 (Standard)')
+                        
+                        # ✨ 新增：明文配置复制按钮
+                        detail_conf = generate_detail_config(n, raw_host)
+                        if detail_conf:
+                            ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制明文配置 (Surge/Loon)')
+
                         ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
                         ui.button(icon='delete', on_click=lambda i=n: delete_inbound(mgr, i['id'], lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
     except: pass
@@ -1276,13 +1363,12 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 SERVER_UI_MAP[srv['url']] = row_wrapper
                 with row_wrapper:
                     if not res:
+                        # ... (连接失败的渲染代码保持不变，为节省篇幅略过，请保留你原有的逻辑) ...
                         with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-red-50 px-2 items-center').style(TABLE_COLS_CSS):
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                             ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2')
                             ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                            ui.label('-').classes('w-full text-center')
-                            ui.label('-').classes('w-full text-center')
-                            ui.label('-').classes('w-full text-center')
+                            ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center'); ui.label('-').classes('w-full text-center')
                             with ui.element('div').classes('flex justify-center w-full'): ui.icon('error', color='red').props('size=xs')
                             with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=grey')
                         continue
@@ -1300,9 +1386,17 @@ async def render_aggregated_view(server_list, force_refresh=False):
                                 ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                                 ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                                 with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
-                                with ui.row().classes('gap-2 justify-center w-full'):
+                                
+                                # ✨✨✨ 操作栏修改 ✨✨✨
+                                with ui.row().classes('gap-2 justify-center w-full no-wrap'):
                                     link = generate_node_link(n, raw_host)
                                     if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
+                                    
+                                    # ✨ 新增：明文配置复制
+                                    detail_conf = generate_detail_config(n, raw_host)
+                                    if detail_conf:
+                                        ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制明文配置')
+
                                     ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
                                     ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound(m, i['id'], lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                         except: continue
