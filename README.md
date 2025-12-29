@@ -71,7 +71,7 @@ server {
 ```
 提示：配置完成后，请使用 nginx -t 检查配置并重启 Nginx。如果需要 HTTPS，请自行配置 SSL 证书。
 
-🌍B：已有 Caddy 的用户 (手动配置)
+🌍方案 B：已有 Caddy 的用户 (手动配置)
 如果您已经安装了 Caddy（非脚本安装），请根据您的需求修改您的 /etc/caddy/Caddyfile（或其他目录）。
 
 场景 1：使用全新的子域名（推荐） 
