@@ -18,6 +18,7 @@ from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
 from fastapi.responses import RedirectResponse
+from urllib.parse import urlparse, quote # <--- ✨ 修改这里，增加 quote
 
 # ================= 强制日志实时输出 =================
 sys.stdout.reconfigure(line_buffering=True)
@@ -297,6 +298,26 @@ def safe_base64(s): return base64.b64encode(s.encode('utf-8')).decode('utf-8')
 def decode_base64_safe(s): 
     try: return base64.b64decode(s).decode('utf-8')
     except: return ""
+
+# ================= [新增] 生成 SubConverter 转换链接 =================
+def generate_converted_link(raw_link, target, domain_prefix):
+    """
+    生成经过 SubConverter 转换的订阅链接
+    target: surge, clash
+    """
+    if not raw_link or not domain_prefix: return ""
+    
+    converter_base = f"{domain_prefix}/convert"
+    encoded_url = quote(raw_link)
+    
+    # ✨✨✨ 核心修改 ✨✨✨
+    # 1. 移除了 config=... (去掉了强制的分流规则模板)
+    # 2. 增加了 list=true  (只输出节点部分)
+    # 3. 增加了 udp=true   (默认开启 UDP 转发支持)
+    # 4. 增加了 scv=true   (关闭 TLS 证书校验，防止自签证书报错)
+    params = f"target={target}&url={encoded_url}&insert=false&list=true&ver=4&udp=true&scv=true"
+    
+    return f"{converter_base}?{params}"
 
 def generate_node_link(node, server_host):
     try:
@@ -613,14 +634,34 @@ async def safe_copy_to_clipboard(text):
         else: safe_notify('复制失败', 'negative')
     except: safe_notify('复制功能不可用', 'negative')
 
-async def copy_group_link(group_name):
+# ================= [修改] 支持格式转换的分组复制 =================
+async def copy_group_link(group_name, target=None):
     try:
+        # 1. 获取当前域名
         origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
-        if not origin: origin = ""
+        if not origin: 
+            # 如果获取失败，回退到你的固定域名 (防止 localhost 报错)
+            origin = "https://xui-manager.sijuly.nyc.mn" 
+
+        # 2. 生成原始 X-UI 分组链接
         encoded_name = safe_base64(group_name)
-        link = f"{origin}/sub/group/{encoded_name}"
-        await safe_copy_to_clipboard(link)
-        safe_notify(f"已复制 [{group_name}] 专属订阅链接", "positive")
+        raw_link = f"{origin}/sub/group/{encoded_name}"
+        
+        # 3. 根据目标格式转换
+        final_link = raw_link
+        msg_prefix = "原始"
+        
+        if target == 'surge':
+            final_link = generate_converted_link(raw_link, 'surge', origin)
+            msg_prefix = "Surge"
+        elif target == 'clash':
+            final_link = generate_converted_link(raw_link, 'clash', origin)
+            msg_prefix = "Clash"
+            
+        # 4. 复制
+        await safe_copy_to_clipboard(final_link)
+        safe_notify(f"已复制 [{group_name}] {msg_prefix} 订阅链接", "positive")
+        
     except Exception as e: safe_notify(f"生成失败: {e}", "negative")
 
 # ================= UI 组件 =================
@@ -996,27 +1037,55 @@ class SubEditor:
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
 
+# ================= [修改] 订阅管理视图 (增加转换按钮) =================
 async def load_subs_view():
     show_loading(content_container)
     try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
     except: origin = ""
+    if not origin: origin = "https://xui-manager.sijuly.nyc.mn" # 兜底域名
+
     content_container.clear()
     with content_container:
         ui.label('订阅管理').classes('text-2xl font-bold mb-4')
         with ui.row().classes('w-full mb-4 justify-end'): ui.button('新建订阅', icon='add', color='green', on_click=lambda: open_sub_editor(None))
+        
         for idx, sub in enumerate(SUBS_CACHE):
-            with ui.card().classes('w-full p-4 mb-2 shadow-sm hover:shadow-md transition'):
+            with ui.card().classes('w-full p-4 mb-2 shadow-sm hover:shadow-md transition border-l-4 border-blue-500'):
                 with ui.row().classes('justify-between w-full items-center'):
                     with ui.column().classes('gap-1'):
-                        ui.label(sub['name']).classes('font-bold text-lg text-slate-800'); ui.label(f"包含 {len(sub.get('nodes',[]))} 个节点").classes('text-xs text-gray-500')
-                    with ui.row():
+                        ui.label(sub['name']).classes('font-bold text-lg text-slate-800')
+                        ui.label(f"包含 {len(sub.get('nodes',[]))} 个节点").classes('text-xs text-gray-500')
+                    
+                    # 操作按钮组
+                    with ui.row().classes('gap-2'):
+                        # 编辑
                         ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue')
+                        
+                        # 删除
                         async def dl(i=idx): del SUBS_CACHE[i]; await save_subs(); await load_subs_view()
                         ui.button(icon='delete', color='red', on_click=dl).props('flat dense')
+
                 ui.separator().classes('my-2')
-                path = f"/sub/{sub['token']}"; full_url = f"{origin}{path}" if origin else path
-                with ui.row().classes('w-full items-center gap-2 bg-gray-50 p-2 rounded'):
-                    ui.icon('link').classes('text-gray-400'); ui.input(value=full_url).props('readonly borderless dense').classes('flex-grow text-xs font-mono text-gray-600'); ui.button(icon='content_copy', on_click=lambda u=full_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm color=grey')
+                
+                # 链接区域
+                path = f"/sub/{sub['token']}"
+                raw_url = f"{origin}{path}"
+                
+                with ui.row().classes('w-full items-center gap-2 bg-gray-50 p-2 rounded justify-between'):
+                    with ui.row().classes('items-center gap-2 flex-grow overflow-hidden'):
+                        ui.icon('link').classes('text-gray-400')
+                        ui.label(raw_url).classes('text-xs font-mono text-gray-600 truncate')
+                    
+                    # 复制按钮组
+                    with ui.row().classes('gap-1'):
+                        # 原始
+                        ui.button(icon='content_copy', on_click=lambda u=raw_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
+                        # Surge
+                        surge_url = generate_converted_link(raw_url, 'surge', origin)
+                        ui.button(icon='bolt', on_click=lambda u=surge_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
+                        # Clash
+                        clash_url = generate_converted_link(raw_url, 'clash', origin)
+                        ui.button(icon='cloud_queue', on_click=lambda u=clash_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
 
 async def open_add_server_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
@@ -1277,6 +1346,7 @@ TABLE_COLS_CSS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 90px 50
 # 原: 200px 1fr 100px 80px 80px 50px 150px
 SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
 
+# ================= [修改] 刷新内容主逻辑 (顶部按钮改为并排) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     client = ui.context.client
     with client: show_loading(content_container)
@@ -1321,12 +1391,21 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
             SERVER_UI_MAP.clear()
             
             with content_container:
-                # 顶部
+                # 顶部栏
                 with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
                     with ui.row().classes('items-center gap-4'):
                         ui.label(title).classes('text-2xl font-bold')
+                        
+                        # ✨✨✨ 修改点：如果是分组视图，显示三个并排按钮 ✨✨✨
                         if is_group_view:
-                            ui.button('复制订阅', icon='link', on_click=lambda g=data: copy_group_link(g)).props('outline dense size=sm').classes('text-blue-600')
+                            with ui.row().classes('gap-1'):
+                                # 1. 原始链接 (灰色)
+                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
+                                # 2. Surge (橙色)
+                                ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
+                                # 3. Clash (绿色)
+                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+
                     ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
                 
                 # 渲染内容
@@ -1425,21 +1504,15 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         ui.button(icon='delete', on_click=lambda i=n: delete_inbound(mgr, i['id'], lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
     except: pass
     
+# ================= [修改] 聚合视图 (顶部增加下拉菜单) =================
 async def render_aggregated_view(server_list, force_refresh=False):
     list_container = ui.column().classes('w-full gap-4')
     
-    # === ✨✨✨ [核心优化] 数据获取逻辑完全分离 ✨✨✨ ===
-    # 以前：无论是否强制刷新，都调用 fetch_inbounds_safe (导致后台可能偷偷同步)
-    # 现在：严格区分“查看”和“同步”
-    
     results = []
     if force_refresh:
-        # 情况 A: 用户点击了右上角“同步”按钮 -> 强制走网络
         tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in server_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        # 情况 B: 用户点击侧边栏切换视图 -> 纯内存读取 (0网络开销，0日志)
-        # 如果缓存里没数据，就显示空，等待后台定时任务去填补
         for s in server_list:
             results.append(NODES_DATA.get(s['url'], []))
 
@@ -1454,11 +1527,9 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 ui.label(h).classes('text-center')
         
         for i, res in enumerate(results):
-            # 为了避免渲染大量数据卡顿，稍微让出一点 CPU 时间
             if i % 5 == 0: await asyncio.sleep(0.001)
             
             srv = server_list[i]
-            # 兼容处理：如果是异常对象（来自 force_refresh 的网络错误），回退到空列表
             if isinstance(res, Exception): res = []
             if res is None: res = []
 
@@ -1469,7 +1540,6 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
             except: pass
 
-            # 1. 强制清除旧缓存 & 触发新 Ping (Ping 是轻量级的，保留)
             if res:
                 for n in res:
                     t_host = n.get('listen') or raw_host
@@ -1481,11 +1551,9 @@ async def render_aggregated_view(server_list, force_refresh=False):
             row_wrapper = ui.element('div').classes('w-full')
             SERVER_UI_MAP[srv['url']] = row_wrapper
             with row_wrapper:
-                # 如果没有节点数据 (连接失败 或 还没同步过)
                 if not res:
                     with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(TABLE_COLS_CSS):
                         ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                        # 如果是强制刷新失败，显示红色；如果是缓存为空，显示灰色提示
                         if force_refresh:
                             ui.label('❌ 连接失败').classes('text-red-500 font-bold w-full text-left pl-2')
                         else:
@@ -1500,7 +1568,6 @@ async def render_aggregated_view(server_list, force_refresh=False):
                 for n in res:
                     try:
                         traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
-                        
                         target_host = n.get('listen') or raw_host
                         target_port = n.get('port')
                         ping_key = f"{target_host}:{target_port}"
@@ -1513,7 +1580,6 @@ async def render_aggregated_view(server_list, force_refresh=False):
                             ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                             ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                             
-                            # 延迟列 (修复对齐)
                             with ui.row().classes('w-full justify-center items-center gap-1 no-wrap'):
                                 spinner = ui.spinner('dots', size='1em', color='primary')
                                 spinner.set_visibility(False)
@@ -1521,14 +1587,10 @@ async def render_aggregated_view(server_list, force_refresh=False):
 
                             def update_ping_display(l=lbl_ping, s=spinner, k=ping_key):
                                 val = PING_CACHE.get(k, None)
-                                if val is None:
-                                    s.set_visibility(True); l.set_visibility(False)
-                                elif val == -1: 
-                                    s.set_visibility(False); l.set_visibility(True)
-                                    l.set_text('超时'); l.classes(replace='text-red-500')
+                                if val is None: s.set_visibility(True); l.set_visibility(False)
+                                elif val == -1: s.set_visibility(False); l.set_visibility(True); l.set_text('超时'); l.classes(replace='text-red-500')
                                 else:
-                                    s.set_visibility(False); l.set_visibility(True)
-                                    l.set_text(f"{val} ms")
+                                    s.set_visibility(False); l.set_visibility(True); l.set_text(f"{val} ms")
                                     l.classes(remove='text-red-500 text-green-600 text-yellow-600 text-red-400')
                                     if val < 100: l.classes(add='text-green-600')
                                     elif val < 200: l.classes(add='text-yellow-600')
@@ -1538,14 +1600,11 @@ async def render_aggregated_view(server_list, force_refresh=False):
 
                             with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
                             
-                            # 操作栏
                             with ui.row().classes('gap-2 justify-center w-full no-wrap'):
                                 link = generate_node_link(n, raw_host)
                                 if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
-                                
                                 detail_conf = generate_detail_config(n, raw_host)
                                 if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
-
                                 ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
                                 ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound(m, i['id'], lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                     except: continue
@@ -1612,7 +1671,7 @@ async def load_dashboard_stats():
 def render_sidebar_content():
     # 1. 顶部区域
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('X-UI Manager').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
         # 大按钮样式
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
