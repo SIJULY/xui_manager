@@ -1759,9 +1759,8 @@ def render_sidebar_content():
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes('flex-grow bg-blue-600 text-white text-xs')
             ui.button('添加服务器', icon='add', color='green', on_click=open_add_server_dialog).props('dense unelevated').classes('flex-grow text-xs')
 
-        # --- A. 全部节点 (修复点击) ---
+        # --- A. 全部节点 ---
         all_count = len(SERVERS_CACHE)
-        # 注意：使用 lambda _ 忽略点击事件参数，防止报错
         with ui.row().classes('w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer').on('click', lambda _: refresh_content('ALL')):
             with ui.row().classes('items-center gap-2'):
                 ui.icon('dns', color='primary')
@@ -1775,14 +1774,15 @@ def render_sidebar_content():
                 tag_servers = [s for s in SERVERS_CACHE if tag_group in s.get('tags', [])]
                 
                 is_open = tag_group in EXPANDED_GROUPS
-                # ✨ 修复点：使用 'as exp' 获取对象
                 with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                    # ✨ 修复点：使用 exp.add_slot('header')
+                    # ✨✨✨ 优化点：分离点击事件 ✨✨✨
                     with exp.add_slot('header'):
-                        with ui.row().classes('w-full items-center justify-between no-wrap'):
-                            # 组名 (点击只刷新右侧)
-                            ui.label(tag_group).classes('flex-grow font-bold truncate').on('click.stop', lambda _, g=tag_group: refresh_content('TAG', g))
-                            # 组管理按钮
+                        # 将 click.stop 加在整个 row 上
+                        # 这样点击标题栏任何空白处，只会触发 refresh_content，并且阻止展开/收起
+                        with ui.row().classes('w-full items-center justify-between no-wrap cursor-pointer').on('click.stop', lambda _, g=tag_group: refresh_content('TAG', g)):
+                            # 组名
+                            ui.label(tag_group).classes('flex-grow font-bold truncate')
+                            # 组管理按钮 (本身有 click.stop，互不影响)
                             ui.button(icon='edit', on_click=lambda _, g=tag_group: open_group_mgmt_dialog(g)).props('flat dense round size=xs color=grey').on('click.stop')
                             # 数量
                             ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
@@ -1810,12 +1810,12 @@ def render_sidebar_content():
             c_servers.sort(key=lambda x: x['name'])
             
             is_open = c_name in EXPANDED_GROUPS
-            # ✨ 修复点：使用 'as exp' 获取对象
             with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                 # ✨ 修复点：使用 exp.add_slot('header')
+                 # ✨✨✨ 优化点：分离点击事件 ✨✨✨
                  with exp.add_slot('header'):
-                    with ui.row().classes('w-full items-center justify-between no-wrap'):
-                        ui.label(c_name).classes('flex-grow font-bold truncate').on('click.stop', lambda _, g=c_name: refresh_content('COUNTRY', g))
+                    # 同样给 row 加上 click.stop
+                    with ui.row().classes('w-full items-center justify-between no-wrap cursor-pointer').on('click.stop', lambda _, g=c_name: refresh_content('COUNTRY', g)):
+                        ui.label(c_name).classes('flex-grow font-bold truncate')
                         ui.badge(str(len(c_servers)), color='green')
                  
                  # 内容区
