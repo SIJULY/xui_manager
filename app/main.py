@@ -1459,6 +1459,72 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}B"
 
+# ================= [新增] 智能五段式排序逻辑 =================
+def smart_sort_key(server_info):
+    """
+    解析名称格式: Oracle|🇦🇺 悉尼-AMD-1
+    Part1: Oracle (商家)
+    Part2: 🇦🇺 (地区/旗帜)
+    Part3: 悉尼 (城市)
+    Part4: AMD (类型)
+    Part5: 1 (编号)
+    """
+    name = server_info.get('name', '')
+    if not name: return ('', '', '', '', 0)
+
+    # 初始化默认值: (Part1, Part2, Part3, Part4, Part5)
+    # 保证类型一致: (str, str, str, str, int)
+    p1, p2, p3, p4, p5 = name, '', '', '', 0
+    
+    try:
+        # 1. 提取 Part1 (商家) —— 依据 "|"
+        if '|' in name:
+            parts = name.split('|', 1)
+            p1 = parts[0].strip()
+            rest = parts[1].strip()
+        else:
+            # 没有竖线，直接作为整体排序
+            return (name, '', '', '', 0)
+
+        # 2. 提取 Part2 (旗帜) —— 依据 "空格"
+        if ' ' in rest:
+            parts = rest.split(' ', 1)
+            p2 = parts[0].strip()
+            rest = parts[1].strip()
+        else:
+            # 没有空格，说明没旗帜或连在一起，全归为 Part3
+            return (p1, '', rest, '', 0)
+
+        # 3. 提取 Part3, 4, 5 (城市-类型-编号) —— 依据 "-"
+        sub_parts = rest.split('-')
+        count = len(sub_parts)
+        
+        p3 = sub_parts[0].strip() # 城市
+        
+        if count >= 3:
+            # 完美格式: 悉尼-AMD-1
+            p4 = sub_parts[1].strip() # AMD
+            last = sub_parts[-1].strip()
+            if last.isdigit(): p5 = int(last) # 1
+            else: p4 += f"-{last}" # 假如最后不是数字，归到类型里
+            
+        elif count == 2:
+            # 只有两段: "东京-1" 或 "悉尼-AMD"
+            second = sub_parts[1].strip()
+            if second.isdigit():
+                p5 = int(second) # 此时 Part4(类型) 为空，因为有些机器没有类型
+            else:
+                p4 = second      # 此时 Part5(编号) 默认为0
+        
+        # 4. 优化排序体验: 让空类型 (如微软云) 排在有类型 (如AMD) 之前或之后
+        # 这里不做特殊处理，空字符串默认排在字母前
+            
+    except:
+        pass # 解析失败则退化为默认
+
+    return (p1, p2, p3, p4, p5)
+    
+
 # ================= [修改] 表格布局定义 (定义两种模式) =================
 
 # 1. 带延迟 (用于：区域分组、单个服务器) - 包含 90px 的延迟列
@@ -1508,7 +1574,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
         title = f"🖥️ {data['name']}"
 
     if scope != 'SINGLE':
-        targets.sort(key=lambda x: x.get('name', '').lower())
+        targets.sort(key=smart_sort_key)
 
     if force_refresh:
         safe_notify(f'正在同步 {len(targets)} 个服务器...')
