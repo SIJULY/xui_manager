@@ -1,13 +1,18 @@
-# 通用配置：监听 80 端口 (用户配置域名时只需修改 :80 为 example.com)
-:80 {
-    # 1. 拦截订阅转换请求 -> 转发给 subconverter 容器
-    handle_path /convert* {
-        rewrite * /sub
-        reverse_proxy subconverter:25500
-    }
+FROM python:3.11-slim
 
-    # 2. 其他请求 -> 转发给 xui_manager 容器
-    handle {
-        reverse_proxy xui_manager:8080
-    }
-}
+WORKDIR /app
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# 安装基础依赖 (Ping工具等)
+RUN apt-get update && apt-get install -y iputils-ping curl && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/main.py app/main.py
+
+# 这里的 CMD 路径要和 COPY 对应
+CMD ["python", "app/main.py"]
