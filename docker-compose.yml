@@ -1,18 +1,45 @@
 version: '3.8'
 services:
+  # 1. 主面板服务
   xui-manager:
     build: .
     container_name: xui_manager
     restart: always
+    # 不直接暴露端口给公网，只在内部网络通讯，或者仅暴露给本地调试
+    # 如果通过 Caddy 访问，这里其实可以注释掉，或者只绑定 127.0.0.1
     ports:
-      - "8081:8080"
+      - "127.0.0.1:8081:8080"
     volumes:
       - ./data:/app/data
+      # 注意：发布版通常不需要挂载 main.py，除非为了热更新。保留也无妨。
       - ./app/main.py:/app/main.py
     environment:
       - TZ=Asia/Shanghai
-      - XUI_USERNAME=sijuly
-      - XUI_PASSWORD=050148Sq$
-      # 这里使用了默认值，如果你运行过 install.sh 生成了随机密钥，
-      # 请手动修改下面这行，填入你刚才生成的那个 Key
-      - XUI_SECRET_KEY=sijuly_secret_key_2025
+      # 使用默认值，但在部署时可以通过 .env 文件覆盖
+      - XUI_USERNAME=${XUI_USERNAME:-admin}
+      - XUI_PASSWORD=${XUI_PASSWORD:-admin}
+      - XUI_SECRET_KEY=${XUI_SECRET_KEY:-sijuly_secret_key}
+
+  # 2. 订阅转换服务 (新增)
+  subconverter:
+    image: tindy2013/subconverter:latest
+    container_name: subconverter
+    restart: always
+    # 只需要在 Docker 网络内部被访问，不需要映射端口到宿主机
+    expose:
+      - "25500"
+
+  # 3. 反向代理服务 (新增，接管 80/443)
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./caddy_data:/data
+    depends_on:
+      - xui-manager
+      - subconverter
