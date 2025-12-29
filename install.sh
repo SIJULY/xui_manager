@@ -260,25 +260,78 @@ install_panel() {
 
 update_panel() {
     if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录，请先执行安装。"; fi
+    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then print_error "配置文件丢失，无法更新。"; fi
+
+    echo -e "${BLUE}=================================================${PLAIN}"
+    print_info "正在执行智能更新..."
     
-    # 检查是否存在配置文件，防止误操作
-    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then
-        print_error "配置文件 docker-compose.yml 丢失，无法更新。"
+    cd ${INSTALL_DIR}
+    
+    # 1. 备份旧配置
+    cp docker-compose.yml docker-compose.yml.bak
+    print_info "已备份旧配置到 docker-compose.yml.bak"
+
+    # 2. 提取旧配置中的参数 (使用 grep 和 cut 提取)
+    # 注意：这里假设配置文件格式是你脚本生成的标准格式
+    OLD_USER=$(grep "XUI_USERNAME=" docker-compose.yml | cut -d= -f2)
+    OLD_PASS=$(grep "XUI_PASSWORD=" docker-compose.yml | cut -d= -f2)
+    OLD_KEY=$(grep "XUI_SECRET_KEY=" docker-compose.yml | cut -d= -f2)
+    
+    # 提取端口映射行，例如：- "127.0.0.1:8081:8080" 或 - "0.0.0.0:8081:8080"
+    PORT_LINE=$(grep ":8080" docker-compose.yml | head -n 1)
+    
+    # 3. 判断安装模式并提取 IP 和 端口
+    if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
+        # === 域名模式 (127.0.0.1) ===
+        BIND_IP="127.0.0.1"
+        # 提取端口 (例如 8081)
+        OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*127.0.0.1:([0-9]+):8080.*/\1/' | tr -d ' "-')
+        IS_DOMAIN_MODE=true
+        print_info "检测到原有安装为：域名反代模式 (端口 $OLD_PORT)"
+    else
+        # === IP模式 (0.0.0.0) ===
+        BIND_IP="0.0.0.0"
+        # 提取端口
+        # 兼容 "PORT:8080" 或 "0.0.0.0:PORT:8080"
+        if [[ $PORT_LINE == *"0.0.0.0"* ]]; then
+             OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*0.0.0.0:([0-9]+):8080.*/\1/' | tr -d ' "-')
+        else
+             OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*- "([0-9]+):8080.*/\1/' | tr -d ' "-')
+        fi
+        IS_DOMAIN_MODE=false
+        print_info "检测到原有安装为：IP直连模式 (端口 $OLD_PORT)"
     fi
 
-    echo -e "${BLUE}=================================================${PLAIN}"
-    print_info "检测到现有配置，正在执行安全更新..."
-    print_info "此操作将保留您原有的访问方式（IP或域名），不修改配置。"
-    echo -e "${BLUE}=================================================${PLAIN}"
-
-    cd ${INSTALL_DIR}
+    # 4. 停止旧容器
     docker compose down
-    
-    # 更新代码
+
+    # 5. 更新代码文件
     print_info "正在拉取最新代码..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
-    
-    print_info "正在重建容器..."
+
+    # 6. 重新生成 docker-compose.yml (这一步会加入 subconverter)
+    # 只要调用 generate_compose，就会把新的 subconverter 服务写进去
+    generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY"
+    print_info "配置文件已重建（包含 SubConverter 服务）。"
+
+    # 7. 如果是域名模式，尝试更新 Caddy 配置 (添加 /convert 规则)
+    if [ "$IS_DOMAIN_MODE" = true ] && [ -f "$CADDY_CONFIG_PATH" ]; then
+        # 尝试从 Caddyfile 提取域名
+        # 逻辑：找到包含当前端口反代的上一行，通常是域名
+        # 这里的提取比较简易，如果用户手动改过 Caddyfile 可能会失败，但对脚本生成的有效
+        EXISTING_DOMAIN=$(grep -B 2 "reverse_proxy 127.0.0.1:${OLD_PORT}" "$CADDY_CONFIG_PATH" | grep " {" | head -n 1 | awk '{print $1}')
+        
+        if [ -n "$EXISTING_DOMAIN" ]; then
+            print_info "检测到域名：${EXISTING_DOMAIN}，正在更新 Caddy 转发规则..."
+            install_caddy_if_needed
+            configure_caddy "${EXISTING_DOMAIN}" "${OLD_PORT}"
+        else
+            print_warning "未能自动识别原有域名，跳过 Caddy 更新。请手动检查 Caddyfile 是否包含 /convert 规则。"
+        fi
+    fi
+
+    # 8. 启动新容器
+    print_info "正在启动更新后的容器..."
     docker compose up -d --build
     print_success "更新完成！服务已重启。"
 }
