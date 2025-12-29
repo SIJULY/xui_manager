@@ -985,6 +985,25 @@ async def delete_inbound(mgr, id, cb):
             if asyncio.iscoroutine(res): await res
     else: safe_notify(f"❌ 删除失败: {msg}", "negative")
 
+
+# ================= [新增] 带二次确认的删除逻辑 =================
+async def delete_inbound_with_confirm(mgr, inbound_id, inbound_remark, callback):
+    with ui.dialog() as d, ui.card():
+        ui.label('删除确认').classes('text-lg font-bold text-red-600')
+        ui.label(f"您确定要永久删除节点 [{inbound_remark}] 吗？").classes('text-base mt-2')
+        ui.label("此操作不可恢复。").classes('text-xs text-gray-400 mb-4')
+        
+        with ui.row().classes('w-full justify-end gap-2'):
+            ui.button('取消', on_click=d.close).props('flat color=grey')
+            
+            async def do_delete():
+                d.close()
+                # 调用原有的删除逻辑
+                await delete_inbound(mgr, inbound_id, callback)
+                
+            ui.button('确定删除', color='red', on_click=do_delete)
+    d.open()
+
 class SubEditor:
     def __init__(self, data=None):
         self.data = data
@@ -1581,7 +1600,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
 
                         ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
-                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound(mgr, i['id'], lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
+                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
     except: pass
     
 # ================= [修改] 聚合视图 (修复区域分组无延迟数据的问题) =================
@@ -1696,7 +1715,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                                 detail_conf = generate_detail_config(n, raw_host)
                                 if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
                                 ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
-                                ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound(m, i['id'], lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
+                                ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                     except: continue
 
 
