@@ -294,10 +294,21 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False):
             NODES_DATA[url] = []
             return []
 
-def safe_base64(s): return base64.b64encode(s.encode('utf-8')).decode('utf-8')
+# ================= [修改] 使用 URL 安全的 Base64 =================
+def safe_base64(s): 
+    # 使用 urlsafe_b64encode 避免出现 + 和 /
+    return base64.urlsafe_b64encode(s.encode('utf-8')).decode('utf-8')
+
 def decode_base64_safe(s): 
-    try: return base64.b64decode(s).decode('utf-8')
-    except: return ""
+    try: 
+        # 兼容标准 Base64 和 URL Safe Base64
+        # 补全 padding
+        missing_padding = len(s) % 4
+        if missing_padding: s += '=' * (4 - missing_padding)
+        return base64.urlsafe_b64decode(s).decode('utf-8')
+    except: 
+        try: return base64.b64decode(s).decode('utf-8')
+        except: return ""
 
 # ================= [新增] 生成 SubConverter 转换链接 =================
 def generate_converted_link(raw_link, target, domain_prefix):
@@ -504,26 +515,106 @@ async def sub_handler(token: str, request: Request):
                 if l: links.append(l)
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
+# ================= [修改] 分组订阅接口：支持 Tag 和 主分组 =================
 @app.get('/sub/group/{group_b64}')
 async def group_sub_handler(group_b64: str, request: Request):
     group_name = decode_base64_safe(group_b64)
     if not group_name: return Response("Invalid Group Name", 400)
+    
     links = []
-    target_servers = [s for s in SERVERS_CACHE if s.get('group', '默认分组') == group_name]
+    
+    # ✨✨✨ 核心修复：同时筛选“主分组”和“Tags” ✨✨✨
+    # 之前的代码只筛选了 s.get('group')，导致自定义分组（Tag）无法匹配
+    target_servers = [
+        s for s in SERVERS_CACHE 
+        if s.get('group', '默认分组') == group_name or group_name in s.get('tags', [])
+    ]
+    
+    logger.info(f"正在生成分组订阅: [{group_name}]，匹配到 {len(target_servers)} 个服务器")
+
     for srv in target_servers:
         inbounds = NODES_DATA.get(srv['url'], [])
         if not inbounds: continue
+        
         raw_url = srv['url']
         try:
             if '://' not in raw_url: raw_url = f'http://{raw_url}'
             parsed = urlparse(raw_url); host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
         except: host = raw_url
+        
         for n in inbounds:
             if n.get('enable'): 
                 l = generate_node_link(n, host)
                 if l: links.append(l)
+    
+    # 如果没有节点，返回一个提示注释，防止 SubConverter 报错
+    if not links:
+        return Response(f"// Group [{group_name}] is empty or not found", media_type="text/plain; charset=utf-8")
+        
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
+# ================= [修改] 短链接接口：分组 =================
+@app.get('/get/group/{target}/{group_b64}')
+async def short_group_handler(target: str, group_b64: str):
+    try:
+        # ✨✨✨ 重点修复：必须用横杠 xui-manager，不能用下划线 ✨✨✨
+        internal_api = f"http://xui-manager:8080/sub/group/{group_b64}"
+
+        params = {
+            "target": target,
+            "url": internal_api,
+            "insert": "false",
+            "list": "true",
+            "ver": "4",
+            "udp": "true",
+            "scv": "true"
+        }
+        
+        converter_api = "http://subconverter:25500/sub"
+
+        def _fetch_sync():
+            try: return requests.get(converter_api, params=params, timeout=10)
+            except: return None
+
+        response = await run.io_bound(_fetch_sync)
+        if response and response.status_code == 200:
+            return Response(content=response.content, media_type="text/plain; charset=utf-8")
+        else:
+            code = response.status_code if response else 'Timeout'
+            return Response(f"Backend Error: {code} (Check Docker Network)", status_code=502)
+    except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
+
+# ================= [修改] 短链接接口：单个订阅 =================
+@app.get('/get/sub/{target}/{token}')
+async def short_sub_handler(target: str, token: str):
+    try:
+        # ✨✨✨ 重点修复：必须用横杠 xui-manager ✨✨✨
+        internal_api = f"http://xui-manager:8080/sub/{token}"
+
+        params = {
+            "target": target,
+            "url": internal_api,
+            "insert": "false",
+            "list": "true",
+            "ver": "4",
+            "udp": "true",
+            "scv": "true"
+        }
+        
+        converter_api = "http://subconverter:25500/sub"
+
+        def _fetch_sync():
+            try: return requests.get(converter_api, params=params, timeout=10)
+            except: return None
+
+        response = await run.io_bound(_fetch_sync)
+        if response and response.status_code == 200:
+            return Response(content=response.content, media_type="text/plain; charset=utf-8")
+        else:
+            code = response.status_code if response else 'Timeout'
+            return Response(f"Backend Error: {code}", status_code=502)
+    except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
+    
 # ================= 自动注册接口 (带鉴权) =================
 @app.post('/api/auto_register_node')
 async def auto_register_node(request: Request):
@@ -637,33 +728,22 @@ async def safe_copy_to_clipboard(text):
 # ================= [修改] 支持格式转换的分组复制 =================
 async def copy_group_link(group_name, target=None):
     try:
-        # 1. 获取当前域名
         origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
-        if not origin: 
-            # 如果获取失败，回退到你的固定域名 (防止 localhost 报错)
-            origin = "https://xui-manager.sijuly.nyc.mn" 
-
-        # 2. 生成原始 X-UI 分组链接
+        if not origin: origin = "https://xui-manager.sijuly.nyc.mn"
         encoded_name = safe_base64(group_name)
-        raw_link = f"{origin}/sub/group/{encoded_name}"
         
-        # 3. 根据目标格式转换
-        final_link = raw_link
-        msg_prefix = "原始"
-        
-        if target == 'surge':
-            final_link = generate_converted_link(raw_link, 'surge', origin)
-            msg_prefix = "Surge"
-        elif target == 'clash':
-            final_link = generate_converted_link(raw_link, 'clash', origin)
-            msg_prefix = "Clash"
+        if target:
+            # ✨ 修改：路径变为 /get/group/...
+            final_link = f"{origin}/get/group/{target}/{encoded_name}"
+            msg_prefix = "Surge" if target == 'surge' else "Clash"
+        else:
+            final_link = f"{origin}/sub/group/{encoded_name}"
+            msg_prefix = "原始"
             
-        # 4. 复制
         await safe_copy_to_clipboard(final_link)
-        safe_notify(f"已复制 [{group_name}] {msg_prefix} 订阅链接", "positive")
-        
+        safe_notify(f"已复制 [{group_name}] {msg_prefix} 订阅", "positive")
     except Exception as e: safe_notify(f"生成失败: {e}", "negative")
-
+    
 # ================= UI 组件 =================
 class InboundEditor:
     def __init__(self, mgr, data=None, on_success=None):
@@ -1042,7 +1122,7 @@ async def load_subs_view():
     show_loading(content_container)
     try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
     except: origin = ""
-    if not origin: origin = "https://xui-manager.sijuly.nyc.mn" # 兜底域名
+    if not origin: origin = "https://xui-manager.sijuly.nyc.mn"
 
     content_container.clear()
     with content_container:
@@ -1056,18 +1136,13 @@ async def load_subs_view():
                         ui.label(sub['name']).classes('font-bold text-lg text-slate-800')
                         ui.label(f"包含 {len(sub.get('nodes',[]))} 个节点").classes('text-xs text-gray-500')
                     
-                    # 操作按钮组
                     with ui.row().classes('gap-2'):
-                        # 编辑
                         ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue')
-                        
-                        # 删除
                         async def dl(i=idx): del SUBS_CACHE[i]; await save_subs(); await load_subs_view()
                         ui.button(icon='delete', color='red', on_click=dl).props('flat dense')
 
                 ui.separator().classes('my-2')
                 
-                # 链接区域
                 path = f"/sub/{sub['token']}"
                 raw_url = f"{origin}{path}"
                 
@@ -1076,17 +1151,17 @@ async def load_subs_view():
                         ui.icon('link').classes('text-gray-400')
                         ui.label(raw_url).classes('text-xs font-mono text-gray-600 truncate')
                     
-                    # 复制按钮组
                     with ui.row().classes('gap-1'):
                         # 原始
                         ui.button(icon='content_copy', on_click=lambda u=raw_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
-                        # Surge
-                        surge_url = generate_converted_link(raw_url, 'surge', origin)
-                        ui.button(icon='bolt', on_click=lambda u=surge_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
-                        # Clash
-                        clash_url = generate_converted_link(raw_url, 'clash', origin)
-                        ui.button(icon='cloud_queue', on_click=lambda u=clash_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
-
+                        
+                        # ✨✨✨ 修改：使用短链接接口 /get/sub/surge/{token} ✨✨✨
+                        surge_short = f"{origin}/get/sub/surge/{sub['token']}"
+                        ui.button(icon='bolt', on_click=lambda u=surge_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
+                        
+                        clash_short = f"{origin}/get/sub/clash/{sub['token']}"
+                        ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+                        
 async def open_add_server_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
         ui.label('添加服务器').classes('text-lg font-bold')
