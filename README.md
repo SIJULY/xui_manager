@@ -30,6 +30,82 @@
 bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/xui_manager/main/install.sh)
 ```
 
+
+## 🛠️ 特殊说明
+
+* ** 选择「IP + 端口」模式的用户，后续按照如下方式进行反代配置
+* 方案 A：Nginx部署修改
+  Nginx 做反向代理，需要在配置文件（server 块）里加上这个 location：
+
+```bash
+server {
+    listen 80;
+    server_name example.com;
+
+    # 1. 订阅转换 (关键配置)
+    # 注意：proxy_pass 结尾必须带 /sub，这样才能把 /convert 替换掉
+    location /convert {
+        # 假设 subconverter 运行在本地 25500
+        proxy_pass http://127.0.0.1:25500/sub;
+        
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # 2. 主面板
+    location / {
+        proxy_pass http://127.0.0.1:8081; # 你的面板端口
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # WebSocket 支持 (NiceGUI 需要)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+* B：已有 Caddy 的用户 (手动配置)
+如果您已经安装了 Caddy（非脚本安装），请根据您的需求修改您的 /etc/caddy/Caddyfile（或其他目录）。
+场景 1：使用全新的子域名（推荐） 请在 Caddyfile 的末尾追加以下内容：
+```bash
+# 请将 xui.yourdomain.com 替换为您实际用于面板的域名
+xui.yourdomain.com {
+    # 1. 拦截订阅转换请求 (转发给 SubConverter)
+    handle_path /convert* {
+        rewrite * /sub
+        reverse_proxy 127.0.0.1:25500
+    }
+
+    # 2. 面板主体 (转发给 Python 面板)
+    handle {
+        reverse_proxy 127.0.0.1:8081
+    }
+}
+```
+场景 2：想把面板挂在现有域名的子路径下（高级） 如果您想通过 blog.com/panel 这种方式访问，请在您现有的站点配置块中插入：
+```bash
+your-existing-site.com {
+    # ... 您原有的配置 ...
+
+    # 1. 订阅转换
+    handle_path /convert* {
+        rewrite * /sub
+        reverse_proxy 127.0.0.1:25500
+    }
+
+    # 2. X-UI 面板 (假设挂载在 /panel 路径)
+    # 注意：这需要面板本身支持 Base Path 设置，否则可能会有静态资源路径问题
+    # 如果面板不支持 Base Path，建议使用场景 1
+    handle_path /panel* {
+        reverse_proxy 127.0.0.1:8081
+    }
+}
+```
+
+
 ## 🛠️ 管理命令
 
 * 查看日志：
