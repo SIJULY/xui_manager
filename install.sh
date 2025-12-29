@@ -253,7 +253,6 @@ install_panel() {
     echo -e "账号: ${BLUE}${admin_user}${PLAIN}"
     echo -e "密码: ${BLUE}${admin_pass}${PLAIN}"
     echo -e "------------------------------------------------"
-    echo -e "${RED}⚠️ 重要：请复制下方密钥到 OCI 开机面板脚本中 ⚠️${PLAIN}"
     echo -e "通讯密钥: ${GREEN}${secret_key}${PLAIN}"
     echo -e "------------------------------------------------"
 }
