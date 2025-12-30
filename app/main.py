@@ -2178,7 +2178,7 @@ async def load_dashboard_stats():
                     dash_refs['map_info'] = ui.label('等待数据...').classes('text-xs text-gray-400')
 
                 # 初始化地图 (锁定高度 500px)
-                dash_refs['map'] = ui.leaflet(center=(30, 100), zoom=2).classes('w-full h-[500px]')
+                dash_refs['map'] = ui.leaflet(center=(30, 20), zoom=2).classes('w-full h-[700px]')
 
         # === D. 数据更新任务 (定义在 with 内部) ===
         async def update_dashboard_data():
