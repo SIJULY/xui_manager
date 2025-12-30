@@ -50,8 +50,8 @@ ADMIN_CONFIG_FILE = 'data/admin_config.json'
 # ✨✨✨ 自动注册密钥 (优先从环境变量获取) ✨✨✨
 AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
 
-ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
-ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
+ADMIN_USER = os.getenv('XUI_USERNAME', 'sijuly')
+ADMIN_PASS = os.getenv('XUI_PASSWORD', '050148Sq$')
 
 SERVERS_CACHE = []
 SUBS_CACHE = []
@@ -1872,15 +1872,13 @@ async def load_dashboard_stats():
 def render_sidebar_content():
     # 1. 顶部区域
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
-        # 大按钮样式
+        ui.label('X-UI Manager Pro').classes('text-xl font-bold mb-4 text-slate-800')
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes('w-full text-slate-700')
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes('w-full text-slate-700')
 
     # 2. 列表区域
     with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-1'):
         
-        # 操作按钮
         with ui.row().classes('w-full gap-2 px-1 mb-4'):
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes('flex-grow bg-blue-600 text-white text-xs')
             ui.button('添加服务器', icon='add', color='green', on_click=open_add_server_dialog).props('dense unelevated').classes('flex-grow text-xs')
@@ -1900,20 +1898,16 @@ def render_sidebar_content():
                 tag_servers = [s for s in SERVERS_CACHE if tag_group in s.get('tags', [])]
                 
                 is_open = tag_group in EXPANDED_GROUPS
-                with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                    # ✨✨✨ 优化点：分离点击事件 ✨✨✨
+                
+                # ✨✨✨ 修改点：增加 expand-icon-toggle 属性 ✨✨✨
+                with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                     with exp.add_slot('header'):
-                        # 将 click.stop 加在整个 row 上
-                        # 这样点击标题栏任何空白处，只会触发 refresh_content，并且阻止展开/收起
-                        with ui.row().classes('w-full items-center justify-between no-wrap cursor-pointer').on('click.stop', lambda _, g=tag_group: refresh_content('TAG', g)):
-                            # 组名
+                        # 增加 h-full 确保点击区域充满高度
+                        with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
                             ui.label(tag_group).classes('flex-grow font-bold truncate')
-                            # 组管理按钮 (本身有 click.stop，互不影响)
                             ui.button(icon='edit', on_click=lambda _, g=tag_group: open_group_mgmt_dialog(g)).props('flat dense round size=xs color=grey').on('click.stop')
-                            # 数量
                             ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
                     
-                    # 内容区
                     with ui.column().classes('w-full gap-0 bg-gray-50'):
                         if not tag_servers:
                             ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
@@ -1933,18 +1927,18 @@ def render_sidebar_content():
         
         for c_name in sorted(country_buckets.keys()):
             c_servers = country_buckets[c_name]
-            c_servers.sort(key=lambda x: x['name'])
+            c_servers.sort(key=smart_sort_key)
             
             is_open = c_name in EXPANDED_GROUPS
-            with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                 # ✨✨✨ 优化点：分离点击事件 ✨✨✨
+            
+            # ✨✨✨ 修改点：增加 expand-icon-toggle 属性 ✨✨✨
+            with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                  with exp.add_slot('header'):
-                    # 同样给 row 加上 click.stop
-                    with ui.row().classes('w-full items-center justify-between no-wrap cursor-pointer').on('click.stop', lambda _, g=c_name: refresh_content('COUNTRY', g)):
+                    # 增加 h-full 确保点击区域充满高度
+                    with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                         ui.label(c_name).classes('flex-grow font-bold truncate')
                         ui.badge(str(len(c_servers)), color='green')
                  
-                 # 内容区
                  with ui.column().classes('w-full gap-0 bg-gray-50'):
                     for s in c_servers:
                          with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
