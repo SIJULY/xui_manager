@@ -21,6 +21,8 @@ from fastapi.responses import RedirectResponse
 from urllib.parse import urlparse, quote 
 from nicegui import ui, app
 
+IP_GEO_CACHE = {}
+
 # ================= 强制日志实时输出 =================
 sys.stdout.reconfigure(line_buffering=True)
 logging.basicConfig(
@@ -2015,6 +2017,9 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                                 ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                     except: continue
 
+
+# ==============================================================
+
 async def load_dashboard_stats():
     # 1. 缓冲
     await asyncio.sleep(0.1)
@@ -2022,53 +2027,38 @@ async def load_dashboard_stats():
     
     # 2. 定义 UI 引用
     dash_refs = {}
+    
+    # 标记是否有数据被自动修正，如果有，最后需要保存并刷新侧边栏
+    config_changed = False
 
-    # 3. 辅助：超级坐标库
+    # 3. 辅助：超级坐标库 (用于名称匹配)
     LOCATION_COORDS = {
         '🇨🇳': (35.86, 104.19), 'China': (35.86, 104.19), '中国': (35.86, 104.19),
         '🇭🇰': (22.31, 114.16), 'HK': (22.31, 114.16), 'Hong Kong': (22.31, 114.16), '香港': (22.31, 114.16),
         '🇹🇼': (23.69, 120.96), 'TW': (23.69, 120.96), 'Taiwan': (23.69, 120.96), '台湾': (23.69, 120.96),
         '🇯🇵': (36.20, 138.25), 'JP': (36.20, 138.25), 'Japan': (36.20, 138.25), '日本': (36.20, 138.25),
-        'Tokyo': (35.68, 139.76), '东京': (35.68, 139.76),
-        'Osaka': (34.69, 135.50), '大阪': (34.69, 135.50),
+        'Tokyo': (35.68, 139.76), '东京': (35.68, 139.76), 'Osaka': (34.69, 135.50), '大阪': (34.69, 135.50),
         '🇸🇬': (1.35, 103.81), 'SG': (1.35, 103.81), 'Singapore': (1.35, 103.81), '新加坡': (1.35, 103.81),
         '🇰🇷': (35.90, 127.76), 'KR': (35.90, 127.76), 'Korea': (35.90, 127.76), '韩国': (35.90, 127.76),
         'Seoul': (37.56, 126.97), '首尔': (37.56, 126.97),
-        'Chuncheon': (37.88, 127.72), '春川': (37.88, 127.72),
         '🇮🇳': (20.59, 78.96), 'IN': (20.59, 78.96), 'India': (20.59, 78.96), '印度': (20.59, 78.96),
-        'Mumbai': (19.07, 72.87), '孟买': (19.07, 72.87),
-        'Hyderabad': (17.38, 78.48), '海得拉巴': (17.38, 78.48),
         '🇮🇩': (-0.78, 113.92), 'ID': (-0.78, 113.92), 'Indonesia': (-0.78, 113.92), '印尼': (-0.78, 113.92),
-        'Jakarta': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Batam': (1.13, 104.05), '巴淡': (1.13, 104.05),
         '🇲🇾': (4.21, 101.97), 'MY': (4.21, 101.97), 'Malaysia': (4.21, 101.97), '马来西亚': (4.21, 101.97),
         '🇹🇭': (15.87, 100.99), 'TH': (15.87, 100.99), 'Thailand': (15.87, 100.99), '泰国': (15.87, 100.99),
         'Bangkok': (13.75, 100.50), '曼谷': (13.75, 100.50),
         '🇻🇳': (14.05, 108.27), 'VN': (14.05, 108.27), 'Vietnam': (14.05, 108.27), '越南': (14.05, 108.27),
         '🇵🇭': (12.87, 121.77), 'PH': (12.87, 121.77), 'Philippines': (12.87, 121.77), '菲律宾': (12.87, 121.77),
         '🇮🇱': (31.04, 34.85), 'IL': (31.04, 34.85), 'Israel': (31.04, 34.85), '以色列': (31.04, 34.85),
-        'Jerusalem': (31.76, 35.21), '耶路撒冷': (31.76, 35.21),
         '🇹🇷': (38.96, 35.24), 'TR': (38.96, 35.24), 'Turkey': (38.96, 35.24), '土耳其': (38.96, 35.24),
-        'Istanbul': (41.00, 28.97), '伊斯坦布尔': (41.00, 28.97),
         '🇦🇪': (23.42, 53.84), 'AE': (23.42, 53.84), 'UAE': (23.42, 53.84), '阿联酋': (23.42, 53.84),
         'Dubai': (25.20, 55.27), '迪拜': (25.20, 55.27),
-        'Abu Dhabi': (24.45, 54.37), '阿布扎比': (24.45, 54.37),
         '🇺🇸': (37.09, -95.71), 'US': (37.09, -95.71), 'USA': (37.09, -95.71), 'United States': (37.09, -95.71), '美国': (37.09, -95.71),
-        'San Jose': (37.33, -121.88), '圣何塞': (37.33, -121.88),
-        'Los Angeles': (34.05, -118.24), '洛杉矶': (34.05, -118.24),
+        'San Jose': (37.33, -121.88), '圣何塞': (37.33, -121.88), 'Los Angeles': (34.05, -118.24), '洛杉矶': (34.05, -118.24),
         'Phoenix': (33.44, -112.07), '凤凰城': (33.44, -112.07),
-        'Ashburn': (39.04, -77.48), '阿什本': (39.04, -77.48),
-        'San Francisco': (37.77, -122.41), '旧金山': (37.77, -122.41),
-        'New York': (40.71, -74.00), '纽约': (40.71, -74.00),
         '🇨🇦': (56.13, -106.34), 'CA': (56.13, -106.34), 'Canada': (56.13, -106.34), '加拿大': (56.13, -106.34),
-        'Toronto': (43.65, -79.38), '多伦多': (43.65, -79.38),
-        'Vancouver': (49.28, -123.12), '温哥华': (49.28, -123.12),
         '🇧🇷': (-14.23, -51.92), 'BR': (-14.23, -51.92), 'Brazil': (-14.23, -51.92), '巴西': (-14.23, -51.92),
-        'Sao Paulo': (-23.55, -46.63), '圣保罗': (-23.55, -46.63),
         '🇲🇽': (23.63, -102.55), 'MX': (23.63, -102.55), 'Mexico': (23.63, -102.55), '墨西哥': (23.63, -102.55),
-        'Monterrey': (25.68, -100.31), '蒙特雷': (25.68, -100.31),
         '🇨🇱': (-35.67, -71.54), 'CL': (-35.67, -71.54), 'Chile': (-35.67, -71.54), '智利': (-35.67, -71.54),
-        'Santiago': (-33.44, -70.66), '圣地亚哥': (-33.44, -70.66),
-        'Valparaiso': (-33.04, -71.61), '瓦尔帕莱索': (-33.04, -71.61),
         '🇦🇷': (-38.41, -63.61), 'AR': (-38.41, -63.61), 'Argentina': (-38.41, -63.61), '阿根廷': (-38.41, -63.61),
         '🇬🇧': (55.37, -3.43), 'UK': (55.37, -3.43), 'United Kingdom': (55.37, -3.43), '英国': (55.37, -3.43),
         'London': (51.50, -0.12), '伦敦': (51.50, -0.12),
@@ -2076,13 +2066,12 @@ async def load_dashboard_stats():
         'Frankfurt': (50.11, 8.68), '法兰克福': (50.11, 8.68),
         '🇫🇷': (46.22, 2.21), 'FR': (46.22, 2.21), 'France': (46.22, 2.21), '法国': (46.22, 2.21),
         'Paris': (48.85, 2.35), '巴黎': (48.85, 2.35),
-        'Marseille': (43.29, 5.36), '马赛': (43.29, 5.36),
         '🇳🇱': (52.13, 5.29), 'NL': (52.13, 5.29), 'Netherlands': (52.13, 5.29), '荷兰': (52.13, 5.29),
         'Amsterdam': (52.36, 4.90), '阿姆斯特丹': (52.36, 4.90),
         '🇷🇺': (61.52, 105.31), 'RU': (61.52, 105.31), 'Russia': (61.52, 105.31), '俄罗斯': (61.52, 105.31),
         'Moscow': (55.75, 37.61), '莫斯科': (55.75, 37.61),
         '🇮🇹': (41.87, 12.56), 'IT': (41.87, 12.56), 'Italy': (41.87, 12.56), '意大利': (41.87, 12.56),
-        'Milan': (45.46, 9.19), '米兰': (45.46, 9.19), 'Turin': (45.07, 7.68), '都灵': (45.07, 7.68),
+        'Milan': (45.46, 9.19), '米兰': (45.46, 9.19),
         '🇪🇸': (40.46, -3.74), 'ES': (40.46, -3.74), 'Spain': (40.46, -3.74), '西班牙': (40.46, -3.74),
         'Madrid': (40.41, -3.70), '马德里': (40.41, -3.70),
         '🇸🇪': (60.12, 18.64), 'SE': (60.12, 18.64), 'Sweden': (60.12, 18.64), '瑞典': (60.12, 18.64),
@@ -2095,13 +2084,43 @@ async def load_dashboard_stats():
         'Johannesburg': (-26.20, 28.04), '约翰内斯堡': (-26.20, 28.04),
     }
 
-    # 4. 匹配算法
-    def get_coords(name):
+    def get_coords_from_name(name):
         for k in sorted(LOCATION_COORDS.keys(), key=len, reverse=True):
             if k in name: return LOCATION_COORDS[k]
         return None
 
-    # 5. 进入容器上下文
+    # 4. 辅助：从 IP 获取详细信息 (坐标 + 国家名)
+    def fetch_geo_from_ip(host):
+        try:
+            clean_host = host.split('://')[-1].split(':')[0]
+            if clean_host in IP_GEO_CACHE:
+                return IP_GEO_CACHE[clean_host]
+            
+            # ✨ 关键：请求 lang=zh-CN 以获得中文国家名
+            with requests.Session() as s:
+                url = f"http://ip-api.com/json/{clean_host}?lang=zh-CN&fields=status,lat,lon,country"
+                r = s.get(url, timeout=2)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get('status') == 'success':
+                        # 返回 (纬度, 经度, 国家名)
+                        result = (data['lat'], data['lon'], data['country'])
+                        IP_GEO_CACHE[clean_host] = result
+                        return result
+        except: 
+            pass
+        return None
+
+    # 5. 辅助：根据中文国家名匹配国旗
+    def get_flag_for_country(country_name):
+        # 简单反向查找，利用 AUTO_COUNTRY_MAP
+        # 你的 AUTO_COUNTRY_MAP 格式是 {'美国': '🇺🇸 美国', ...}
+        for k, v in AUTO_COUNTRY_MAP.items():
+            if k in country_name: # 比如 "美国" in "美国"
+                return v # 返回 "🇺🇸 美国"
+        return f"🏳️ {country_name}" # 找不到就用白旗
+
+    # 6. 进入容器上下文
     with content_container:
         ui.label('系统概览').classes('text-3xl font-bold mb-6 text-slate-800 tracking-tight')
         
@@ -2124,7 +2143,6 @@ async def load_dashboard_stats():
 
         # === B. 图表区域 ===
         with ui.row().classes('w-full gap-6 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
-            # 左侧：排行
             with ui.card().classes('w-full xl:w-2/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-lg font-bold text-slate-700')
@@ -2137,7 +2155,6 @@ async def load_dashboard_stats():
                     'series': [{'type': 'bar', 'data': [], 'barWidth': '40%', 'itemStyle': {'borderRadius': [4, 4, 0, 0], 'color': '#6366f1'}}]
                 }).classes('w-full h-80')
 
-            # 右侧：分布
             with ui.card().classes('w-full xl:w-1/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 ui.label('🍩 协议分布').classes('text-lg font-bold text-slate-700 mb-2')
                 dash_refs['pie_chart'] = ui.echart({
@@ -2177,13 +2194,13 @@ async def load_dashboard_stats():
                         ui.label('全球节点实景分布 (Leaflet)').classes('text-lg font-bold text-slate-700')
                     dash_refs['map_info'] = ui.label('等待数据...').classes('text-xs text-gray-400')
 
-                # 初始化地图 (锁定高度 500px)
+                # 初始化地图 (高度 700px, 中心点 30,20)
                 dash_refs['map'] = ui.leaflet(center=(30, 20), zoom=2).classes('w-full h-[700px]')
 
         # === D. 数据更新任务 (定义在 with 内部) ===
         async def update_dashboard_data():
+            nonlocal config_changed # 引用外部变量
             try:
-                # 检查容器
                 if content_container.is_deleted: return
 
                 total_servers = len(SERVERS_CACHE)
@@ -2202,8 +2219,28 @@ async def load_dashboard_stats():
                     res = NODES_DATA.get(s['url'], [])
                     name = s.get('name', '未命名')
                     
-                    # 匹配坐标
-                    coords = get_coords(name)
+                    # 1. 优先尝试名称匹配
+                    coords = get_coords_from_name(name)
+                    
+                    # 2. 如果名称匹配失败，尝试 IP 定位
+                    if not coords:
+                        # 获取地理信息 (lat, lon, country_name)
+                        geo_info = await run.io_bound(fetch_geo_from_ip, s['url'])
+                        
+                        if geo_info:
+                            coords = (geo_info[0], geo_info[1])
+                            country_name = geo_info[2]
+                            
+                            # ✨✨✨ 自动纠正分组逻辑 ✨✨✨
+                            current_group = s.get('group', '默认分组')
+                            if current_group in ['默认分组', '自动注册', '未分组']:
+                                # 找到对应的国旗分组名
+                                new_group = get_flag_for_country(country_name)
+                                if new_group != current_group:
+                                    s['group'] = new_group
+                                    config_changed = True # 标记需要保存
+                                    logger.info(f"🔄 [自动分组] {name} -> {new_group}")
+
                     if coords:
                         map_markers.append((coords[0], coords[1], name))
 
@@ -2243,7 +2280,7 @@ async def load_dashboard_stats():
                     avg_traffic = total_traffic_bytes / total_nodes if total_nodes > 0 else 0
                     dash_refs['stat_avg'].set_text(format_bytes(avg_traffic))
 
-                # 更新地图标记 (✅ 终极修复：移除 .popup，避免崩溃)
+                # 更新地图标记 (保持 marker，避免崩溃)
                 if 'map' in dash_refs and map_markers:
                     m = dash_refs['map']
                     dash_refs['map_info'].set_text(f'已定位 {len(map_markers)} / {total_servers} 个节点')
@@ -2253,14 +2290,17 @@ async def load_dashboard_stats():
                             # 随机微调
                             lat += (random.random() - 0.5) * 0.1
                             lng += (random.random() - 0.5) * 0.1
-                            
-                            # 仅添加标记，不要调用 .popup(name)，否则程序会崩溃在第一个点
                             m.marker(latlng=(lat, lng))
-                            
                         m.has_drawn_markers = True
+                
+                # ✨ 如果有分组变动，保存并刷新左侧栏
+                if config_changed:
+                    await save_servers()
+                    render_sidebar_content.refresh()
+                    safe_notify("已根据 IP 自动更新服务器分组", "positive")
+                    config_changed = False # 重置标记
 
             except Exception as e:
-                # 增强日志，方便排查
                 logger.error(f"❌ Dashboard Update Error: {e}")
 
         # 6. 立即运行一次
@@ -2300,10 +2340,8 @@ def render_sidebar_content():
                 
                 is_open = tag_group in EXPANDED_GROUPS
                 
-                # ✨✨✨ 修改点：增加 expand-icon-toggle 属性 ✨✨✨
                 with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                     with exp.add_slot('header'):
-                        # 增加 h-full 确保点击区域充满高度
                         with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
                             ui.label(tag_group).classes('flex-grow font-bold truncate')
                             ui.button(icon='edit', on_click=lambda _, g=tag_group: open_group_mgmt_dialog(g)).props('flat dense round size=xs color=grey').on('click.stop')
@@ -2317,12 +2355,23 @@ def render_sidebar_content():
                                 ui.label(s['name']).classes('text-sm truncate flex-grow')
                                 ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
-        # --- C. 自动国家分组 (Auto) ---
-        ui.label('区域分组 (自动)').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
+        # --- C. 智能区域分组 (✨ 修复点：优先读取 saved_group) ---
+        ui.label('区域分组 (智能)').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
         
         country_buckets = {}
         for s in SERVERS_CACHE:
-            c_group = detect_country_group(s.get('name', ''))
+            # ✨ 核心逻辑修改 ✨
+            # 1. 获取已保存的分组
+            saved_group = s.get('group')
+            
+            # 2. 判断逻辑：
+            # 如果 saved_group 存在，且不是 "默认/自动/空"，说明它已经被手动或自动修正过了，直接用。
+            # 否则，才去尝试用名字（detect_country_group）去猜。
+            if saved_group and saved_group not in ['默认分组', '自动注册', '未分组']:
+                c_group = saved_group
+            else:
+                c_group = detect_country_group(s.get('name', ''))
+            
             if c_group not in country_buckets: country_buckets[c_group] = []
             country_buckets[c_group].append(s)
         
@@ -2332,10 +2381,8 @@ def render_sidebar_content():
             
             is_open = c_name in EXPANDED_GROUPS
             
-            # ✨✨✨ 修改点：增加 expand-icon-toggle 属性 ✨✨✨
             with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                  with exp.add_slot('header'):
-                    # 增加 h-full 确保点击区域充满高度
                     with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                         ui.label(c_name).classes('flex-grow font-bold truncate')
                         ui.badge(str(len(c_servers)), color='green')
