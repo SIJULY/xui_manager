@@ -1,10 +1,11 @@
-# 🌐 X-UI Manager Pro
+# 🌐 X-Fusion Panel
+
 
 ![Docker](https://img.shields.io/badge/Docker-Enabled-blue)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**X-UI Manager Pro** 是一个现代化的 X-UI 多面板集中管理系统。通过统一的 Web 界面，你可以轻松管理分布在不同服务器上的 X-UI 面板，实现节点同步、流量监控、分组订阅管理以及批量操作。
+**X-Fusion Panel"** 是一个现代化的多面板集中管理系统。通过统一的 Web 界面，你可以轻松管理分布在不同服务器上的 X-UI 面板，实现节点同步、流量监控、分组订阅管理以及批量操作。
 
 ---
 
