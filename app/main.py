@@ -9,10 +9,12 @@ import urllib3
 import shutil
 import re
 import sys
+import socket
 import random
 import pyotp
 import qrcode
 import io
+import paramiko
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
@@ -22,6 +24,26 @@ from urllib.parse import urlparse, quote
 from nicegui import ui, app
 
 IP_GEO_CACHE = {}
+
+
+# ================= SSH 全局配置区域 (新增) =================
+GLOBAL_SSH_KEY_FILE = 'data/global_ssh_key'
+
+def load_global_key():
+    if os.path.exists(GLOBAL_SSH_KEY_FILE):
+        with open(GLOBAL_SSH_KEY_FILE, 'r') as f: return f.read()
+    return ""
+
+def save_global_key(content):
+    with open(GLOBAL_SSH_KEY_FILE, 'w') as f: f.write(content)
+
+def open_global_settings_dialog():
+    with ui.dialog() as d, ui.card().classes('w-full max-w-2xl'):
+        ui.label('🔐 全局 SSH 密钥设置').classes('text-lg font-bold')
+        ui.label('当服务器未单独配置密钥时，将默认使用此私钥连接。').classes('text-xs text-gray-400')
+        key_input = ui.textarea(placeholder='-----BEGIN OPENSSH PRIVATE KEY-----', value=load_global_key()).classes('w-full h-64 font-mono text-xs').props('outlined')
+        ui.button('保存全局密钥', on_click=lambda: [save_global_key(key_input.value), d.close(), safe_notify('全局密钥已保存', 'positive')]).classes('w-full bg-slate-900 text-white')
+    d.open()
 
 # ================= 强制日志实时输出 =================
 sys.stdout.reconfigure(line_buffering=True)
@@ -163,6 +185,305 @@ managers = {}
 def safe_notify(message, type='info', timeout=3000):
     try: ui.notify(message, type=type, timeout=timeout)
     except: logger.info(f"[Notify] {message}")
+
+
+# ================= SSH 连接核心逻辑 (新增) =================
+def get_ssh_client(server_data):
+    """建立 SSH 连接"""
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
+    # 解析 IP
+    raw_url = server_data['url']
+    if '://' in raw_url: host = raw_url.split('://')[-1].split(':')[0]
+    else: host = raw_url.split(':')[0]
+    
+    port = int(server_data.get('ssh_port') or 22)
+    user = server_data.get('ssh_user') or 'root'
+    auth_type = server_data.get('ssh_auth_type', '全局密钥')
+    
+    try:
+        if auth_type == '独立密码':
+            client.connect(host, port, username=user, password=server_data.get('ssh_password'), timeout=5)
+        elif auth_type == '独立密钥':
+            key_file = io.StringIO(server_data.get('ssh_key', ''))
+            pkey = paramiko.RSAKey.from_private_key(key_file)
+            client.connect(host, port, username=user, pkey=pkey, timeout=5)
+        else: # 全局密钥
+            g_key = load_global_key()
+            if not g_key: raise Exception("全局密钥未配置")
+            key_file = io.StringIO(g_key)
+            pkey = paramiko.RSAKey.from_private_key(key_file)
+            client.connect(host, port, username=user, pkey=pkey, timeout=5)
+        return client, f"✅ 已连接 {user}@{host}"
+    except Exception as e:
+        return None, f"❌ 连接失败: {str(e)}"
+
+# ================= [修复版] 交互式 WebSSH 类 =================
+
+# 这个辅助函数必须在 class WebSSH 上面
+def get_ssh_client_sync(server_data):
+    return get_ssh_client(server_data)
+
+class WebSSH:
+    def __init__(self, container, server_data):
+        self.container = container
+        self.server_data = server_data
+        self.client = None
+        self.channel = None
+        self.active = False
+        self.term_id = f'term_{uuid.uuid4().hex}'
+
+    async def connect(self):
+        # 显式进入容器上下文
+        with self.container:
+            try:
+                # 1. 渲染终端 UI 容器
+                # 使用 relative 和 hidden 确保布局正确
+                ui.element('div').props(f'id={self.term_id}').classes('w-full h-full bg-black rounded p-2 overflow-hidden relative')
+                
+                # 2. 注入 JS (初始化 xterm, 增加详细错误处理)
+                init_js = f"""
+                try {{
+                    // --- A. 安全清理旧实例 ---
+                    if (window.{self.term_id}) {{
+                        console.log("Cleaning up old term:", window.{self.term_id});
+                        // ✨ 核心修复：只有当 dispose 是一个函数时才调用
+                        if (typeof window.{self.term_id}.dispose === 'function') {{
+                            window.{self.term_id}.dispose();
+                        }}
+                        window.{self.term_id} = null;
+                    }}
+                    
+                    // --- B. 检查 xterm.js 库是否加载 ---
+                    if (typeof Terminal === 'undefined') {{
+                        throw new Error("xterm.js 库未加载！请检查 /static/xterm.js 是否正常访问");
+                    }}
+                    
+                    // --- C. 创建新实例 ---
+                    var term = new Terminal({{
+                        cursorBlink: true,
+                        fontSize: 14,
+                        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                        theme: {{ background: '#000000', foreground: '#ffffff' }},
+                        convertEol: true,
+                    }});
+                    
+                    // --- D. 加载自适应插件 (兼容处理) ---
+                    var fitAddon;
+                    if (typeof FitAddon !== 'undefined') {{
+                        // 兼容不同版本的导出方式: FitAddon.FitAddon 或 直接 FitAddon
+                        var FitAddonClass = FitAddon.FitAddon || FitAddon;
+                        fitAddon = new FitAddonClass();
+                        term.loadAddon(fitAddon);
+                    }} else {{
+                        console.warn("FitAddon not found");
+                    }}
+                    
+                    // --- E. 挂载到 DOM ---
+                    var el = document.getElementById('{self.term_id}');
+                    term.open(el);
+                    
+                    // 打印本地欢迎语
+                    term.write('\\x1b[32m[Local] Terminal Ready. Connecting to SSH...\\x1b[0m\\r\\n');
+                    
+                    if (fitAddon) {{ setTimeout(() => {{ fitAddon.fit(); }}, 200); }}
+                    
+                    // 注册到全局变量
+                    window.{self.term_id} = term;
+                    term.focus();
+                    
+                    // --- F. 绑定事件 ---
+                    term.onData(data => {{
+                        emitEvent('term_input_{self.term_id}', data);
+                    }});
+                    
+                    if (fitAddon) {{ new ResizeObserver(() => fitAddon.fit()).observe(el); }}
+
+                }} catch(e) {{
+                    console.error("Terminal Init Error:", e);
+                    var el = document.getElementById('{self.term_id}');
+                    if (el) {{
+                        el.innerHTML = '<div style="color:red; padding:20px; font-weight:bold;">启动错误: ' + e.message + '</div>';
+                    }}
+                    alert("终端启动失败: " + e.message);
+                }}
+                """
+                ui.run_javascript(init_js)
+
+                # 3. 绑定输入事件
+                ui.on(f'term_input_{self.term_id}', lambda e: self._write_to_ssh(e.args))
+
+                # 4. 后台建立 SSH 连接
+                self.client, msg = await run.io_bound(get_ssh_client_sync, self.server_data)
+                
+                if not self.client:
+                    self._print_error(msg)
+                    return
+
+                # 5. 开启 Shell
+                self.channel = self.client.invoke_shell(term='xterm', width=100, height=30)
+                self.channel.settimeout(0.0) 
+                self.active = True
+
+                # ✨ 发送回车唤醒 Shell
+                self.channel.send('\n')
+
+                # 6. 启动读取循环
+                asyncio.create_task(self._read_loop())
+                
+                ui.notify(f"已连接到 {self.server_data['name']}", type='positive')
+
+            except Exception as e:
+                self._print_error(f"初始化异常: {e}")
+
+    def _print_error(self, msg):
+        try:
+            js_cmd = f'if(window.{self.term_id}) window.{self.term_id}.write("\\r\\n\\x1b[31m[Error] {str(msg)}\\x1b[0m\\r\\n");'
+            with self.container.client:
+                ui.run_javascript(js_cmd)
+        except:
+            ui.notify(msg, type='negative')
+
+    def _write_to_ssh(self, data):
+        if self.channel and self.active:
+            try: self.channel.send(data)
+            except: pass
+
+    async def _read_loop(self):
+        while self.active:
+            try:
+                if self.channel.recv_ready():
+                    data = self.channel.recv(4096)
+                    if not data: break 
+                    
+                    b64_data = base64.b64encode(data).decode('utf-8')
+                    
+                    with self.container.client:
+                        ui.run_javascript(f'if(window.{self.term_id}) window.{self.term_id}.write(atob("{b64_data}"))')
+                
+                await asyncio.sleep(0.01)
+            except Exception:
+                await asyncio.sleep(0.1)
+
+    def close(self):
+        self.active = False
+        if self.client: 
+            try: self.client.close()
+            except: pass
+        try:
+            with self.container.client:
+                # 简单的 dispose，不做复杂判断，因为 connect 里已经有强力清理了
+                ui.run_javascript(f'if(window.{self.term_id}) window.{self.term_id}.dispose();')
+        except: pass
+
+# ================= [最终修正版] SSH 界面入口 (宽屏垂直居中) =================
+ssh_instances = {} 
+
+def open_ssh_interface(server_data):
+    # 1. 清理内容
+    content_container.clear()
+    
+    # ✨ 关键调整：
+    # h-full: 容器高度占满屏幕，为垂直居中做准备
+    # p-6: 保持四周留白，不贴边
+    # flex flex-col justify-center: 让内部的灰色大卡片在垂直方向居中！
+    content_container.classes(remove='p-0 pl-0 block', add='h-full p-6 flex flex-col justify-center overflow-hidden')
+    
+    old_ssh = ssh_instances.get('current')
+    if old_ssh: old_ssh.close()
+
+    with content_container:
+        # ✨ 灰色背景大容器 (Wrapper)
+        # w-full: 宽度占满 (满足你的要求)
+        # h-[85vh]: 高度固定为视口的 85%，这样上下就会留出空隙，实现“悬浮感”
+        with ui.column().classes('w-full h-[85vh] bg-gray-100 rounded-2xl p-4 shadow-2xl border border-gray-200 gap-3 relative'):
+            
+            # === 1. 顶部大标题栏 (居中) ===
+            # relative: 为了让关闭按钮绝对定位
+            # justify-center: 让标题文字居中
+            with ui.row().classes('w-full items-center justify-center relative mb-1'):
+                 
+                 # 居中的标题文字
+                 with ui.row().classes('items-center gap-3'):
+                    ui.icon('dns').classes('text-2xl text-blue-600')
+                    ui.label('VPS SSH 客户端连接').classes('text-xl font-extrabold text-gray-800 tracking-wide')
+                 
+                 # 绝对定位在右侧的关闭按钮
+                 with ui.element('div').classes('absolute right-0 top-1/2 -translate-y-1/2'):
+                     ui.button(icon='close', on_click=lambda: [close_ssh(), load_dashboard_stats()]) \
+                        .props('flat round dense color=grey-7').tooltip('关闭')
+
+            # === 2. 终端卡片 ===
+            # flex-grow: 自动填满灰色容器剩余的高度
+            with ui.card().classes('w-full flex-grow p-0 gap-0 border border-gray-300 rounded-xl flex flex-col flex-nowrap overflow-hidden shadow-inner min-w-0 relative'):
+                
+                # --- 内部信息栏 (白色) ---
+                with ui.row().classes('w-full h-10 bg-white items-center justify-between px-4 border-b border-gray-200 flex-shrink-0'):
+                    
+                    # 左侧：服务器信息
+                    with ui.row().classes('items-center gap-3 overflow-hidden'):
+                        ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 shadow-sm animate-pulse')
+                        ui.icon('terminal').classes('text-slate-500')
+                        with ui.row().classes('gap-2 items-baseline'):
+                             ui.label(server_data['name']).classes('text-sm font-bold text-gray-800 truncate')
+                             host_name = server_data.get('url', '').replace('http://', '').split(':')[0]
+                             ui.label(f"{server_data.get('ssh_user','root')}@{host_name}").classes('text-xs font-mono text-gray-400 hidden sm:block truncate')
+
+                    # 右侧：断开按钮
+                    async def close_and_restore():
+                        close_ssh()
+                        await load_dashboard_stats()
+
+                    ui.button(icon='link_off', on_click=close_and_restore) \
+                        .props('round unelevated dense size=sm color=red-1 text-color=red shadow-none') \
+                        .tooltip('断开连接')
+
+                # --- 黑色终端区域 ---
+                terminal_box = ui.column().classes('w-full flex-grow bg-black p-0 overflow-hidden relative min-h-0 min-w-0')
+                
+                # 启动 WebSSH
+                ssh = WebSSH(terminal_box, server_data)
+                ssh_instances['current'] = ssh
+                ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
+
+    def close_ssh():
+        if ssh_instances.get('current'):
+            ssh_instances['current'].close()
+            ssh_instances['current'] = None
+        # 关闭时恢复布局
+        content_container.clear()
+        content_container.classes(remove='h-full flex flex-col justify-center overflow-hidden', add='block overflow-y-auto')
+            
+def _exec(server_data, cmd, log_area):
+    client, msg = get_ssh_client(server_data)
+    if not client:
+        log_area.push(msg)
+        return
+    try:
+        # get_pty=True 模拟伪终端，能获取更好的输出格式
+        # timeout=10 设置 10 秒超时，防止卡死
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=10, get_pty=True)
+        
+        # 读取输出 (二进制转字符串)
+        out = stdout.read().decode('utf-8', errors='ignore').strip()
+        err = stderr.read().decode('utf-8', errors='ignore').strip()
+        
+        if out: log_area.push(out)
+        if err: log_area.push(f"ERR: {err}")
+        
+        # 如果都没有输出且没有报错
+        if not out and not err:
+            log_area.push("✅ 命令已执行 (无返回内容)")
+            
+    except  paramiko.SSHException as e:
+         log_area.push(f"SSH Error: {str(e)}")
+    except socket.timeout:
+         log_area.push("❌ 执行超时: 命令执行时间过长或正在等待交互 (如 sudo/vim)")
+    except Exception as e:
+        log_area.push(f"系统错误: {repr(e)}") # 使用 repr 显示详细错误类型
+    finally:
+        client.close()
 
 # ================= 核心网络类 =================
 class XUIManager:
@@ -1234,42 +1555,84 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-async def open_add_server_dialog():
-    with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
-        ui.label('添加服务器').classes('text-lg font-bold')
-        n = ui.input('名称').classes('w-full'); g = ui.select(options=get_all_groups(), label='分组', value='默认分组').classes('w-full')
-        u = ui.input('URL').classes('w-full'); us = ui.input('账号').classes('w-full')
-        p = ui.input('密码', password=True).classes('w-full'); pre = ui.input('API前缀', placeholder='/xui').classes('w-full')
-        async def save():
-            SERVERS_CACHE.append({'name':n.value,'group':g.value,'url':u.value,'user':us.value,'pass':p.value,'prefix':pre.value})
-            await save_servers(); d.close(); render_sidebar_content.refresh(); await refresh_content('SINGLE', SERVERS_CACHE[-1], force_refresh=True)
-        ui.button('保存', on_click=save).classes('w-full bg-green-600 text-white')
-    d.open()
+# ================= [修改] 还原为小巧卡片式弹窗 (带切换功能) =================
+async def open_server_dialog(idx=None):
+    is_edit = idx is not None
+    data = SERVERS_CACHE[idx] if is_edit else {}
+    
+    # 还原为原来的 max-w-sm (小窗模式)，去除固定高度，由内容撑开
+    with ui.dialog() as d, ui.card().classes('w-full max-w-sm p-5 flex flex-col gap-4'):
+        
+        # 1. 标题栏
+        with ui.row().classes('w-full justify-between items-center'):
+            ui.label('编辑服务器' if is_edit else '添加服务器').classes('text-lg font-bold')
+            # 顶部增加一个简单的 Tab 切换器
+            tabs = ui.tabs().classes('text-blue-600')
+            with tabs:
+                t_xui = ui.tab('面板', icon='settings')
+                t_ssh = ui.tab('SSH', icon='terminal')
 
-async def open_edit_server_dialog(idx):
-    data = SERVERS_CACHE[idx]
-    with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
-        ui.label('编辑配置').classes('text-lg font-bold')
-        n = ui.input('名称', value=data['name']).classes('w-full')
-        g = ui.select(options=get_all_groups(), label='分组', value=data.get('group', '默认分组')).classes('w-full')
-        u = ui.input('URL', value=data['url']).classes('w-full'); us = ui.input('账号', value=data['user']).classes('w-full')
-        p = ui.input('密码', value=data['pass'], password=True).classes('w-full'); pre = ui.input('API前缀', value=data.get('prefix','')).classes('w-full')
-        async def save():
-            SERVERS_CACHE[idx] = {'name':n.value,'group':g.value,'url':u.value,'user':us.value,'pass':p.value,'prefix':pre.value}
-            await save_servers(); d.close(); render_sidebar_content.refresh(); await refresh_content('SINGLE', SERVERS_CACHE[idx], force_refresh=True)
-        async def delete():
-            deleted_url = SERVERS_CACHE[idx]['url']
-            del SERVERS_CACHE[idx]
-            await save_servers()
-            render_sidebar_content.refresh()
-            if deleted_url in SERVER_UI_MAP:
-                try: SERVER_UI_MAP[deleted_url].delete(); del SERVER_UI_MAP[deleted_url]
-                except: await refresh_content('ALL')
-            else: await refresh_content('ALL')
-            d.close()
-        with ui.column().classes('w-full gap-2 mt-2'):
-            ui.button('保存', on_click=save).classes('w-full bg-primary text-white')
-            ui.button('删除', on_click=delete).classes('w-full bg-red-100 text-red-600')
+        # 2. 变量绑定
+        name = ui.input(value=data.get('name',''), label='备注名称').classes('w-full').props('outlined dense')
+        group = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('w-full').props('outlined dense')
+        
+        # 3. 内容面板区域 (无缝切换)
+        with ui.tab_panels(tabs, value=t_xui).classes('w-full animated fadeIn'):
+            
+            # --- 面板 A: X-Fusion Panel配置 (默认) ---
+            with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
+                url = ui.input(value=data.get('url',''), label='面板 URL (http://ip:port)').classes('w-full').props('outlined dense')
+                with ui.row().classes('w-full gap-2'):
+                    user = ui.input(value=data.get('user',''), label='账号').classes('flex-1').props('outlined dense')
+                    pwd = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
+                prefix = ui.input(value=data.get('prefix',''), label='API 前缀 (选填)').classes('w-full').props('outlined dense')
+
+            # --- 面板 B: SSH 配置 ---
+            with ui.tab_panel(t_ssh).classes('p-0 flex flex-col gap-3'):
+                with ui.row().classes('w-full gap-2'):
+                    ssh_user = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
+                    ssh_port = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
+                
+                # 认证方式选择
+                auth_type = ui.select(['全局密钥', '独立密码', '独立密钥'], value=data.get('ssh_auth_type', '全局密钥'), label='认证方式').classes('w-full').props('outlined dense options-dense')
+                
+                # 动态输入框
+                ssh_pwd = ui.input(label='SSH 密码', password=True, value=data.get('ssh_password','')).classes('w-full').props('outlined dense')
+                ssh_key = ui.textarea(label='SSH 私钥', value=data.get('ssh_key','')).classes('w-full').props('outlined dense rows=3 input-class=font-mono text-xs')
+                
+                # 绑定显隐逻辑
+                ssh_pwd.bind_visibility_from(auth_type, 'value', value='独立密码')
+                ssh_key.bind_visibility_from(auth_type, 'value', value='独立密钥')
+                ui.label('✅ 将自动使用全局私钥连接').bind_visibility_from(auth_type, 'value', value='全局密钥').classes('text-green-600 text-xs text-center mt-2')
+
+        # 4. 底部按钮
+        with ui.row().classes('w-full justify-end gap-2 mt-2'):
+            if is_edit:
+                async def delete():
+                    if idx < len(SERVERS_CACHE): del SERVERS_CACHE[idx]
+                    await save_servers()
+                    render_sidebar_content.refresh()
+                    await refresh_content('ALL')
+                    d.close()
+                ui.button('删除', on_click=delete, color='red').props('flat dense')
+
+            async def save():
+                new_data = {
+                    'name': name.value, 'group': group.value,
+                    'url': url.value, 'user': user.value, 'pass': pwd.value, 'prefix': prefix.value,
+                    'ssh_port': ssh_port.value, 'ssh_user': ssh_user.value,
+                    'ssh_auth_type': auth_type.value, 'ssh_password': ssh_pwd.value, 'ssh_key': ssh_key.value
+                }
+                if is_edit: SERVERS_CACHE[idx].update(new_data)
+                else: SERVERS_CACHE.append(new_data)
+                
+                await save_servers()
+                render_sidebar_content.refresh()
+                await refresh_content('SINGLE', SERVERS_CACHE[idx] if is_edit else SERVERS_CACHE[-1], force_refresh=True)
+                d.close()
+                safe_notify('保存成功', 'positive')
+            
+            ui.button('保存配置', on_click=save).classes('bg-slate-900 text-white shadow-lg')
     d.open()
 
 def open_group_mgmt_dialog(group_name):
@@ -1565,30 +1928,37 @@ COLS_NO_PING   = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 50px 15
 # 单个服务器视图直接复用带延迟的样式
 SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
 
-# ================= [修改] 刷新逻辑 (区分是否显示延迟) =================
+# ================= [修复版] 刷新逻辑 (增加样式重置) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     client = ui.context.client
-    with client: show_loading(content_container)
+    with client: 
+        # ✨✨✨ 核心修复：强制重置容器样式为“正常列表模式” ✨✨✨
+        # 移除 SSH 的居中 (justify-center) 和 隐藏滚动 (overflow-hidden)
+        # 恢复 顶部对齐 (justify-start) 和 自动滚动 (overflow-y-auto)
+        # 恢复 默认内边距 (p-4 pl-6)
+        content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
+        
+        show_loading(content_container)
     
     targets = []
     title = ""
     is_group_view = False
-    show_ping = False # 默认不显示延迟 (防卡顿)
+    show_ping = False 
     
-    # A. 所有服务器 -> 不显示延迟
+    # A. 所有服务器
     if scope == 'ALL':
         targets = list(SERVERS_CACHE)
         title = f"🌍 所有服务器 ({len(targets)})"
         show_ping = False 
     
-    # B. 自定义分组 -> 不显示延迟
+    # B. 自定义分组
     elif scope == 'TAG':
         targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
         title = f"🏷️ 自定义分组: {data} ({len(targets)})"
         is_group_view = True
         show_ping = False 
         
-    # C. 国家分组 -> ✨✨✨ 保留延迟 ✨✨✨
+    # C. 国家分组
     elif scope == 'COUNTRY':
         targets = [s for s in SERVERS_CACHE if detect_country_group(s.get('name', '')) == data]
         title = f"🏳️ 区域: {data} ({len(targets)})"
@@ -1598,16 +1968,12 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
     # D. 单个服务器
     elif scope == 'SINGLE':
         targets = [data]
-        
-        # ✨✨✨ 需求1：提取域名显示在标题 ✨✨✨
         raw_url = data['url']
         try:
             if '://' not in raw_url: raw_url = f'http://{raw_url}'
             parsed = urlparse(raw_url)
-            # 获取 hostname，如果端口存在去掉端口
             host_display = parsed.hostname or raw_url
         except: host_display = raw_url
-        
         title = f"🖥️ {data['name']} ({host_display})"
 
     if scope != 'SINGLE':
@@ -1639,7 +2005,6 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                 if scope == 'SINGLE': 
                     await render_single_server_view(data, force_refresh)
                 else: 
-                    # ✨ 传递 show_ping 参数
                     await render_aggregated_view(targets, show_ping=show_ping, force_refresh=force_refresh)
 
     asyncio.create_task(_render())
@@ -2025,6 +2390,10 @@ async def load_dashboard_stats():
     await asyncio.sleep(0.1)
     content_container.clear()
     
+    # ✨✨✨ 核心修复：强制重置容器样式 ✨✨✨
+    # 确保仪表盘也是顶部对齐且可滚动的
+    content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
+    
     # 2. 定义 UI 引用
     dash_refs = {}
     
@@ -2322,7 +2691,8 @@ def render_sidebar_content():
         
         with ui.row().classes('w-full gap-2 px-1 mb-4'):
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes('flex-grow bg-blue-600 text-white text-xs')
-            ui.button('添加服务器', icon='add', color='green', on_click=open_add_server_dialog).props('dense unelevated').classes('flex-grow text-xs')
+            # [修复] 补全了括号，并修改为调用 open_server_dialog(None)
+            ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes('flex-grow text-xs')
 
         # --- A. 全部节点 ---
         all_count = len(SERVERS_CACHE)
@@ -2351,22 +2721,24 @@ def render_sidebar_content():
                         if not tag_servers:
                             ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
                         for s in tag_servers:
-                            with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                            # [修改] 增加了 group 类
+                            with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
                                 ui.label(s['name']).classes('text-sm truncate flex-grow')
-                                ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+                                
+                                # [新增] 按钮组：SSH + 编辑
+                                with ui.row().classes('gap-1 items-center'):
+                                    ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)) \
+                                        .props('flat dense round size=xs color=grey-8').on('click.stop').tooltip('SSH 连接')
+                                    
+                                    # [修改] 调用 open_server_dialog
+                                    ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
-        # --- C. 智能区域分组 (✨ 修复点：优先读取 saved_group) ---
+        # --- C. 智能区域分组 ---
         ui.label('区域分组 (智能)').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
         
         country_buckets = {}
         for s in SERVERS_CACHE:
-            # ✨ 核心逻辑修改 ✨
-            # 1. 获取已保存的分组
             saved_group = s.get('group')
-            
-            # 2. 判断逻辑：
-            # 如果 saved_group 存在，且不是 "默认/自动/空"，说明它已经被手动或自动修正过了，直接用。
-            # 否则，才去尝试用名字（detect_country_group）去猜。
             if saved_group and saved_group not in ['默认分组', '自动注册', '未分组']:
                 c_group = saved_group
             else:
@@ -2389,12 +2761,21 @@ def render_sidebar_content():
                  
                  with ui.column().classes('w-full gap-0 bg-gray-50'):
                     for s in c_servers:
-                         with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                         # [修改] 增加了 group 类
+                         with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
                                 ui.label(s['name']).classes('text-sm truncate flex-grow')
-                                ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_edit_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+                                
+                                # [新增] 按钮组：SSH + 编辑
+                                with ui.row().classes('gap-1 items-center'):
+                                    ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)) \
+                                        .props('flat dense round size=xs color=grey-8').on('click.stop').tooltip('SSH 连接')
+
+                                    # [修改] 调用 open_server_dialog
+                                    ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
     # 3. 底部
     with ui.column().classes('w-full p-2 border-t mt-auto'):
+        ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
         
 # ================== 登录与 MFA 逻辑 ==================
@@ -2407,7 +2788,7 @@ def login_page(request: Request): # <--- 【修改 1】增加 request 参数
     def render_step1():
         container.clear()
         with container:
-            ui.label('X-UI Manager').classes('text-2xl font-extrabold mb-2 w-full text-center text-slate-800')
+            ui.label('X-Fusion Panel').classes('text-2xl font-extrabold mb-2 w-full text-center text-slate-800')
             ui.label('请登录以继续').classes('text-sm text-gray-400 mb-6 w-full text-center')
             
             username = ui.input('账号').props('outlined dense').classes('w-full mb-3')
@@ -2442,7 +2823,7 @@ def login_page(request: Request): # <--- 【修改 1】增加 request 参数
         container.clear()
         
         # 生成二维码图片 Base64
-        totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=ADMIN_USER, issuer_name="X-UI Manager")
+        totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=ADMIN_USER, issuer_name="X-Fusion Panel")
         qr = qrcode.make(totp_uri)
         img_buffer = io.BytesIO()
         qr.save(img_buffer, format='PNG')
@@ -2520,13 +2901,19 @@ def login_page(request: Request): # <--- 【修改 1】增加 request 参数
 
 
 
+# ================= [本地化版] 主页入口 =================
 @ui.page('/')
 def main_page(request: Request):
-    # ================= 1. 基础认证检查 =================
+    # ✨✨✨ [核心修复] 改用本地静态文件 (彻底解决网络问题) ✨✨✨
+    ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
+    ui.add_head_html('<script src="/static/xterm.js"></script>')
+    ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
+
+    # ================= 2. 基础认证检查 =================
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
 
-    # ================= 2. 获取并检查 IP =================
+    # ================= 3. 获取并检查 IP =================
     try:
         # 优先获取 X-Forwarded-For (适配 Docker/反代)
         current_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
@@ -2542,13 +2929,13 @@ def main_page(request: Request):
     except:
         display_ip = "Unknown"
 
-    # ================= 3. UI 构建 =================
+    # ================= 4. UI 构建 =================
     with ui.header().classes('bg-slate-900 text-white h-14'):
         with ui.row().classes('w-full items-center justify-between'):
             
             # --- 左侧：标题 + IP ---
             with ui.row().classes('items-center gap-2'):
-                ui.label('X-UI Manager Pro').classes('text-lg font-bold ml-4')
+                ui.label('X-Fusion Panel').classes('text-lg font-bold ml-4')
                 ui.label(f"[登陆IP:{display_ip}]").classes('text-xs text-gray-400 font-mono pt-1')
 
             # --- 右侧：密钥 + 登出 ---
@@ -2560,17 +2947,21 @@ def main_page(request: Request):
                 # 登出按钮
                 ui.button(icon='logout', on_click=lambda: (app.storage.user.clear(), ui.navigate.to('/login'))).props('flat round dense').tooltip('退出登录')
 
-    # ================= 4. 布局容器 =================
+# ================= 5. 布局容器 =================
     global content_container
-    with ui.row().classes('w-full h-screen gap-0'):
+    # ✨✨✨ 核心修复：添加 no-wrap (禁止换行) ✨✨✨
+    with ui.row().classes('w-full h-screen gap-0 no-wrap items-stretch'):
+        
         # 左侧边栏
-        with ui.column().classes('w-80 h-full border-r pr-0 overflow-hidden'):
+        # flex-shrink-0: 禁止边栏被压缩，保持宽度不变
+        with ui.column().classes('w-80 h-full border-r pr-0 overflow-hidden flex-shrink-0'):
             render_sidebar_content()
         
         # 右侧内容区
-        content_container = ui.column().classes('flex-grow h-full pl-6 overflow-y-auto p-4 bg-slate-50')
+        # min-w-0: 允许容器宽度压缩到 0 (防止被内部宽元素撑开导致换行)
+        content_container = ui.column().classes('flex-grow h-full pl-6 overflow-y-auto p-4 bg-slate-50 min-w-0')
     
-    # ================= 5. 启动后台任务 =================
+    # ================= 6. 启动后台任务 =================
     # 延迟启动，避免阻塞页面渲染
     ui.timer(2.0, lambda: asyncio.create_task(silent_refresh_all()), once=True)
     ui.timer(0.1, lambda: asyncio.create_task(load_dashboard_stats()), once=True)
@@ -2616,6 +3007,12 @@ async def run_global_ping_task():
 # 在 app 启动时运行
 app.on_startup(lambda: asyncio.create_task(run_global_ping_task()))
 
+# ✨✨✨ [新增] 注册本地静态文件目录 ✨✨✨
+app.add_static_files('/static', 'static')
+
+# 在 app 启动时运行
+app.on_startup(lambda: asyncio.create_task(run_global_ping_task()))
+
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("🚀 系统正在初始化...")
-    ui.run(title='X-UI Pro', host='0.0.0.0', port=8080, language='zh-CN', storage_secret='sijuly_secret_key', reload=False)
+    ui.run(title='X-Fusion Panel', host='0.0.0.0', port=8080, language='zh-CN', storage_secret='sijuly_secret_key', reload=False)
