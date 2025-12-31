@@ -13,6 +13,7 @@ import socket
 import random
 import pyotp
 import qrcode
+import time
 import io
 import paramiko
 from concurrent.futures import ThreadPoolExecutor
@@ -133,9 +134,11 @@ content_container = None
 
 def init_data():
     if not os.path.exists('data'): os.makedirs('data')
+    
+    # 👇👇👇 【核心修复】必须声明这些是全局变量！ 👇👇👇
     global SERVERS_CACHE, SUBS_CACHE, NODES_DATA, ADMIN_CONFIG
+    
     logger.info(f"正在初始化数据... (当前登录账号: {ADMIN_USER})")
-    logger.info(f"通讯密钥已加载: {AUTO_REGISTER_SECRET[:4]}***")
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -151,7 +154,9 @@ def init_data():
     if os.path.exists(NODES_CACHE_FILE):
         try:
             with open(NODES_CACHE_FILE, 'r', encoding='utf-8') as f: NODES_DATA = json.load(f)
-            logger.info(f"✅ 加载节点缓存完毕")
+            # 统计一下节点数，确认真的加载进去了
+            count = sum([len(v) for v in NODES_DATA.values() if isinstance(v, list)])
+            logger.info(f"✅ 加载节点缓存完毕 (共 {count} 个节点)")
         except: NODES_DATA = {}
         
     if os.path.exists(ADMIN_CONFIG_FILE):
@@ -179,9 +184,11 @@ async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
 async def save_admin_config(): await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
 async def save_nodes_cache():
     try:
+        # 直接保存所有内存数据，不做任何过滤
         data_snapshot = NODES_DATA.copy()
         await safe_save(NODES_CACHE_FILE, data_snapshot)
-    except: pass
+    except Exception as e:
+        logger.error(f"❌ 保存缓存失败: {e}")
 
 init_data()
 managers = {}
@@ -600,40 +607,19 @@ def get_manager(server_conf):
         managers[key] = XUIManager(server_conf['url'], server_conf['user'], server_conf['pass'], server_conf.get('prefix'))
     return managers[key]
 
-# 辅助函数：后台线程执行
+# ================= 修复版核心逻辑：即时存档 + 顺序修正 =================
+
+# 1. 辅助函数：后台线程执行
 async def run_in_bg_executor(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(BG_EXECUTOR, func, *args)
 
-# [核心] 静默刷新逻辑
-async def silent_refresh_all(is_auto_trigger=False): # 增加参数
-    global LAST_AUTO_SYNC_TIME
-
-    # 如果是自动触发（打开网页），且处于冷却期内，则跳过
-    if is_auto_trigger:
-        current_time = __import__('time').time()
-        if current_time - LAST_AUTO_SYNC_TIME < SYNC_COOLDOWN_SECONDS:
-            remaining = int(SYNC_COOLDOWN_SECONDS - (current_time - LAST_AUTO_SYNC_TIME))
-            logger.info(f"⏳ [防抖] 距离上次同步不足 {SYNC_COOLDOWN_SECONDS}秒，跳过自动更新 (剩余冷却: {remaining}s)")
-            # 虽然不更新数据，但要记得刷新一下UI显示缓存
-            render_sidebar_content.refresh()
-            return
-
-        # 更新最后同步时间
-        LAST_AUTO_SYNC_TIME = current_time
-
-    safe_notify(f'🚀 开始后台静默刷新 ({len(SERVERS_CACHE)} 个服务器)...')
-    tasks = []
-    for srv in SERVERS_CACHE:
-        tasks.append(fetch_inbounds_safe(srv, force_refresh=True))
-    await asyncio.gather(*tasks, return_exceptions=True)
-    safe_notify('✅ 后台刷新完成', 'positive')
-    render_sidebar_content.refresh()
-
+# 2. 单个服务器同步逻辑 (核心修改：增加 save_nodes_cache 即时保存)
 async def fetch_inbounds_safe(server_conf, force_refresh=False):
     url = server_conf['url']
     name = server_conf.get('name', '未命名')
     
+    # 如果不是强制刷新，且缓存里有数据，直接返回缓存
     if not force_refresh and url in NODES_DATA: return NODES_DATA[url]
     
     async with SYNC_SEMAPHORE:
@@ -642,23 +628,80 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False):
             mgr = get_manager(server_conf)
             inbounds = await run_in_bg_executor(mgr.get_inbounds)
             if inbounds is None:
+                # 登录重试逻辑
                 mgr = managers[server_conf['url']] = XUIManager(server_conf['url'], server_conf['user'], server_conf['pass'], server_conf.get('prefix')) 
                 inbounds = await run_in_bg_executor(mgr.get_inbounds)
             
             if inbounds is not None:
+                # 更新内存缓存
                 NODES_DATA[url] = inbounds
-                await save_nodes_cache()
+                
+                # ✨✨✨ [核心修复] 获取成功后，立刻异步保存到硬盘 ✨✨✨
+                # 这样即使下一秒程序崩溃/重启，这份数据也已经落盘了
+                asyncio.create_task(save_nodes_cache())
+                
                 return inbounds
             
             logger.error(f"❌ [{name}] 连接失败")
-            NODES_DATA[url] = [] 
-            await save_nodes_cache()
             return []
         except Exception as e: 
             logger.error(f"❌ [{name}] 异常: {e}")
-            NODES_DATA[url] = []
             return []
 
+# 3. 批量静默刷新逻辑 (防抖 + 空缓存穿透)
+async def silent_refresh_all(is_auto_trigger=False):
+    # 1. 读取上次时间
+    last_time = ADMIN_CONFIG.get('last_sync_time', 0)
+    
+    if is_auto_trigger:
+        current_time = time.time()
+        
+        # === 检查缓存节点数 ===
+        total_nodes = 0
+        try:
+            for nodes in NODES_DATA.values():
+                if isinstance(nodes, list): total_nodes += len(nodes)
+        except: pass
+
+        # 穿透条件：有服务器配置 但 缓存里完全没数据 (说明之前可能还没来得及存就崩了)
+        if len(SERVERS_CACHE) > 0 and total_nodes == 0:
+            logger.warning(f"⚠️ [防抖穿透] 缓存为空 (节点数0)，强制触发首次修复同步！")
+            # 继续向下执行同步...
+        
+        # 冷却条件
+        elif current_time - last_time < SYNC_COOLDOWN_SECONDS:
+            remaining = int(SYNC_COOLDOWN_SECONDS - (current_time - last_time))
+            logger.info(f"⏳ [防抖生效] 距离上次同步不足 {SYNC_COOLDOWN_SECONDS}秒，跳过 (剩余: {remaining}s)")
+            try: 
+                render_sidebar_content.refresh()
+                await load_dashboard_stats()
+            except: pass
+            return
+
+    # 2. 执行同步流程
+    safe_notify(f'🚀 开始后台静默刷新 ({len(SERVERS_CACHE)} 个服务器)...')
+    
+    # ✨✨✨ [核心修改] 先把时间写入硬盘！✨✨✨
+    # 只要开始跑了，就标记为"已更新"，防止重启后重复触发
+    ADMIN_CONFIG['last_sync_time'] = time.time()
+    await save_admin_config() 
+    
+    tasks = []
+    for srv in SERVERS_CACHE:
+        # 使用之前那个带即时保存功能的 fetch 函数
+        tasks.append(fetch_inbounds_safe(srv, force_refresh=True))
+    
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 跑完再保存一次兜底（双保险）
+    await save_nodes_cache() 
+    
+    safe_notify('✅ 后台刷新完成', 'positive')
+    try: 
+        render_sidebar_content.refresh()
+        await load_dashboard_stats() 
+    except: pass
+    
 # ================= 使用 URL 安全的 Base64 =================
 def safe_base64(s): 
     # 使用 urlsafe_b64encode 避免出现 + 和 /
