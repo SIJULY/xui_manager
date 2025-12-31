@@ -1772,64 +1772,170 @@ def open_create_group_dialog():
              ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
     d.open()
 
+# =================  数据备份/恢复 =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
-        with ui.tabs().classes('w-full bg-gray-50 flex-shrink-0') as tabs:
-            tab_export = ui.tab('导出')
-            tab_import = ui.tab('导入')
+        
+        # 顶部 Tab
+        with ui.tabs().classes('w-full bg-gray-50 flex-shrink-0 border-b') as tabs:
+            tab_export = ui.tab('完整备份 (导出)')
+            tab_import = ui.tab('恢复 / 批量添加')
+            
         with ui.tab_panels(tabs, value=tab_export).classes('w-full p-6 overflow-y-auto flex-grow'):
-            with ui.tab_panel(tab_export).classes('flex flex-col gap-4'):
-                full_backup = {"version": "2.0", "servers": SERVERS_CACHE, "cache": NODES_DATA}
+            
+            # --- 面板 A: 导出 (极简模式：完美居中) ---
+            # items-center justify-center -> 让内容水平垂直都居中
+            with ui.tab_panel(tab_export).classes('flex flex-col gap-8 items-center justify-center h-full'):
+                full_backup = {
+                    "version": "3.0",
+                    "timestamp": __import__('time').time(),
+                    "servers": SERVERS_CACHE,
+                    "subscriptions": SUBS_CACHE,
+                    "admin_config": ADMIN_CONFIG,
+                    "global_ssh_key": load_global_key(),
+                    "cache": NODES_DATA
+                }
                 json_str = json.dumps(full_backup, indent=2, ensure_ascii=False)
-                ui.textarea('备份内容', value=json_str).props('readonly').classes('w-full h-48 font-mono text-xs')
-                ui.button('复制到剪贴板', icon='content_copy', on_click=lambda: safe_copy_to_clipboard(json_str)).classes('w-full bg-blue-600 text-white')
-                ui.button('下载 .json', icon='download', on_click=lambda: ui.download(json_str.encode('utf-8'), 'xui_backup.json')).classes('w-full bg-green-600 text-white')
-            with ui.tab_panel(tab_import).classes('flex flex-col gap-4 items-stretch'):
-                ui.label('方式一：粘贴 JSON 内容').classes('font-bold')
-                import_text = ui.textarea(placeholder='在此粘贴备份 JSON...').classes('w-full h-32 font-mono text-xs')
-                import_cache_chk = ui.checkbox('恢复节点缓存', value=True).classes('text-sm')
-                async def process_json_import():
-                    try:
-                        raw = import_text.value.strip()
-                        if not raw: safe_notify("内容不能为空", 'warning'); return
-                        data = json.loads(raw)
-                        new_servers = data.get('servers', []) if isinstance(data, dict) else data
-                        new_cache = data.get('cache', {}) if isinstance(data, dict) else {}
-                        count = 0; existing = {s['url'] for s in SERVERS_CACHE}
-                        for item in new_servers:
-                            if item['url'] not in existing:
-                                SERVERS_CACHE.append(item); existing.add(item['url']); count += 1
-                        if import_cache_chk.value and new_cache: NODES_DATA.update(new_cache); await save_nodes_cache()
-                        await save_servers(); render_sidebar_content.refresh(); safe_notify(f"已恢复 {count} 个服务器", 'positive'); d.close()
-                    except Exception as e: safe_notify(f"JSON 格式错误: {e}", 'negative')
                 
-                ui.button('恢复数据', icon='restore', on_click=process_json_import).classes('w-full bg-green-600 text-white h-12')
-                ui.separator().classes('my-2')
-                async def open_url_import_sub_dialog():
-                    with ui.dialog() as sub_d, ui.card().classes('w-full max-w-md flex flex-col gap-4 p-6'):
-                        ui.label('批量添加 URL').classes('text-lg font-bold')
-                        url_area = ui.textarea(placeholder='http://1.1.1.1:54321\nhttps://example.com').classes('w-full h-32 font-mono text-sm')
-                        def_user = ui.input('默认账号', value='admin').classes('w-full')
-                        def_pass = ui.input('默认密码', value='admin').classes('w-full')
-                        async def run_url_import():
+                # 提示图标区域 (现在会完美居中)
+                with ui.column().classes('items-center gap-2'):
+                    ui.icon('cloud_download', size='5rem', color='primary').classes('opacity-90')
+                    ui.label('备份数据已准备就绪').classes('text-xl font-bold text-gray-700 tracking-wide')
+                    ui.label(f'包含 {len(SERVERS_CACHE)} 个服务器配置').classes('text-xs text-gray-400')
+
+                # 按钮区域 (限制最大宽度，更美观)
+                with ui.column().classes('w-full max-w-md gap-4'):
+                    ui.button('复制到剪贴板', icon='content_copy', on_click=lambda: safe_copy_to_clipboard(json_str)) \
+                        .classes('w-full h-12 text-base font-bold bg-blue-600 text-white shadow-lg rounded-lg hover:scale-105 transition')
+                    
+                    ui.button('下载 .json 文件', icon='download', on_click=lambda: ui.download(json_str.encode('utf-8'), 'xui_manager_backup_v3.json')) \
+                        .classes('w-full h-12 text-base font-bold bg-green-600 text-white shadow-lg rounded-lg hover:scale-105 transition')
+
+            # --- 面板 B: 导入 & 批量添加 (保持原样) ---
+            with ui.tab_panel(tab_import).classes('flex flex-col gap-6'):
+                
+                # === 功能区 1: 恢复备份 ===
+                with ui.expansion('方式一：恢复 JSON 备份文件', icon='restore', value=False).classes('w-full border rounded bg-gray-50'):
+                    with ui.column().classes('p-4 gap-4 w-full'):
+                        import_text = ui.textarea(placeholder='粘贴备份 JSON...').classes('w-full h-32 font-mono text-xs bg-white')
+                        with ui.row().classes('w-full gap-4 items-center'):
+                            overwrite_chk = ui.checkbox('覆盖同名服务器', value=False).props('dense')
+                            restore_key_chk = ui.checkbox('恢复 SSH 密钥', value=True).props('dense')
+                            restore_sub_chk = ui.checkbox('恢复订阅设置', value=True).props('dense')
+                        
+                        async def process_json_import():
+                            try:
+                                raw = import_text.value.strip()
+                                if not raw: safe_notify("内容不能为空", 'warning'); return
+                                data = json.loads(raw)
+                                
+                                new_servers = data.get('servers', []) if isinstance(data, dict) else data
+                                new_subs = data.get('subscriptions', []); new_config = data.get('admin_config', {})
+                                new_ssh_key = data.get('global_ssh_key', ''); new_cache = data.get('cache', {})
+
+                                added = 0; updated = 0
+                                existing_map = {s['url']: i for i, s in enumerate(SERVERS_CACHE)}
+                                
+                                for item in new_servers:
+                                    url = item.get('url')
+                                    if url in existing_map:
+                                        if overwrite_chk.value:
+                                            SERVERS_CACHE[existing_map[url]] = item; updated += 1
+                                    else:
+                                        SERVERS_CACHE.append(item); existing_map[url] = len(SERVERS_CACHE) - 1; added += 1
+
+                                if restore_key_chk.value and new_ssh_key: save_global_key(new_ssh_key)
+                                if restore_sub_chk.value:
+                                    if new_subs: global SUBS_CACHE; SUBS_CACHE = new_subs
+                                    if new_config: global ADMIN_CONFIG; ADMIN_CONFIG.update(new_config)
+                                if new_cache: NODES_DATA.update(new_cache); await save_nodes_cache()
+
+                                await save_servers(); await save_subs(); await save_admin_config()
+                                render_sidebar_content.refresh()
+                                safe_notify(f"恢复完成: +{added} / ~{updated}", 'positive'); d.close()
+                                if content_container: content_container.clear()
+                            except Exception as e: safe_notify(f"错误: {e}", 'negative')
+
+                        ui.button('执行恢复', on_click=process_json_import).classes('w-full bg-slate-800 text-white')
+
+                # === 功能区 2: 批量添加 ===
+                with ui.expansion('方式二：批量添加服务器 (支持 纯IP / SSH)', icon='playlist_add', value=True).classes('w-full border rounded bg-white shadow-sm'):
+                    with ui.column().classes('p-4 gap-4 w-full'):
+                        ui.label('批量输入 (每行一个，支持 IP 或 URL)').classes('text-xs font-bold text-gray-500')
+                        url_area = ui.textarea(placeholder='192.168.1.10\n192.168.1.11:2202\nhttp://example.com:54321').classes('w-full h-32 font-mono text-sm bg-gray-50').props('outlined')
+                        
+                        ui.separator()
+                        
+                        # --- 默认设置区域 ---
+                        with ui.grid().classes('w-full gap-2 grid-cols-2'):
+                            def_ssh_user = ui.input('默认 SSH 用户', value='root').props('dense outlined')
+                            def_ssh_port = ui.input('默认 SSH 端口', value='22').props('dense outlined')
+                            def_ssh_pwd  = ui.input('默认 SSH 密码 (选填)').props('dense outlined placeholder="留空则用全局密钥"')
+                            
+                            def_xui_port = ui.input('默认 X-UI 端口', value='54321').props('dense outlined')
+                            def_xui_user = ui.input('默认 X-UI 账号', value='admin').props('dense outlined')
+                            def_xui_pass = ui.input('默认 X-UI 密码', value='admin').props('dense outlined')
+
+                        async def run_batch_import():
                             raw_text = url_area.value.strip()
                             if not raw_text: safe_notify("请输入内容", "warning"); return
-                            raw_urls = re.findall(r'https?://[^\s,;"\'<>]+', raw_text)
-                            if not raw_urls: raw_urls = re.findall(r'(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d+', raw_text)
-                            if not raw_urls: safe_notify("未找到 URL", "warning"); return
-                            count = 0; existing = {s['url'] for s in SERVERS_CACHE}
-                            for u in raw_urls:
-                                if '://' not in u: u = f'http://{u}'
-                                if u not in existing:
-                                    try: name = urlparse(u).hostname or u
-                                    except: name = u
-                                    SERVERS_CACHE.append({'name': name, 'group': '默认分组', 'url': u, 'user': def_user.value, 'pass': def_pass.value, 'prefix': ''})
-                                    existing.add(u); count += 1
-                            if count > 0: await save_servers(); render_sidebar_content.refresh(); safe_notify(f"添加了 {count} 个服务器", 'positive'); sub_d.close(); d.close()
-                            else: safe_notify("没有添加新服务器", 'warning')
-                        ui.button('确认添加', on_click=run_url_import).classes('w-full bg-blue-600 text-white')
-                    sub_d.open()
-                ui.button('方式二：批量 URL 导入', on_click=open_url_import_sub_dialog).props('outline').classes('w-full text-blue-600 h-12')
+                            
+                            lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+                            count = 0
+                            existing_urls = {s['url'] for s in SERVERS_CACHE}
+                            
+                            for line in lines:
+                                target_ssh_port = def_ssh_port.value
+                                target_xui_port = def_xui_port.value
+                                
+                                if '://' in line:
+                                    final_url = line
+                                    try: 
+                                        parsed = urlparse(line)
+                                        name = parsed.hostname or line
+                                    except: name = line
+                                else:
+                                    if ':' in line and not line.startswith('['): 
+                                        parts = line.split(':')
+                                        host_ip = parts[0]
+                                        target_ssh_port = parts[1]
+                                    else:
+                                        host_ip = line
+                                    
+                                    final_url = f"http://{host_ip}:{target_xui_port}"
+                                    name = host_ip
+
+                                if final_url in existing_urls: continue
+                                
+                                auth_type = '独立密码' if def_ssh_pwd.value.strip() else '全局密钥'
+                                
+                                new_server = {
+                                    'name': name,
+                                    'group': '自动导入',
+                                    'url': final_url,
+                                    'user': def_xui_user.value,
+                                    'pass': def_xui_pass.value,
+                                    'prefix': '',
+                                    'ssh_user': def_ssh_user.value,
+                                    'ssh_port': target_ssh_port,
+                                    'ssh_auth_type': auth_type,
+                                    'ssh_password': def_ssh_pwd.value,
+                                    'ssh_key': ''
+                                }
+                                SERVERS_CACHE.append(new_server)
+                                existing_urls.add(final_url)
+                                count += 1
+
+                            if count > 0:
+                                await save_servers()
+                                render_sidebar_content.refresh()
+                                safe_notify(f"成功添加 {count} 台服务器", 'positive')
+                                d.close()
+                            else:
+                                safe_notify("未添加任何服务器 (可能已存在)", 'warning')
+
+                        ui.button('确认批量添加', icon='add_box', on_click=run_batch_import).classes('w-full bg-blue-600 text-white h-10')
+
     d.open()
 
 # ================= 渲染逻辑 =================
