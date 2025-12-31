@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-UI Manager Pro 一键安装/管理脚本
+# X-Fusion Panel 一键安装/管理脚本
 # GitHub: https://github.com/SIJULY/xui_manager
 # ==============================================================================
 
@@ -355,7 +355,7 @@ uninstall_panel() {
 # --- 主菜单 ---
 check_root
 clear
-echo -e "${GREEN} X-UI Manager Pro 一键管理脚本 ${PLAIN}"
+echo -e "${GREEN} X-Fusion Panel 一键管理脚本 ${PLAIN}"
 echo -e "  1. 安装面板"
 echo -e "  2. 更新面板"
 echo -e "  3. 卸载面板"
