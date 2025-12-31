@@ -39,7 +39,7 @@
 复制以下命令在服务器执行即可（需提前安装 Docker）：
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/setup.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/install.sh)
 ```
 提示：如果是旧版本 (xui_manager) 用户，直接运行此命令并选择 [2] 更新面板，脚本会自动将旧数据迁移至新目录。
 
