@@ -1,36 +1,38 @@
 # 🌐 X-Fusion Panel
 
-
 ![Docker](https://img.shields.io/badge/Docker-Enabled-blue)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-yellow)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**X-Fusion Panel"** 是一个现代化的多面板集中管理系统。通过统一的 Web 界面，你可以轻松管理分布在不同服务器上的 X-UI 面板，实现节点同步、流量监控、分组订阅管理以及批量操作。
+**X-Fusion Panel** (原 X-UI Manager) 是一个全能型 VPS 集中管理平台。它将 X-UI 面板管理、高性能 SSH 网页终端、全球节点地图监控以及订阅转换功能完美融合。通过统一的 Web 界面，您可以轻松掌控分布在世界各地的服务器。
 
 ---
 
 ## ✨ 核心功能
 
-* **📊 可视化仪表盘**：实时展示在线服务器、节点总数、总流量消耗及协议分布。
-* **🔗 聚合与分组订阅**：自动生成包含所有节点的聚合订阅，或按分组生成专属订阅链接。
-* **☁️ 集中管理**：支持无限添加 X-UI 面板地址，自动同步节点状态与配置。
-* **💾 数据备份**：支持 JSON 全量备份与恢复，支持批量导入 URL。
-* **🛡️ 稳定运行**：基于 Docker 容器化部署，自动保活。
+* **📊 全景仪表盘**：可视化展示在线服务器、节点状态、实时流量消耗及协议分布图表。
+* **🌍 全球实景地图**：基于 Leaflet 的节点地图，自动定位服务器地理位置，直观监控全球资产。
+* **💻 交互式 SSH 终端**：内置高性能 WebSSH 客户端（Xterm.js），支持全屏、自适应布局、文件挂载，提供类似本地终端的操作体验。
+* **🔗 智能订阅管理**：
+    * **聚合订阅**：自动生成包含所有节点的聚合链接。
+    * **分组订阅**：支持按“国家/地区”或“自定义标签”生成专属订阅。
+    * **格式转换**：内置 SubConverter，直接输出 Clash、Surge 等格式。
+* **☁️ 集中管理**：支持无限添加 X-UI 面板，自动同步节点状态，支持批量操作。
+* **💾 数据安全**：支持 JSON 全量备份与恢复，支持批量导入 URL，支持平滑迁移。
+* **🛡️ 稳定架构**：采用 Docker 容器化部署，内置 Caddy 反代，开箱即用。
 
 ---
 
 ## 🚀 快速安装
 
-推荐使用 Docker 一键启动，无需配置 Python 环境。
-
-
+推荐使用 Docker 一键启动，脚本会自动处理环境依赖和配置。
 
 复制以下命令在服务器执行即可（需提前安装 Docker）：
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/SIJULY/xui_manager/main/install.sh)
 ```
-
+提示：如果是旧版本 (xui_manager) 用户，直接运行此命令并选择 [2] 更新面板，脚本会自动将旧数据迁移至新目录。
 
 ## 🛠️ 反向代理配置指南
 ⚠️ 注意： 如果您在安装时选择了 「域名访问」 模式，脚本会自动为您配置好 Caddy，无需进行以下操作。 仅当您选择「IP + 端口」模式，且希望手动配置 Nginx 或 Caddy 将域名指向面板时，才需要参考以下内容。
@@ -116,26 +118,35 @@ your-existing-site.com {
 
 ## 🛠️ 管理命令
 
+
+* 进入安装目录：
+```bash
+cd /root/x-fusion-panel
+```
+
 * 查看日志：
 
 ```bash
- docker logs -f --tail 100 xui_manager
+ docker logs -f --tail 100 x-fusion-panel
 ```
+
 * 重启服务：
 ```bash
-cd /root/xui_manager && docker compose up -d --build
+cd /root/x-fusion-panel && docker compose up -d --build
 ```
 
 
 ## 📂 数据目录说明
 
-程序启动后会自动在当前目录生成 data 文件夹，包含以下关键文件：
+程序启动后会自动在 /root/x-fusion-panel 下生成以下关键文件/目录：
 
-data/servers.json: 面板服务器列表
+data/servers.json: 面板服务器列表数据库
 
-data/subscriptions.json: 订阅配置
+data/subscriptions.json: 订阅配置数据库
 
-data/nodes_cache.json: 节点缓存数据
+data/admin_config.json: 管理员配置（MFA、自定义分组等）
+
+static/: 本地静态资源（xterm.js 等，用于加速 SSH 访问）
 
 ⚠️ 注意：请定期备份 data 目录以防数据丢失。
 
