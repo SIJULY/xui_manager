@@ -120,15 +120,29 @@ DASHBOARD_REFS = {
     'map': None, 'map_info': None
 }
 
-# ================= 全局 DNS 缓存 ======================
+# ================= 全局 DNS 缓存 (支持静默更新) ======================
 DNS_CACHE = {}
+DNS_WAITING_LABELS = {} # ✨ 新增：存储等待 DNS 结果的 UI 标签引用
 
 async def _resolve_dns_bg(host):
-    """后台线程池解析 DNS，解析完自动刷新 UI"""
+    """后台线程池解析 DNS，解析完自动刷新所有绑定的 UI 标签"""
     try:
         # 放到后台线程去跑，绝对不卡主界面
         ip = await run.io_bound(socket.gethostbyname, host)
         DNS_CACHE[host] = ip
+        
+        # ✨✨✨ 核心逻辑：解析完成了，通知前台变身！ ✨✨✨
+        if host in DNS_WAITING_LABELS:
+            for label in DNS_WAITING_LABELS[host]:
+                try:
+                    # 检查元素是否还活着 (防止切页后报错)
+                    if not label.is_deleted:
+                        label.set_text(ip) # 瞬间变成 IP
+                except: pass
+            
+            # 通知完了就清空，释放内存
+            del DNS_WAITING_LABELS[host]
+            
     except: 
         DNS_CACHE[host] = "failed" # 标记失败，防止反复解析
 
@@ -150,17 +164,32 @@ def get_real_ip_display(url):
         # 2. 查缓存
         if host in DNS_CACHE:
             val = DNS_CACHE[host]
-            # 如果之前解析成功了就返回 IP，失败了就还返回域名
             return val if val != "failed" else host
         
         # 3. 没缓存？(系统刚启动)
-        # 关键点：不要在这里等！直接发起一个后台任务，然后马上返回域名
-        # 这样网页渲染就不会被卡住
+        # 启动后台任务，并立即返回域名占位
         asyncio.create_task(_resolve_dns_bg(host))
         return host 
         
     except:
         return url
+
+def bind_ip_label(url, label):
+    """
+    ✨ 新增辅助函数：将 UI Label 绑定到 DNS 监听列表
+    用法：在创建 ui.label 后调用 bind_ip_label(url, label)
+    """
+    try:
+        host = url.split('://')[-1].split(':')[0]
+        # 如果已经解析过，或者本身是 IP，就不需要监听了
+        import re
+        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host): return
+        if host in DNS_CACHE: return
+        
+        # 加入监听列表
+        if host not in DNS_WAITING_LABELS: DNS_WAITING_LABELS[host] = []
+        DNS_WAITING_LABELS[host].append(label)
+    except: pass
 
 # ================= 获取国旗  =====================
 def get_flag_for_country(country_name):
@@ -2904,7 +2933,6 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
 
     # --- 定义强力重连函数 (放在循环外复用) ---
-    # ✨✨✨ 修改版：手动点击时，尝试 3 次，每次 3 秒 ✨✨✨
     async def force_retry_ping(btn, icon, host, port, key):
         if not btn: return # 防止空指针
         
@@ -3000,7 +3028,9 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                             except: ip_display = raw_host
                             with ui.row().classes('w-full justify-center items-center gap-1'):
                                 ui.icon('bolt').classes('text-red-500 text-sm')
-                                ui.label(ip_display).classes('text-xs font-mono text-gray-500')
+                                # ✨ 绑定 IP 静默更新
+                                ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
+                                bind_ip_label(srv['url'], ip_label)
                         else:
                             ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
                         
@@ -3024,22 +3054,24 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                             ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
                             
-                            # ✨✨✨ Col 3: 状态逻辑 (修复按钮崩溃 bug) ✨✨✨
+                            # ✨✨✨ Col 3: 状态逻辑 (含 IP 静默更新) ✨✨✨
                             if use_special_mode:
                                 try: ip_display = get_real_ip_display(srv['url'])
                                 except: ip_display = raw_host
                                 
                                 with ui.row().classes('w-full justify-center items-center gap-1'):
                                     status_icon = ui.icon('bolt').classes('text-gray-300 text-sm')
-                                    ui.label(ip_display).classes('text-xs font-mono text-gray-500')
                                     
-                                    # ✨ 1. 先创建按钮对象 (此时不要绑定复杂 lambda)
+                                    # ✨✨✨ [修改点] 创建 Label 并绑定静默更新 ✨✨✨
+                                    ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
+                                    bind_ip_label(srv['url'], ip_label) 
+                                    
+                                    # 创建按钮
                                     retry_btn = ui.button(icon='refresh').props('flat dense round size=xs text-color=red')
                                     retry_btn.tooltip('尝试强力重连 (3次x3秒)')
                                     retry_btn.set_visibility(False) # 默认隐藏
 
-                                    # ✨ 2. 再绑定事件，利用默认参数捕获刚才创建的 retry_btn 对象
-                                    # 这样 b=retry_btn 就绝对不会是 None 了
+                                    # 绑定事件
                                     retry_btn.on_click(lambda e, b=retry_btn, i=status_icon, h=target_host, p=target_port, k=ping_key: force_retry_ping(b, i, h, p, k))
 
                                 # 自动更新状态的定时器
@@ -3333,7 +3365,7 @@ class BulkEditor:
                             chk.on_value_change(lambda e, u=s['url']: self.on_check(u, e.value))
                             
                             with ui.column().classes('gap-0 flex-grow overflow-hidden'):
-                                # 国旗防重复判断 (虽然 BulkEditor 主要显示名字，但也加上逻辑)
+                                # 国旗防重复判断
                                 display_name = s['name']
                                 try:
                                     country = detect_country_group(s['name'])
@@ -3344,8 +3376,6 @@ class BulkEditor:
 
                                 ui.label(display_name).classes('text-sm font-bold text-gray-800 truncate')
                                 ui.label(s['url']).classes('text-xs text-gray-400 font-mono truncate hidden') # 隐藏原始URL，搜索用
-                            
-                            # ✨✨✨ 修复部分：显示闪电 + 真实IP ✨✨✨
                             
                             # 1. 解析 IP
                             ip_addr = get_real_ip_display(s['url'])
@@ -3361,8 +3391,9 @@ class BulkEditor:
 
                             with ui.row().classes('items-center gap-1'):
                                 ui.icon(stat_icon).classes(f'text-{stat_color} text-sm')
-                                ui.label(ip_addr).classes('text-xs font-mono text-gray-500')
-                            # ✨✨✨ 结束 ✨✨✨
+                                # ✨ IP 静默更新
+                                ip_lbl = ui.label(ip_addr).classes('text-xs font-mono text-gray-500')
+                                bind_ip_label(s['url'], ip_lbl)
 
                         self.ui_rows[s['url']] = {
                             'el': row, 
@@ -3699,7 +3730,9 @@ def open_combined_group_management(group_name):
 
                                 with ui.row().classes('items-center gap-1'):
                                     ui.icon(stat_icon).classes(f'text-{stat_color} text-sm')
-                                    ui.label(ip_addr).classes('text-xs font-mono text-gray-500')
+                                    # ✨ IP 静默更新
+                                    ip_lbl = ui.label(ip_addr).classes('text-xs font-mono text-gray-500')
+                                    bind_ip_label(s['url'], ip_lbl)
 
                 def toggle_all(state):
                     for url, chk in checkbox_refs.items():
