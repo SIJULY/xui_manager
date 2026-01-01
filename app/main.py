@@ -101,7 +101,7 @@ def get_flag_for_country(country_name):
             return v 
     return f"🏳️ {country_name}"
 
-# ✨✨✨ 自动给名称添加国旗 ✨✨✨
+# ✨✨✨ [逻辑修正] 自动给名称添加国旗 ✨✨✨
 async def auto_prepend_flag(name, url):
     """
     检查名字是否已经包含任意已知国旗。
@@ -991,45 +991,66 @@ def generate_detail_config(node, server_host):
         # logger.error(f"格式转换失败: {e}")
         return ""
 
-# ================= 延迟测试核心逻辑 =================
-import subprocess
-import platform
 
+# ================= 延迟测试核心逻辑 (自动故障复核版) =================
 # 缓存延迟结果 { 'host:port': {'ping': 120, 'time': 12345678} }
 PING_CACHE = {}
 
 async def ping_host(host, port):
     """
-    对指定 Host 进行 TCP Ping (更准确反映节点连通性)
-    如果 host 是域名，会先解析 IP；如果 ping 失败返回 -1
+    智能 Ping 逻辑：
+    1. 首轮探测：3秒超时（快速过筛）。
+    2. 自动复核：若首轮失败，自动进行 3 次重试（每次3秒）。
+    3. 最终判定：救不活则标记为 -1（红色闪电），等待人工处理。
     """
     key = f"{host}:{port}"
     
-    # 简单的 ICMP Ping 实现 (兼容 Linux/Windows)
-    # 注意：更严格的节点检测应该用 TCP Ping (连接端口)，这里为了通用性先用 ICMP
-    # 如果你的服务器是在 Docker 里，确保容器安装了 iputils-ping (apt update && apt install -iputils-ping)
-    
-    # 更好的方式：使用 asyncio 打开 TCP 连接测试握手时间
-    try:
-        start_time = asyncio.get_running_loop().time()
+    # 基础的单次 TCP 连接函数
+    async def _do_single_connect(timeout_sec):
         try:
-            # 尝试建立 TCP 连接 (超时 2秒)
+            start_time = asyncio.get_running_loop().time()
             _, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), 
-                timeout=5.0
+                timeout=timeout_sec
             )
             writer.close()
             await writer.wait_closed()
-            
-            end_time = asyncio.get_running_loop().time()
-            latency = int((end_time - start_time) * 1000) # 毫秒
-            PING_CACHE[key] = latency
-            return latency
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            PING_CACHE[key] = -1
-            return -1
-    except:
-        return -1
+            # 计算延迟 (ms)
+            return int((asyncio.get_running_loop().time() - start_time) * 1000)
+        except:
+            return None
+
+    # --- Phase 1: 首次快速探测 (3秒) ---
+    # 绝大多数正常的节点会在这里直接通过，不消耗额外时间
+    latency = await _do_single_connect(3.0)
+    
+    if latency is not None:
+        # ✅ 一次就通，直接返回
+        PING_CACHE[key] = latency
+        return latency
+
+    # --- Phase 2: 自动故障复核 (3次机会) ---
+    # 只有当第一步失败时，才会走到这里
+    # logger.info(f"⚠️ [{host}] 首测失败，触发自动复核机制 (3次)...")
+    
+    for i in range(3):
+        # 稍微喘口气，避免拥塞，模拟人工点击的间隔
+        await asyncio.sleep(0.5)
+        
+        # 再次尝试连接 (3秒)
+        retry_latency = await _do_single_connect(3.0)
+        
+        if retry_latency is not None:
+            # ✅ 救活了！
+            # logger.info(f"✅ [{host}] 第 {i+1} 次复核成功！")
+            PING_CACHE[key] = retry_latency
+            return retry_latency
+
+    # --- Phase 3: 彻底失败 ---
+    # 3次复核全挂，标记为 -1
+    # 此时 UI 会显示红色闪电 + 红色刷新按钮，交由用户手动进行 15s 强力重连
+    PING_CACHE[key] = -1
+    return -1
 
 # 批量测试函数
 async def batch_ping_nodes(nodes, raw_host):
@@ -2803,6 +2824,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
 
     # --- 定义强力重连函数 (放在循环外复用) ---
+    # ✨✨✨ 修改版：手动点击时，尝试 3 次，每次 3 秒 ✨✨✨
     async def force_retry_ping(btn, icon, host, port, key):
         if not btn: return # 防止空指针
         
@@ -2810,29 +2832,46 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         btn.props('loading') 
         icon.classes(remove='text-red-500 text-green-500', add='text-gray-300') 
         
-        try:
-            # 2. 发起超长超时 Ping (15秒)
-            start = asyncio.get_running_loop().time()
-            # ✨ 这里专门设置了 15.0 秒超时，比全局的更久
-            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=15.0)
-            writer.close()
-            await writer.wait_closed()
+        # 内部函数：单次连接
+        async def _try_connect(timeout_sec):
+            try:
+                start = asyncio.get_running_loop().time()
+                _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout_sec)
+                writer.close()
+                await writer.wait_closed()
+                return int((asyncio.get_running_loop().time() - start) * 1000)
+            except:
+                return None
+
+        # 2. 执行 3 次重试循环 (每次 3秒)
+        final_latency = None
+        
+        for i in range(3):
+            # 发起连接尝试
+            final_latency = await _try_connect(3.0)
             
-            # 3. 成功：计算延迟，变绿，隐藏按钮
-            latency = int((asyncio.get_running_loop().time() - start) * 1000)
-            PING_CACHE[key] = latency
+            if final_latency is not None:
+                # 🎉 成功了！直接跳出循环
+                break
             
+            # 如果失败了，且不是最后一次，就稍微休息 0.5秒 再试
+            if i < 2:
+                await asyncio.sleep(0.5)
+
+        # 3. 处理最终结果
+        if final_latency is not None:
+            # 成功
+            PING_CACHE[key] = final_latency
             icon.classes(remove='text-gray-300 text-red-500', add='text-green-500')
             btn.set_visibility(False) # 救活了，隐藏急救按钮
-            safe_notify(f'✅ 重连成功: {latency}ms', 'positive')
-            
-        except:
-            # 4. 失败：变红，保持按钮显示
+            safe_notify(f'✅ 重连成功: {final_latency}ms', 'positive')
+        else:
+            # 3次全部失败
             PING_CACHE[key] = -1
             icon.classes(remove='text-gray-300 text-green-500', add='text-red-500')
-            safe_notify('❌ 依然无法连接 (15s超时)', 'negative')
+            safe_notify('❌ 依然无法连接 (3次尝试均失败)', 'negative')
         
-        # 5. 停止转圈
+        # 4. 停止转圈
         btn.props(remove='loading')
 
     with list_container:
@@ -2916,7 +2955,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                                     
                                     # ✨ 1. 先创建按钮对象 (此时不要绑定复杂 lambda)
                                     retry_btn = ui.button(icon='refresh').props('flat dense round size=xs text-color=red')
-                                    retry_btn.tooltip('尝试强力重连 (15s超时)')
+                                    retry_btn.tooltip('尝试强力重连 (3次x3秒)')
                                     retry_btn.set_visibility(False) # 默认隐藏
 
                                     # ✨ 2. 再绑定事件，利用默认参数捕获刚才创建的 retry_btn 对象
