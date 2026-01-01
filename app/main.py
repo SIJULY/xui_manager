@@ -4038,7 +4038,7 @@ def login_page(request: Request):
 # ================= [本地化版] 主页入口 =================
 @ui.page('/')
 def main_page(request: Request):
-    # ✨✨✨ 用本地静态文件 (解决网络问题) ✨✨✨
+    # ✨✨✨ 原有的本地静态文件引用 ✨✨✨
     ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
@@ -4057,7 +4057,6 @@ def main_page(request: Request):
 
     # ================= 3. 获取并检查 IP =================
     try:
-        # 优先获取 X-Forwarded-For (适配 Docker/反代)
         current_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
         recorded_ip = app.storage.user.get('login_ip')
         
@@ -4070,14 +4069,24 @@ def main_page(request: Request):
     except:
         display_ip = "Unknown"
 
-    # ================= 4. UI 构建 =================
+    # ================= 4. UI 构建 (响应式布局改造) =================
+    
+    # ✨ 改动 1: 定义左侧抽屉 (Drawer)
+    # value=True: 电脑端默认展开; fixed=False: 推挤模式(不遮挡内容)
+    with ui.left_drawer(value=True, fixed=False).classes('bg-gray-50 border-r') as drawer:
+        render_sidebar_content()
+
+    # ✨ 改动 2: 顶部 Header 增加控制按钮
     with ui.header().classes('bg-slate-900 text-white h-14'):
         with ui.row().classes('w-full items-center justify-between'):
             
-            # --- 左侧：标题 + IP ---
+            # --- 左侧：菜单按钮 + 标题 + IP ---
             with ui.row().classes('items-center gap-2'):
-                ui.label('X-Fusion Panel').classes('text-lg font-bold ml-4')
-                ui.label(f"[登陆IP:{display_ip}]").classes('text-xs text-gray-400 font-mono pt-1')
+                # 👇 这里就是你刚才问的代码，现在它能控制上面的 drawer 了
+                ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round dense')
+                
+                ui.label('X-Fusion Panel').classes('text-lg font-bold ml-2')
+                ui.label(f"[{display_ip}]").classes('text-xs text-gray-400 font-mono pt-1 hidden sm:block') # 手机隐藏IP防止拥挤
 
             # --- 右侧：密钥 + 登出 ---
             with ui.row().classes('items-center gap-2 mr-2'):
@@ -4086,23 +4095,14 @@ def main_page(request: Request):
                 
                 ui.button(icon='logout', on_click=lambda: (app.storage.user.clear(), ui.navigate.to('/login'))).props('flat round dense').tooltip('退出登录')
 
-    # ================= 5. 布局容器 =================
+    # ✨ 改动 3: 内容区域 (不再需要 ui.row 包裹)
+    # 直接作为主容器，Drawer 会自动处理它的位置
     global content_container
-    # ✨✨✨ 添加 no-wrap (禁止换行) ✨✨✨
-    with ui.row().classes('w-full h-screen gap-0 no-wrap items-stretch'):
-        
-        # 左侧边栏
-        with ui.column().classes('w-80 h-full border-r pr-0 overflow-hidden flex-shrink-0'):
-            render_sidebar_content()
-        
-        # 右侧内容区
-        content_container = ui.column().classes('flex-grow h-full pl-6 overflow-y-auto p-4 bg-slate-50 min-w-0')
+    content_container = ui.column().classes('w-full h-full pl-4 pr-4 pt-4 overflow-y-auto bg-slate-50')
     
     # ================= 6. 启动后台任务 =================
     
-    # ❌❌❌ [修复] 删除了会导致无限刷新的 silent_refresh_all 定时器 ❌❌❌
-    
-    # 启动仪表盘数据刷新 (只运行一次，负责画图和填数)
+    # 启动仪表盘数据刷新 (只运行一次)
     ui.timer(0.1, lambda: asyncio.create_task(load_dashboard_stats()), once=True)
     
     logger.info("✅ UI 已就绪")
