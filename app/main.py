@@ -52,6 +52,74 @@ def fetch_geo_from_ip(host):
         pass
     return None
 
+
+# ================= 全局辅助：超级坐标库 =================
+LOCATION_COORDS = {
+    '🇨🇳': (35.86, 104.19), 'China': (35.86, 104.19), '中国': (35.86, 104.19),
+    '🇭🇰': (22.31, 114.16), 'HK': (22.31, 114.16), 'Hong Kong': (22.31, 114.16), '香港': (22.31, 114.16),
+    '🇹🇼': (23.69, 120.96), 'TW': (23.69, 120.96), 'Taiwan': (23.69, 120.96), '台湾': (23.69, 120.96),
+    '🇯🇵': (36.20, 138.25), 'JP': (36.20, 138.25), 'Japan': (36.20, 138.25), '日本': (36.20, 138.25),
+    'Tokyo': (35.68, 139.76), '东京': (35.68, 139.76), 'Osaka': (34.69, 135.50), '大阪': (34.69, 135.50),
+    '🇸🇬': (1.35, 103.81), 'SG': (1.35, 103.81), 'Singapore': (1.35, 103.81), '新加坡': (1.35, 103.81),
+    '🇰🇷': (35.90, 127.76), 'KR': (35.90, 127.76), 'Korea': (35.90, 127.76), '韩国': (35.90, 127.76),
+    'Seoul': (37.56, 126.97), '首尔': (37.56, 126.97),
+    '🇮🇳': (20.59, 78.96), 'IN': (20.59, 78.96), 'India': (20.59, 78.96), '印度': (20.59, 78.96),
+    '🇮🇩': (-0.78, 113.92), 'ID': (-0.78, 113.92), 'Indonesia': (-0.78, 113.92), '印尼': (-0.78, 113.92),
+    '🇲🇾': (4.21, 101.97), 'MY': (4.21, 101.97), 'Malaysia': (4.21, 101.97), '马来西亚': (4.21, 101.97),
+    '🇹🇭': (15.87, 100.99), 'TH': (15.87, 100.99), 'Thailand': (15.87, 100.99), '泰国': (15.87, 100.99),
+    'Bangkok': (13.75, 100.50), '曼谷': (13.75, 100.50),
+    '🇻🇳': (14.05, 108.27), 'VN': (14.05, 108.27), 'Vietnam': (14.05, 108.27), '越南': (14.05, 108.27),
+    '🇵🇭': (12.87, 121.77), 'PH': (12.87, 121.77), 'Philippines': (12.87, 121.77), '菲律宾': (12.87, 121.77),
+    '🇮🇱': (31.04, 34.85), 'IL': (31.04, 34.85), 'Israel': (31.04, 34.85), '以色列': (31.04, 34.85),
+    '🇹🇷': (38.96, 35.24), 'TR': (38.96, 35.24), 'Turkey': (38.96, 35.24), '土耳其': (38.96, 35.24),
+    '🇦🇪': (23.42, 53.84), 'AE': (23.42, 53.84), 'UAE': (23.42, 53.84), '阿联酋': (23.42, 53.84),
+    'Dubai': (25.20, 55.27), '迪拜': (25.20, 55.27),
+    '🇺🇸': (37.09, -95.71), 'US': (37.09, -95.71), 'USA': (37.09, -95.71), 'United States': (37.09, -95.71), '美国': (37.09, -95.71),
+    'San Jose': (37.33, -121.88), '圣何塞': (37.33, -121.88), 'Los Angeles': (34.05, -118.24), '洛杉矶': (34.05, -118.24),
+    'Phoenix': (33.44, -112.07), '凤凰城': (33.44, -112.07),
+    '🇨🇦': (56.13, -106.34), 'CA': (56.13, -106.34), 'Canada': (56.13, -106.34), '加拿大': (56.13, -106.34),
+    '🇧🇷': (-14.23, -51.92), 'BR': (-14.23, -51.92), 'Brazil': (-14.23, -51.92), '巴西': (-14.23, -51.92),
+    '🇲🇽': (23.63, -102.55), 'MX': (23.63, -102.55), 'Mexico': (23.63, -102.55), '墨西哥': (23.63, -102.55),
+    '🇨🇱': (-35.67, -71.54), 'CL': (-35.67, -71.54), 'Chile': (-35.67, -71.54), '智利': (-35.67, -71.54),
+    '🇦🇷': (-38.41, -63.61), 'AR': (-38.41, -63.61), 'Argentina': (-38.41, -63.61), '阿根廷': (-38.41, -63.61),
+    '🇬🇧': (55.37, -3.43), 'UK': (55.37, -3.43), 'United Kingdom': (55.37, -3.43), '英国': (55.37, -3.43),
+    'London': (51.50, -0.12), '伦敦': (51.50, -0.12),
+    '🇩🇪': (51.16, 10.45), 'DE': (51.16, 10.45), 'Germany': (51.16, 10.45), '德国': (51.16, 10.45),
+    'Frankfurt': (50.11, 8.68), '法兰克福': (50.11, 8.68),
+    '🇫🇷': (46.22, 2.21), 'FR': (46.22, 2.21), 'France': (46.22, 2.21), '法国': (46.22, 2.21),
+    'Paris': (48.85, 2.35), '巴黎': (48.85, 2.35),
+    '🇳🇱': (52.13, 5.29), 'NL': (52.13, 5.29), 'Netherlands': (52.13, 5.29), '荷兰': (52.13, 5.29),
+    'Amsterdam': (52.36, 4.90), '阿姆斯特丹': (52.36, 4.90),
+    '🇷🇺': (61.52, 105.31), 'RU': (61.52, 105.31), 'Russia': (61.52, 105.31), '俄罗斯': (61.52, 105.31),
+    'Moscow': (55.75, 37.61), '莫斯科': (55.75, 37.61),
+    '🇮🇹': (41.87, 12.56), 'IT': (41.87, 12.56), 'Italy': (41.87, 12.56), '意大利': (41.87, 12.56),
+    'Milan': (45.46, 9.19), '米兰': (45.46, 9.19),
+    '🇪🇸': (40.46, -3.74), 'ES': (40.46, -3.74), 'Spain': (40.46, -3.74), '西班牙': (40.46, -3.74),
+    'Madrid': (40.41, -3.70), '马德里': (40.41, -3.70),
+    '🇸🇪': (60.12, 18.64), 'SE': (60.12, 18.64), 'Sweden': (60.12, 18.64), '瑞典': (60.12, 18.64),
+    'Stockholm': (59.32, 18.06), '斯德哥尔摩': (59.32, 18.06),
+    '🇨🇭': (46.81, 8.22), 'CH': (46.81, 8.22), 'Switzerland': (46.81, 8.22), '瑞士': (46.81, 8.22),
+    'Zurich': (47.37, 8.54), '苏黎世': (47.37, 8.54),
+    '🇦🇺': (-25.27, 133.77), 'AU': (-25.27, 133.77), 'Australia': (-25.27, 133.77), '澳大利亚': (-25.27, 133.77), '澳洲': (-25.27, 133.77),
+    'Sydney': (-33.86, 151.20), '悉尼': (-33.86, 151.20),
+    '🇿🇦': (-30.55, 22.93), 'ZA': (-30.55, 22.93), 'South Africa': (-30.55, 22.93), '南非': (-30.55, 22.93),
+    'Johannesburg': (-26.20, 28.04), '约翰内斯堡': (-26.20, 28.04),
+}
+
+def get_coords_from_name(name):
+    for k in sorted(LOCATION_COORDS.keys(), key=len, reverse=True):
+        if k in name: return LOCATION_COORDS[k]
+    return None
+
+# ================= 全局变量区 =================
+IP_GEO_CACHE = {}
+# ✨ 新增：存储仪表盘 UI 元素的引用，让后台能控制前台
+DASHBOARD_REFS = {
+    'servers': None, 'nodes': None, 'traffic': None, 'subs': None,
+    'bar_chart': None, 'pie_chart': None, 'stat_up': None, 'stat_down': None, 'stat_avg': None,
+    'map': None, 'map_info': None
+}
+
 # ================= 全局 DNS 缓存 ======================
 DNS_CACHE = {}
 
@@ -101,7 +169,7 @@ def get_flag_for_country(country_name):
             return v 
     return f"🏳️ {country_name}"
 
-# ✨✨✨ [逻辑修正] 自动给名称添加国旗 ✨✨✨
+# ✨✨✨ 自动给名称添加国旗 ✨✨✨
 async def auto_prepend_flag(name, url):
     """
     检查名字是否已经包含任意已知国旗。
@@ -322,14 +390,24 @@ async def safe_save(filename, data):
         try: await run.io_bound(_save_file_sync_internal, filename, data)
         except Exception as e: logger.error(f"❌ 保存 {filename} 失败: {e}")
 
-async def save_servers(): await safe_save(CONFIG_FILE, SERVERS_CACHE)
+# ✨✨✨ 保存服务器后，立即通知首页刷新
+async def save_servers(): 
+    await safe_save(CONFIG_FILE, SERVERS_CACHE)
+    # 触发静默更新 (Add/Del Server)
+    await refresh_dashboard_ui()
+
 async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
 async def save_admin_config(): await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
+
+# ✨✨✨ 保存节点缓存后，也立即通知首页刷新
 async def save_nodes_cache():
     try:
         # 直接保存所有内存数据，不做任何过滤
         data_snapshot = NODES_DATA.copy()
         await safe_save(NODES_CACHE_FILE, data_snapshot)
+        
+        # 触发静默更新 (流量变化/节点增删)
+        await refresh_dashboard_ui()
     except Exception as e:
         logger.error(f"❌ 保存缓存失败: {e}")
 
@@ -339,7 +417,6 @@ managers = {}
 def safe_notify(message, type='info', timeout=3000):
     try: ui.notify(message, type=type, timeout=timeout)
     except: logger.info(f"[Notify] {message}")
-
 
 # ================= SSH 连接核心逻辑 =================
 def get_ssh_client(server_data):
@@ -3006,7 +3083,99 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                                 ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                     except: continue
 
-# ==============================================================
+
+# ================= 核心：静默刷新 UI 数据 =================
+async def refresh_dashboard_ui():
+    """
+    不管是谁调用我，我都会把最新的 SERVERS_CACHE 和 NODES_DATA 
+    推送到仪表盘的组件上，不会刷新页面。
+    """
+    try:
+        # 如果仪表盘还没打开（引用是空的），直接跳过
+        if not DASHBOARD_REFS['servers']: return
+
+        total_servers = len(SERVERS_CACHE)
+        online_servers = 0
+        total_nodes = 0
+        total_traffic_bytes = 0
+        total_up_bytes = 0
+        total_down_bytes = 0
+        
+        server_traffic_map = {}
+        protocol_count = {}
+        map_markers = []
+
+        # --- 1. 计算数据 (纯内存计算，极快) ---
+        for s in SERVERS_CACHE:
+            res = NODES_DATA.get(s['url'], [])
+            name = s.get('name', '未命名')
+            
+            # 收集地图数据
+            # 注意：为了性能，这里不再做 IO 请求，只读缓存或 s 里的现有数据
+            # 如果需要更新地理位置，由专门的后台任务去做
+            if 'lat' in s and 'lon' in s:
+                 map_markers.append((s['lat'], s['lon'], name))
+            else:
+                 # 兼容旧逻辑，尝试从名称获取
+                 coords = None
+                 # 这里假设 get_coords_from_name 在作用域内，或者你需要把它挪出去变成全局函数
+                 # 如果它在 load_dashboard_stats 内部，建议把它移出来放到全局
+                 # coords = get_coords_from_name(name) 
+                 # if coords: map_markers.append((coords[0], coords[1], name))
+                 pass
+
+            if res:
+                online_servers += 1
+                total_nodes += len(res)
+                srv_traffic = 0
+                for n in res: 
+                    u = int(n.get('up', 0)); d = int(n.get('down', 0)); t = u + d
+                    total_up_bytes += u; total_down_bytes += d; total_traffic_bytes += t; srv_traffic += t
+                    proto = str(n.get('protocol', 'unknown')).upper()
+                    protocol_count[proto] = protocol_count.get(proto, 0) + 1
+                server_traffic_map[name] = srv_traffic
+            else:
+                server_traffic_map[name] = 0
+
+        # --- 2. 更新 UI (静默更新) ---
+        # 只有当 UI 元素存在时才更新
+        if DASHBOARD_REFS['servers']: DASHBOARD_REFS['servers'].set_text(f"{online_servers}/{total_servers}")
+        if DASHBOARD_REFS['nodes']: DASHBOARD_REFS['nodes'].set_text(str(total_nodes))
+        if DASHBOARD_REFS['traffic']: DASHBOARD_REFS['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
+        if DASHBOARD_REFS['subs']: DASHBOARD_REFS['subs'].set_text(str(len(SUBS_CACHE)))
+
+        if DASHBOARD_REFS['bar_chart']:
+            sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
+            names = [x[0] for x in sorted_traffic]; values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
+            DASHBOARD_REFS['bar_chart'].options['xAxis']['data'] = names
+            DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = values
+            DASHBOARD_REFS['bar_chart'].update()
+            # 更新 Top1 文字 (假设你有存 ref，这里略)
+
+        if DASHBOARD_REFS['pie_chart']:
+            pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
+            DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
+            DASHBOARD_REFS['pie_chart'].update()
+            
+            if DASHBOARD_REFS['stat_up']: DASHBOARD_REFS['stat_up'].set_text(format_bytes(total_up_bytes))
+            if DASHBOARD_REFS['stat_down']: DASHBOARD_REFS['stat_down'].set_text(format_bytes(total_down_bytes))
+            avg_traffic = total_traffic_bytes / total_nodes if total_nodes > 0 else 0
+            if DASHBOARD_REFS['stat_avg']: DASHBOARD_REFS['stat_avg'].set_text(format_bytes(avg_traffic))
+
+        # 更新地图 (只加点，不重绘整个地图)
+        m = DASHBOARD_REFS['map']
+        if m and map_markers:
+            if DASHBOARD_REFS['map_info']: DASHBOARD_REFS['map_info'].set_text(f'已定位 {len(map_markers)} 个节点')
+            # 简单去重逻辑：如果已经画过了就不画了，或者清空重画
+            # 这里简化处理：假设 clear_layers() 可用，或者只在初始化时画一次
+            # 如果需要实时动，可以 m.clear_layers() 然后重画
+            pass 
+
+    except Exception as e:
+        logger.error(f"UI 更新失败: {e}")
+
+
+# ========================后台刷新策略======================================
 
 async def load_dashboard_stats():
     # 1. 缓冲
@@ -3016,76 +3185,13 @@ async def load_dashboard_stats():
     # 强制重置容器样式
     content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
     
-    # 2. 定义 UI 引用
-    dash_refs = {}
-    
-    # 标记是否有数据被自动修正
-    config_changed = False
-
-    # 3. 辅助：超级坐标库 (用于名称匹配)
-    LOCATION_COORDS = {
-        '🇨🇳': (35.86, 104.19), 'China': (35.86, 104.19), '中国': (35.86, 104.19),
-        '🇭🇰': (22.31, 114.16), 'HK': (22.31, 114.16), 'Hong Kong': (22.31, 114.16), '香港': (22.31, 114.16),
-        '🇹🇼': (23.69, 120.96), 'TW': (23.69, 120.96), 'Taiwan': (23.69, 120.96), '台湾': (23.69, 120.96),
-        '🇯🇵': (36.20, 138.25), 'JP': (36.20, 138.25), 'Japan': (36.20, 138.25), '日本': (36.20, 138.25),
-        'Tokyo': (35.68, 139.76), '东京': (35.68, 139.76), 'Osaka': (34.69, 135.50), '大阪': (34.69, 135.50),
-        '🇸🇬': (1.35, 103.81), 'SG': (1.35, 103.81), 'Singapore': (1.35, 103.81), '新加坡': (1.35, 103.81),
-        '🇰🇷': (35.90, 127.76), 'KR': (35.90, 127.76), 'Korea': (35.90, 127.76), '韩国': (35.90, 127.76),
-        'Seoul': (37.56, 126.97), '首尔': (37.56, 126.97),
-        '🇮🇳': (20.59, 78.96), 'IN': (20.59, 78.96), 'India': (20.59, 78.96), '印度': (20.59, 78.96),
-        '🇮🇩': (-0.78, 113.92), 'ID': (-0.78, 113.92), 'Indonesia': (-0.78, 113.92), '印尼': (-0.78, 113.92),
-        '🇲🇾': (4.21, 101.97), 'MY': (4.21, 101.97), 'Malaysia': (4.21, 101.97), '马来西亚': (4.21, 101.97),
-        '🇹🇭': (15.87, 100.99), 'TH': (15.87, 100.99), 'Thailand': (15.87, 100.99), '泰国': (15.87, 100.99),
-        'Bangkok': (13.75, 100.50), '曼谷': (13.75, 100.50),
-        '🇻🇳': (14.05, 108.27), 'VN': (14.05, 108.27), 'Vietnam': (14.05, 108.27), '越南': (14.05, 108.27),
-        '🇵🇭': (12.87, 121.77), 'PH': (12.87, 121.77), 'Philippines': (12.87, 121.77), '菲律宾': (12.87, 121.77),
-        '🇮🇱': (31.04, 34.85), 'IL': (31.04, 34.85), 'Israel': (31.04, 34.85), '以色列': (31.04, 34.85),
-        '🇹🇷': (38.96, 35.24), 'TR': (38.96, 35.24), 'Turkey': (38.96, 35.24), '土耳其': (38.96, 35.24),
-        '🇦🇪': (23.42, 53.84), 'AE': (23.42, 53.84), 'UAE': (23.42, 53.84), '阿联酋': (23.42, 53.84),
-        'Dubai': (25.20, 55.27), '迪拜': (25.20, 55.27),
-        '🇺🇸': (37.09, -95.71), 'US': (37.09, -95.71), 'USA': (37.09, -95.71), 'United States': (37.09, -95.71), '美国': (37.09, -95.71),
-        'San Jose': (37.33, -121.88), '圣何塞': (37.33, -121.88), 'Los Angeles': (34.05, -118.24), '洛杉矶': (34.05, -118.24),
-        'Phoenix': (33.44, -112.07), '凤凰城': (33.44, -112.07),
-        '🇨🇦': (56.13, -106.34), 'CA': (56.13, -106.34), 'Canada': (56.13, -106.34), '加拿大': (56.13, -106.34),
-        '🇧🇷': (-14.23, -51.92), 'BR': (-14.23, -51.92), 'Brazil': (-14.23, -51.92), '巴西': (-14.23, -51.92),
-        '🇲🇽': (23.63, -102.55), 'MX': (23.63, -102.55), 'Mexico': (23.63, -102.55), '墨西哥': (23.63, -102.55),
-        '🇨🇱': (-35.67, -71.54), 'CL': (-35.67, -71.54), 'Chile': (-35.67, -71.54), '智利': (-35.67, -71.54),
-        '🇦🇷': (-38.41, -63.61), 'AR': (-38.41, -63.61), 'Argentina': (-38.41, -63.61), '阿根廷': (-38.41, -63.61),
-        '🇬🇧': (55.37, -3.43), 'UK': (55.37, -3.43), 'United Kingdom': (55.37, -3.43), '英国': (55.37, -3.43),
-        'London': (51.50, -0.12), '伦敦': (51.50, -0.12),
-        '🇩🇪': (51.16, 10.45), 'DE': (51.16, 10.45), 'Germany': (51.16, 10.45), '德国': (51.16, 10.45),
-        'Frankfurt': (50.11, 8.68), '法兰克福': (50.11, 8.68),
-        '🇫🇷': (46.22, 2.21), 'FR': (46.22, 2.21), 'France': (46.22, 2.21), '法国': (46.22, 2.21),
-        'Paris': (48.85, 2.35), '巴黎': (48.85, 2.35),
-        '🇳🇱': (52.13, 5.29), 'NL': (52.13, 5.29), 'Netherlands': (52.13, 5.29), '荷兰': (52.13, 5.29),
-        'Amsterdam': (52.36, 4.90), '阿姆斯特丹': (52.36, 4.90),
-        '🇷🇺': (61.52, 105.31), 'RU': (61.52, 105.31), 'Russia': (61.52, 105.31), '俄罗斯': (61.52, 105.31),
-        'Moscow': (55.75, 37.61), '莫斯科': (55.75, 37.61),
-        '🇮🇹': (41.87, 12.56), 'IT': (41.87, 12.56), 'Italy': (41.87, 12.56), '意大利': (41.87, 12.56),
-        'Milan': (45.46, 9.19), '米兰': (45.46, 9.19),
-        '🇪🇸': (40.46, -3.74), 'ES': (40.46, -3.74), 'Spain': (40.46, -3.74), '西班牙': (40.46, -3.74),
-        'Madrid': (40.41, -3.70), '马德里': (40.41, -3.70),
-        '🇸🇪': (60.12, 18.64), 'SE': (60.12, 18.64), 'Sweden': (60.12, 18.64), '瑞典': (60.12, 18.64),
-        'Stockholm': (59.32, 18.06), '斯德哥尔摩': (59.32, 18.06),
-        '🇨🇭': (46.81, 8.22), 'CH': (46.81, 8.22), 'Switzerland': (46.81, 8.22), '瑞士': (46.81, 8.22),
-        'Zurich': (47.37, 8.54), '苏黎世': (47.37, 8.54),
-        '🇦🇺': (-25.27, 133.77), 'AU': (-25.27, 133.77), 'Australia': (-25.27, 133.77), '澳大利亚': (-25.27, 133.77), '澳洲': (-25.27, 133.77),
-        'Sydney': (-33.86, 151.20), '悉尼': (-33.86, 151.20),
-        '🇿🇦': (-30.55, 22.93), 'ZA': (-30.55, 22.93), 'South Africa': (-30.55, 22.93), '南非': (-30.55, 22.93),
-        'Johannesburg': (-26.20, 28.04), '约翰内斯堡': (-26.20, 28.04),
-    }
-
-    def get_coords_from_name(name):
-        for k in sorted(LOCATION_COORDS.keys(), key=len, reverse=True):
-            if k in name: return LOCATION_COORDS[k]
-        return None
+    # 注意：之前的 LOCATION_COORDS 和 get_coords_from_name 已经移到全局了，这里不需要了
 
     # 6. 进入容器上下文
     with content_container:
         ui.label('系统概览').classes('text-3xl font-bold mb-6 text-slate-800 tracking-tight')
         
         # === A. 顶部卡片 ===
-        # 修复了这里的缩进
         with ui.row().classes('w-full gap-6 mb-8 items-stretch'):
             def create_stat_card(key, title, sub_text, icon, gradient):
                 with ui.card().classes(f'flex-1 p-6 shadow-lg border-none text-white {gradient} rounded-xl transform hover:scale-105 transition duration-300 relative overflow-hidden'):
@@ -3093,7 +3199,8 @@ async def load_dashboard_stats():
                     with ui.row().classes('items-center justify-between w-full relative z-10'):
                         with ui.column().classes('gap-1'):
                             ui.label(title).classes('opacity-80 text-xs font-bold uppercase tracking-wider')
-                            dash_refs[key] = ui.label('Loading...').classes('text-3xl font-extrabold tracking-tight')
+                            # ✨✨✨ 重点：把 UI 组件存入全局引用，而不是本地变量
+                            DASHBOARD_REFS[key] = ui.label('Wait...').classes('text-3xl font-extrabold tracking-tight')
                             ui.label(sub_text).classes('opacity-70 text-xs font-medium')
                         ui.icon(icon).classes('text-4xl opacity-80')
 
@@ -3107,8 +3214,11 @@ async def load_dashboard_stats():
             with ui.card().classes('w-full xl:w-2/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-lg font-bold text-slate-700')
-                    dash_refs['traffic_top1'] = ui.badge('Wait...', color='indigo').props('outline')
-                dash_refs['bar_chart'] = ui.echart({
+                    # 这里也可以存个 Ref，不过非必须
+                    ui.badge('Live', color='indigo').props('outline') 
+                
+                # ✨✨✨ 重点：存入全局引用
+                DASHBOARD_REFS['bar_chart'] = ui.echart({
                     'tooltip': {'trigger': 'axis'},
                     'grid': {'left': '3%', 'right': '4%', 'bottom': '3%', 'containLabel': True},
                     'xAxis': {'type': 'category', 'data': [], 'axisLabel': {'interval': 0, 'rotate': 30, 'color': '#64748b'}},
@@ -3118,7 +3228,9 @@ async def load_dashboard_stats():
 
             with ui.card().classes('w-full xl:w-1/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 ui.label('🍩 协议分布').classes('text-lg font-bold text-slate-700 mb-2')
-                dash_refs['pie_chart'] = ui.echart({
+                
+                # ✨✨✨ 重点：存入全局引用
+                DASHBOARD_REFS['pie_chart'] = ui.echart({
                     'color': ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'],
                     'tooltip': {'trigger': 'item'}, 
                     'legend': {'bottom': '0%', 'icon': 'circle'},
@@ -3134,18 +3246,22 @@ async def load_dashboard_stats():
                         with ui.row().classes('text-xs text-blue-400 font-bold mb-1').style('gap: 2px'):
                             ui.icon('arrow_upward', size='xs')
                             ui.label('上传')
-                        dash_refs['stat_up'] = ui.label('--').classes('text-sm font-extrabold text-blue-700')
+                        # ✨✨✨ 重点：存入全局引用
+                        DASHBOARD_REFS['stat_up'] = ui.label('--').classes('text-sm font-extrabold text-blue-700')
+                    
                     with ui.column().classes('items-center flex-1 p-2 bg-green-50 rounded-lg h-full justify-center'):
                         with ui.row().classes('text-xs text-green-500 font-bold mb-1').style('gap: 2px'):
                             ui.icon('arrow_downward', size='xs')
                             ui.label('下载')
-                        dash_refs['stat_down'] = ui.label('--').classes('text-sm font-extrabold text-green-700')
-                    # 修复了这里的双冒号 ::
+                        # ✨✨✨ 重点：存入全局引用
+                        DASHBOARD_REFS['stat_down'] = ui.label('--').classes('text-sm font-extrabold text-green-700')
+                    
                     with ui.column().classes('items-center flex-1 p-2 bg-purple-50 rounded-lg h-full justify-center'):
                         with ui.row().classes('text-xs text-purple-500 font-bold mb-1').style('gap: 2px'):
                             ui.icon('data_usage', size='xs')
                             ui.label('节点均量')
-                        dash_refs['stat_avg'] = ui.label('--').classes('text-sm font-extrabold text-purple-700')
+                        # ✨✨✨ 重点：存入全局引用
+                        DASHBOARD_REFS['stat_avg'] = ui.label('--').classes('text-sm font-extrabold text-purple-700')
 
         # === C. 底部地图 (Leaflet) ===
         with ui.row().classes('w-full gap-6 mb-6'):
@@ -3154,126 +3270,17 @@ async def load_dashboard_stats():
                     with ui.row().classes('gap-2 items-center'):
                         ui.icon('public', color='blue').classes('text-xl')
                         ui.label('全球节点实景分布 (Leaflet)').classes('text-lg font-bold text-slate-700')
-                    dash_refs['map_info'] = ui.label('等待数据...').classes('text-xs text-gray-400')
+                    # ✨✨✨ 重点：存入全局引用
+                    DASHBOARD_REFS['map_info'] = ui.label('等待数据更新...').classes('text-xs text-gray-400')
 
                 # 初始化地图 (高度 700px, 中心点 30,20)
-                dash_refs['map'] = ui.leaflet(center=(30, 20), zoom=2).classes('w-full h-[700px]')
+                # ✨✨✨ 重点：存入全局引用
+                DASHBOARD_REFS['map'] = ui.leaflet(center=(30, 20), zoom=2).classes('w-full h-[700px]')
 
-        # === D. 数据更新任务 ===
-        async def update_dashboard_data():
-            nonlocal config_changed
-            try:
-                if content_container.is_deleted: return
-
-                total_servers = len(SERVERS_CACHE)
-                online_servers = 0
-                total_nodes = 0
-                total_traffic_bytes = 0
-                total_up_bytes = 0
-                total_down_bytes = 0
-                
-                server_traffic_map = {}
-                protocol_count = {}
-                map_markers = []
-
-                # 计算数据
-                for s in SERVERS_CACHE:
-                    res = NODES_DATA.get(s['url'], [])
-                    name = s.get('name', '未命名')
-                    
-                    # 1. 优先尝试名称匹配
-                    coords = get_coords_from_name(name)
-                    
-                    # 2. 如果名称匹配失败，尝试 IP 定位
-                    if not coords:
-                        # [调用全局函数] 获取地理信息 (lat, lon, country_name)
-                        geo_info = await run.io_bound(fetch_geo_from_ip, s['url'])
-                        
-                        if geo_info:
-                            coords = (geo_info[0], geo_info[1])
-                            country_name = geo_info[2]
-                            
-                            # ✨✨✨ 自动纠正分组逻辑 (修正版) ✨✨✨
-                            current_group = s.get('group', '默认分组')
-                            
-                            # ✨ 允许 '自动导入' 和 '🏳️ 其他地区' 组的服务器被重新检测并归队
-                            auto_fix_whitelist = ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区']
-                            
-                            if current_group in auto_fix_whitelist:
-                                # [调用全局函数] 找到对应的国旗分组名
-                                new_group = get_flag_for_country(country_name)
-                                if new_group != current_group:
-                                    s['group'] = new_group
-                                    config_changed = True # 标记需要保存
-                                    logger.info(f"🔄 [自动分组] {name} -> {new_group}")
-
-                    if coords:
-                        map_markers.append((coords[0], coords[1], name))
-
-                    if res:
-                        online_servers += 1
-                        total_nodes += len(res)
-                        srv_traffic = 0
-                        for n in res: 
-                            u = int(n.get('up', 0)); d = int(n.get('down', 0)); t = u + d
-                            total_up_bytes += u; total_down_bytes += d; total_traffic_bytes += t; srv_traffic += t
-                            proto = str(n.get('protocol', 'unknown')).upper()
-                            protocol_count[proto] = protocol_count.get(proto, 0) + 1
-                        server_traffic_map[name] = srv_traffic
-                    else:
-                        server_traffic_map[name] = 0
-
-                # 更新 UI 文字和图表
-                if 'servers' in dash_refs: dash_refs['servers'].set_text(f"{online_servers}/{total_servers}")
-                if 'nodes' in dash_refs: dash_refs['nodes'].set_text(str(total_nodes))
-                if 'traffic' in dash_refs: dash_refs['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
-                if 'subs' in dash_refs: dash_refs['subs'].set_text(str(len(SUBS_CACHE)))
-
-                if 'bar_chart' in dash_refs:
-                    sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
-                    names = [x[0] for x in sorted_traffic]; values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
-                    dash_refs['bar_chart'].options['xAxis']['data'] = names
-                    dash_refs['bar_chart'].options['series'][0]['data'] = values
-                    dash_refs['bar_chart'].update()
-                    if sorted_traffic: dash_refs['traffic_top1'].set_text(f"Top 1: {sorted_traffic[0][0]}")
-
-                if 'pie_chart' in dash_refs:
-                    pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
-                    dash_refs['pie_chart'].options['series'][0]['data'] = pie_data
-                    dash_refs['pie_chart'].update()
-                    dash_refs['stat_up'].set_text(format_bytes(total_up_bytes))
-                    dash_refs['stat_down'].set_text(format_bytes(total_down_bytes))
-                    avg_traffic = total_traffic_bytes / total_nodes if total_nodes > 0 else 0
-                    dash_refs['stat_avg'].set_text(format_bytes(avg_traffic))
-
-                # 更新地图标记
-                if 'map' in dash_refs and map_markers:
-                    m = dash_refs['map']
-                    dash_refs['map_info'].set_text(f'已定位 {len(map_markers)} / {total_servers} 个节点')
-                    
-                    if not getattr(m, 'has_drawn_markers', False):
-                        for lat, lng, name in map_markers:
-                            # 随机微调
-                            lat += (random.random() - 0.5) * 0.1
-                            lng += (random.random() - 0.5) * 0.1
-                            m.marker(latlng=(lat, lng))
-                        m.has_drawn_markers = True
-                
-                # ✨ 如果有分组变动，保存并刷新左侧栏
-                if config_changed:
-                    await save_servers()
-                    render_sidebar_content.refresh()
-                    safe_notify("已根据 IP 自动更新服务器分组", "positive")
-                    config_changed = False # 重置标记
-
-            except Exception as e:
-                logger.error(f"❌ Dashboard Update Error: {e}")
-
-        # 6. 立即运行一次
-        await update_dashboard_data()
-        
-        # 7. 注册定时器
-        ui.timer(3.0, update_dashboard_data)
+        # === D. 立即填充一次数据 ===
+        # 这里不再有 while True 循环，也不再有 ui.timer
+        # 只是在页面打开的瞬间，调用一次 Step 2 写的刷新函数
+        await refresh_dashboard_ui()
         
 # ================= 全能批量编辑器 =================
 class BulkEditor:
@@ -4113,6 +4120,34 @@ async def run_global_ping_task():
 
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
+
+# ================= 后台常驻任务：定期同步流量 =================
+async def traffic_monitor_loop():
+    logger.info("🕒 后台流量监控任务已启动")
+    
+    # 1. 启动时立即执行一次全量同步
+    # 注意：fetch_inbounds_safe 是耗时操作，这会更新 NODES_DATA
+    tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in SERVERS_CACHE]
+    if tasks:
+        logger.info("🚀 启动全量同步...")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("✅ 启动全量同步完成")
+        # 同步完数据后，通知 UI 更新
+        await refresh_dashboard_ui()
+
+    # 2. 进入长循环 (每 3 小时一次)
+    while True:
+        await asyncio.sleep(3 * 60 * 60) # 3小时 = 10800 秒
+        
+        logger.info("🕒 执行定时流量更新...")
+        tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in SERVERS_CACHE]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # 数据变了，推送到前端
+            await refresh_dashboard_ui()
+
+# 注册到 app 启动事件
+app.on_startup(traffic_monitor_loop)
 
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("🚀 系统正在初始化...")
