@@ -101,7 +101,7 @@ def get_flag_for_country(country_name):
             return v 
     return f"🏳️ {country_name}"
 
-# ✨✨✨ [逻辑修正] 自动给名称添加国旗 ✨✨✨
+# ✨✨✨ 自动给名称添加国旗 ✨✨✨
 async def auto_prepend_flag(name, url):
     """
     检查名字是否已经包含任意已知国旗。
@@ -3046,7 +3046,8 @@ async def load_dashboard_stats():
         ui.label('系统概览').classes('text-3xl font-bold mb-6 text-slate-800 tracking-tight')
         
         # === A. 顶部卡片 ===
-        with ui.row().classes('w-full gap-6 mb-8'):
+        # 修复了这里的缩进
+        with ui.row().classes('w-full gap-6 mb-8 items-stretch'):
             def create_stat_card(key, title, sub_text, icon, gradient):
                 with ui.card().classes(f'flex-1 p-6 shadow-lg border-none text-white {gradient} rounded-xl transform hover:scale-105 transition duration-300 relative overflow-hidden'):
                     ui.element('div').classes('absolute -right-6 -top-6 w-24 h-24 bg-white opacity-10 rounded-full')
@@ -3089,18 +3090,19 @@ async def load_dashboard_stats():
                 
                 ui.separator().classes('my-4')
                 
-                with ui.row().classes('w-full justify-between gap-2'):
-                    with ui.column().classes('items-center flex-1 p-2 bg-blue-50 rounded-lg'):
+                with ui.row().classes('w-full gap-2 items-stretch'):
+                    with ui.column().classes('items-center flex-1 p-2 bg-blue-50 rounded-lg h-full justify-center'):
                         with ui.row().classes('text-xs text-blue-400 font-bold mb-1').style('gap: 2px'):
                             ui.icon('arrow_upward', size='xs')
                             ui.label('上传')
                         dash_refs['stat_up'] = ui.label('--').classes('text-sm font-extrabold text-blue-700')
-                    with ui.column().classes('items-center flex-1 p-2 bg-green-50 rounded-lg'):
+                    with ui.column().classes('items-center flex-1 p-2 bg-green-50 rounded-lg h-full justify-center'):
                         with ui.row().classes('text-xs text-green-500 font-bold mb-1').style('gap: 2px'):
                             ui.icon('arrow_downward', size='xs')
                             ui.label('下载')
                         dash_refs['stat_down'] = ui.label('--').classes('text-sm font-extrabold text-green-700')
-                    with ui.column().classes('items-center flex-1 p-2 bg-purple-50 rounded-lg'):
+                    # 修复了这里的双冒号 ::
+                    with ui.column().classes('items-center flex-1 p-2 bg-purple-50 rounded-lg h-full justify-center'):
                         with ui.row().classes('text-xs text-purple-500 font-bold mb-1').style('gap: 2px'):
                             ui.icon('data_usage', size='xs')
                             ui.label('节点均量')
@@ -3715,7 +3717,7 @@ def open_combined_group_management(group_name):
 def render_sidebar_content():
     # 1. 顶部区域
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('X-Fusion Panel').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
         
         # 定义顶部按钮的通用样式 (带按压反馈)
         btn_cls = 'w-full text-slate-700 active:scale-95 transition-transform duration-150'
@@ -3953,11 +3955,22 @@ def login_page(request: Request):
 # ================= [本地化版] 主页入口 =================
 @ui.page('/')
 def main_page(request: Request):
-    # ✨✨✨ 用本地静态文件 (解决网络问题) ✨✨✨
+    # ✨✨✨ 原有的本地静态文件引用 ✨✨✨
     ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
 
+    # ✨✨✨ [新增] 修复 Windows 国旗显示问题 ✨✨✨
+    # 引入 Google Noto Color Emoji 字体
+    ui.add_head_html('''
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Color+Emoji&display=swap" rel="stylesheet">
+        <style>
+            /* 强制在全站优先使用 Noto Color Emoji 渲染 Emoji 字符 */
+            body {
+                font-family: "Roboto", "Helvetica", "Arial", sans-serif, "Noto Color Emoji";
+            }
+        </style>
+    ''')
     # ================= 2. 基础认证检查 =================
     if not app.storage.user.get('authenticated', False):
         return RedirectResponse('/login')
