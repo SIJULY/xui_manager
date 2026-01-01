@@ -16,8 +16,8 @@ import qrcode
 import time
 import io
 import paramiko
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor # ✅ 修正
-from apscheduler.schedulers.asyncio import AsyncIOScheduler # ✅ 修正
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
@@ -1851,6 +1851,10 @@ def open_sub_editor(d):
     
 # ================= 订阅管理视图 (极简模式：只显在线) =================
 async def load_subs_view():
+    # ✨✨✨ [新增] 标记当前在订阅管理 ✨✨✨
+    global CURRENT_VIEW_STATE
+    CURRENT_VIEW_STATE['scope'] = 'SUBS'
+    CURRENT_VIEW_STATE['data'] = None
     show_loading(content_container)
     try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
     except: origin = ""
@@ -2525,120 +2529,150 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
 # =================  刷新逻辑 (防闪烁 + 极速响应) =================
+# =================  刷新逻辑 (防闪烁 + 静默后台更新) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     # 1. 安全检查 UI 上下文
-    try:
-        client = ui.context.client
+    try: client = ui.context.client
     except: return 
 
+    global CURRENT_VIEW_STATE
+
+    # ✨ 如果不是后台强制刷新（即用户手动点击导航），则立即更新“当前位置”
+    # 这样系统就知道您现在切换到新页面了
+    if not force_refresh:
+        CURRENT_VIEW_STATE['scope'] = scope
+        CURRENT_VIEW_STATE['data'] = data
+
+    # 记录任务开始时的视图状态（快照）
+    # 用于任务结束后对比：用户是否还在等这个结果？
+    task_start_scope = scope
+    task_start_data = data
+
     with client: 
-        # ✨ 优化：只有在容器完全为空（首次加载）时，才显示 Loading 占位
-        # 避免每次点击切换时先把界面清空显示 Loading，导致视觉上的剧烈闪烁
-        if not content_container or len(list(content_container)) == 0:
+        # 仅在首次加载(容器为空)且不是静默刷新时，才显示 Loading
+        # 这样切换页面时有反馈，但点击同步按钮时不会闪屏
+        if (not content_container or len(list(content_container)) == 0) and not force_refresh:
             content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
             show_loading(content_container)
     
-    targets = []
-    title = ""
-    is_group_view = False
-    show_ping = False 
-    
-    # --- 数据筛选逻辑 ---
-    try:
-        # A. 所有服务器
-        if scope == 'ALL':
-            targets = list(SERVERS_CACHE)
-            title = f"🌍 所有服务器 ({len(targets)})"
-            
-        # B. 自定义分组
-        elif scope == 'TAG':
-            targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
-            title = f"🏷️ 自定义分组: {data} ({len(targets)})"
-            is_group_view = True
-            
-        # C. 国家分组
-        elif scope == 'COUNTRY':
-            targets = []
-            for s in SERVERS_CACHE:
-                # 1. 获取服务器的最终归属组 (优先用保存的，没有则自动检测)
-                saved = s.get('group')
-                # 排除那些非区域的特殊组
-                if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区']:
-                    real_group = saved
-                else:
-                    real_group = detect_country_group(s.get('name', ''))
-                
-                # 2. 如果归属组等于当前点击的组名，则加入列表
-                if real_group == data:
-                    targets.append(s)
-            
-            title = f"🏳️ 区域: {data} ({len(targets)})"
-            is_group_view = True
-            show_ping = True 
-            
-        # D. 单个服务器
-        elif scope == 'SINGLE':
-            # 检查该服务器是否还存在 (防止删除后报错)
-            if data in SERVERS_CACHE:
-                targets = [data]
-                raw_url = data['url']
-                try:
-                    if '://' not in raw_url: raw_url = f'http://{raw_url}'
-                    parsed = urlparse(raw_url)
-                    host_display = parsed.hostname or raw_url
-                except: host_display = raw_url
-                title = f"🖥️ {data['name']} ({host_display})"
-            else:
-                # 如果单个服务器已被删除，回退到显示所有
-                scope = 'ALL'
+    # --- A. 执行数据同步 (后台耗时操作) ---
+    sync_targets = []
+    if force_refresh:
+        try:
+            # 根据请求的范围，决定要去 Ping 哪些服务器
+            if scope == 'ALL': sync_targets = list(SERVERS_CACHE)
+            elif scope == 'TAG': sync_targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
+            elif scope == 'COUNTRY':
+                for s in SERVERS_CACHE:
+                    saved = s.get('group')
+                    real = saved if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区'] else detect_country_group(s.get('name', ''))
+                    if real == data: sync_targets.append(s)
+            elif scope == 'SINGLE':
+                 if data in SERVERS_CACHE: sync_targets = [data]
+        except: pass
+        
+        if sync_targets:
+            safe_notify(f'正在后台同步 {len(sync_targets)} 个服务器...')
+            # ⏳ 这里会消耗时间 (几秒到几十秒)
+            tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in sync_targets]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+    # --- B. 渲染界面 (前台逻辑) ---
+    async def _render():
+        # ✨✨✨ [核心修改点] 任务跑完后，进行“身份核查” ✨✨✨
+        
+        # 1. 获取用户现在真正所在的页面
+        current_real_scope = CURRENT_VIEW_STATE['scope']
+        current_real_data = CURRENT_VIEW_STATE['data']
+
+        # 2. 判断：用户现在看的页面，是不是就是我刚才去跑任务的那个页面？
+        # 如果 force_refresh 是 True (代表是后台同步任务)，我们需要严格检查
+        if force_refresh:
+            # 如果用户已经切走了 (比如从 ALL 切到了 COUNTRY)
+            if current_real_scope != task_start_scope or current_real_data != task_start_data:
+                logger.info(f"用户已切换页面 ({task_start_scope} -> {current_real_scope})，后台同步完成，但不刷新UI。")
+                # ⛔️ 直接退出！不做任何 UI 渲染，不跳转，不刷新
+                # 数据已经在上面的 fetch_inbounds_safe 里存入 NODES_DATA 缓存了
+                # 仪表盘下次打开时会自动读取最新缓存
+                return
+
+        # 3. 如果用户没动，或者这是用户的主动导航，则开始渲染
+        # 此时我们要渲染的是“current_real_scope”，确保万无一失
+        
+        targets = []
+        title = ""
+        is_group_view = False
+        show_ping = False
+        
+        try:
+            if current_real_scope == 'ALL':
                 targets = list(SERVERS_CACHE)
                 title = f"🌍 所有服务器 ({len(targets)})"
+                
+            elif current_real_scope == 'TAG':
+                targets = [s for s in SERVERS_CACHE if current_real_data in s.get('tags', [])]
+                title = f"🏷️ 自定义分组: {current_real_data} ({len(targets)})"
+                is_group_view = True
+                
+            elif current_real_scope == 'COUNTRY':
+                targets = []
+                for s in SERVERS_CACHE:
+                    saved = s.get('group')
+                    real_g = saved if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区'] else detect_country_group(s.get('name', ''))
+                    if real_g == current_real_data: targets.append(s)
+                title = f"🏳️ 区域: {current_real_data} ({len(targets)})"
+                is_group_view = True
+                show_ping = True 
+                
+            elif current_real_scope == 'SINGLE':
+                if current_real_data in SERVERS_CACHE:
+                    targets = [current_real_data]
+                    raw_url = current_real_data['url']
+                    try:
+                        if '://' not in raw_url: raw_url = f'http://{raw_url}'
+                        parsed = urlparse(raw_url)
+                        host_display = parsed.hostname or raw_url
+                    except: host_display = raw_url
+                    title = f"🖥️ {current_real_data['name']} ({host_display})"
+                else:
+                    current_real_scope = 'ALL'
+                    targets = list(SERVERS_CACHE)
+                    title = f"🌍 所有服务器 ({len(targets)})"
 
-    except Exception as e:
-        logger.error(f"Refresh Content Data Error: {e}")
-        targets = []
+            if current_real_scope != 'SINGLE':
+                targets.sort(key=smart_sort_key)
+                
+        except Exception as e:
+            logger.error(f"Render Error: {e}")
+            targets = []
 
-    if scope != 'SINGLE':
-        targets.sort(key=smart_sort_key)
-
-    if force_refresh:
-        safe_notify(f'正在同步 {len(targets)} 个服务器...')
-
-    async def _render():
-        # ✨ 关键优化：移除人为的延迟 await asyncio.sleep(0.1)
-        # 这会让点击响应变快，减少“顿一下”的感觉
-        
         with client:
-            # 清空容器，准备重绘
-            # 由于去掉了人为延迟，这里的清空到重绘会非常快，肉眼几乎感觉不到闪烁
             content_container.clear()
-            
             with content_container:
-                # 1. 顶部栏
+                # 顶部栏
                 with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
                     with ui.row().classes('items-center gap-4'):
                         ui.label(title).classes('text-2xl font-bold')
-                        
                         if is_group_view and targets:
                             with ui.row().classes('gap-1'):
-                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
-                                ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
-                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(current_real_data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
+                                ui.button(icon='bolt', on_click=lambda: copy_group_link(current_real_data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
+                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(current_real_data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
 
-                    # 只有在非 SINGLE 模式，或者 SINGLE 模式下 target 存在时才显示同步按钮
                     if targets:
-                        ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
+                        # 按钮点击时，传递当前的 scope 和 data
+                        ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(current_real_scope, current_real_data, force_refresh=True)).props('outline color=primary')
                 
-                # 2. 内容渲染
+                # 内容列表
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
                         ui.icon('inbox', size='4rem')
                         ui.label('列表为空').classes('text-lg')
-                elif scope == 'SINGLE': 
+                elif current_real_scope == 'SINGLE': 
                     await render_single_server_view(targets[0], force_refresh)
                 else: 
-                    # 调用优化后的聚合视图函数
-                    await render_aggregated_view(targets, show_ping=show_ping, force_refresh=force_refresh)
+                    await render_aggregated_view(targets, show_ping=show_ping, force_refresh=False)
 
     asyncio.create_task(_render())
 
@@ -2889,6 +2923,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 # 全局字典，用于存储每行 UI 元素的引用，以便局部更新
 # 结构: { 'server_url': { 'row_el': row_element, 'status_icon': icon, 'status_label': label, ... } }
 UI_ROW_REFS = {} 
+CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
 # =================  聚合视图  =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False):
@@ -3191,6 +3226,10 @@ async def refresh_dashboard_ui():
 # ========================后台刷新策略======================================
 
 async def load_dashboard_stats():
+    # ✨✨✨ [新增] 标记当前在仪表盘 ✨✨✨
+    global CURRENT_VIEW_STATE
+    CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
+    CURRENT_VIEW_STATE['data'] = None
     # 1. 缓冲
     await asyncio.sleep(0.1)
     content_container.clear()
