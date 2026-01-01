@@ -16,8 +16,8 @@ import qrcode
 import time
 import io
 import paramiko
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor # ✅ 修正
+from apscheduler.schedulers.asyncio import AsyncIOScheduler # ✅ 修正
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
@@ -2528,38 +2528,40 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px
 # ✨✨✨ 新增：单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
-# =================  刷新逻辑 (防闪烁 + 极速响应) =================
-# =================  刷新逻辑 (防闪烁 + 静默后台更新) =================
+# =================  刷新逻辑 (防闪烁 + 静默后台更新 + 令牌防冲突) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     # 1. 安全检查 UI 上下文
     try: client = ui.context.client
     except: return 
 
     global CURRENT_VIEW_STATE
-
-    # ✨ 如果不是后台强制刷新（即用户手动点击导航），则立即更新“当前位置”
-    # 这样系统就知道您现在切换到新页面了
+    
+    # ✨✨✨ [新增] 生成本次操作的唯一令牌 (时间戳) ✨✨✨
+    import time
+    current_token = time.time()
+    
+    # 更新全局状态（包含令牌）
     if not force_refresh:
         CURRENT_VIEW_STATE['scope'] = scope
         CURRENT_VIEW_STATE['data'] = data
+    
+    # 无论是否强制刷新，都要更新令牌，标记这是最新的一次操作
+    CURRENT_VIEW_STATE['render_token'] = current_token
 
-    # 记录任务开始时的视图状态（快照）
-    # 用于任务结束后对比：用户是否还在等这个结果？
+    # 记录任务开始时的视图状态
     task_start_scope = scope
     task_start_data = data
 
     with client: 
-        # 仅在首次加载(容器为空)且不是静默刷新时，才显示 Loading
-        # 这样切换页面时有反馈，但点击同步按钮时不会闪屏
         if (not content_container or len(list(content_container)) == 0) and not force_refresh:
             content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
             show_loading(content_container)
     
-    # --- A. 执行数据同步 (后台耗时操作) ---
+    # --- A. 执行数据同步 ---
     sync_targets = []
     if force_refresh:
+        # ... (同步逻辑保持不变，为了节省篇幅省略，逻辑与之前一致) ...
         try:
-            # 根据请求的范围，决定要去 Ping 哪些服务器
             if scope == 'ALL': sync_targets = list(SERVERS_CACHE)
             elif scope == 'TAG': sync_targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
             elif scope == 'COUNTRY':
@@ -2572,49 +2574,46 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
         except: pass
         
         if sync_targets:
+            # ✨ 检查令牌：如果在同步准备期间用户切走了，直接取消同步（节省资源）
+            if CURRENT_VIEW_STATE.get('render_token') != current_token: return
+
             safe_notify(f'正在后台同步 {len(sync_targets)} 个服务器...')
-            # ⏳ 这里会消耗时间 (几秒到几十秒)
             tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in sync_targets]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-
-    # --- B. 渲染界面 (前台逻辑) ---
+    # --- B. 渲染界面 (核心修改) ---
     async def _render():
-        # ✨✨✨ [核心修改点] 任务跑完后，进行“身份核查” ✨✨✨
-        
+        # ✨✨✨ [第一道防线] 任务跑完回来，先检查令牌 ✨✨✨
+        # 如果全局令牌变了，说明在这个任务等待期间，用户又点了别的地方
+        # 此时必须直接退出，绝对不能去碰 UI
+        if CURRENT_VIEW_STATE.get('render_token') != current_token:
+            # logger.info("渲染被拦截：令牌过期")
+            return
+
         # 1. 获取用户现在真正所在的页面
         current_real_scope = CURRENT_VIEW_STATE['scope']
         current_real_data = CURRENT_VIEW_STATE['data']
 
-        # 2. 判断：用户现在看的页面，是不是就是我刚才去跑任务的那个页面？
-        # 如果 force_refresh 是 True (代表是后台同步任务)，我们需要严格检查
+        # 2. 如果是后台任务，检查是否还在原页面 (防跳转逻辑)
         if force_refresh:
-            # 如果用户已经切走了 (比如从 ALL 切到了 COUNTRY)
             if current_real_scope != task_start_scope or current_real_data != task_start_data:
-                logger.info(f"用户已切换页面 ({task_start_scope} -> {current_real_scope})，后台同步完成，但不刷新UI。")
-                # ⛔️ 直接退出！不做任何 UI 渲染，不跳转，不刷新
-                # 数据已经在上面的 fetch_inbounds_safe 里存入 NODES_DATA 缓存了
-                # 仪表盘下次打开时会自动读取最新缓存
                 return
 
-        # 3. 如果用户没动，或者这是用户的主动导航，则开始渲染
-        # 此时我们要渲染的是“current_real_scope”，确保万无一失
-        
+        # 3. 准备数据
         targets = []
         title = ""
         is_group_view = False
         show_ping = False
         
         try:
+            # ... (数据准备逻辑保持不变) ...
             if current_real_scope == 'ALL':
                 targets = list(SERVERS_CACHE)
                 title = f"🌍 所有服务器 ({len(targets)})"
-                
             elif current_real_scope == 'TAG':
                 targets = [s for s in SERVERS_CACHE if current_real_data in s.get('tags', [])]
                 title = f"🏷️ 自定义分组: {current_real_data} ({len(targets)})"
                 is_group_view = True
-                
             elif current_real_scope == 'COUNTRY':
                 targets = []
                 for s in SERVERS_CACHE:
@@ -2624,21 +2623,14 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                 title = f"🏳️ 区域: {current_real_data} ({len(targets)})"
                 is_group_view = True
                 show_ping = True 
-                
             elif current_real_scope == 'SINGLE':
                 if current_real_data in SERVERS_CACHE:
                     targets = [current_real_data]
-                    raw_url = current_real_data['url']
-                    try:
-                        if '://' not in raw_url: raw_url = f'http://{raw_url}'
-                        parsed = urlparse(raw_url)
-                        host_display = parsed.hostname or raw_url
-                    except: host_display = raw_url
+                    raw_url = current_real_data['url']; parsed = urlparse(raw_url if '://' in raw_url else f'http://{raw_url}')
+                    host_display = parsed.hostname or raw_url
                     title = f"🖥️ {current_real_data['name']} ({host_display})"
                 else:
-                    current_real_scope = 'ALL'
-                    targets = list(SERVERS_CACHE)
-                    title = f"🌍 所有服务器 ({len(targets)})"
+                    current_real_scope = 'ALL'; targets = list(SERVERS_CACHE); title = f"🌍 所有服务器 ({len(targets)})"
 
             if current_real_scope != 'SINGLE':
                 targets.sort(key=smart_sort_key)
@@ -2646,6 +2638,9 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
         except Exception as e:
             logger.error(f"Render Error: {e}")
             targets = []
+
+        # ✨✨✨ [第二道防线] 数据准备好了，准备画图前，再查一次令牌 ✨✨✨
+        if CURRENT_VIEW_STATE.get('render_token') != current_token: return
 
         with client:
             content_container.clear()
@@ -2656,23 +2651,22 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                         ui.label(title).classes('text-2xl font-bold')
                         if is_group_view and targets:
                             with ui.row().classes('gap-1'):
-                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(current_real_data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
-                                ui.button(icon='bolt', on_click=lambda: copy_group_link(current_real_data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
-                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(current_real_data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(current_real_data)).props('flat dense round size=sm color=grey')
+                                ui.button(icon='bolt', on_click=lambda: copy_group_link(current_real_data, target='surge')).props('flat dense round size=sm text-color=orange')
+                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(current_real_data, target='clash')).props('flat dense round size=sm text-color=green')
 
                     if targets:
-                        # 按钮点击时，传递当前的 scope 和 data
                         ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(current_real_scope, current_real_data, force_refresh=True)).props('outline color=primary')
                 
-                # 内容列表
+                # 内容渲染
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
-                        ui.icon('inbox', size='4rem')
-                        ui.label('列表为空').classes('text-lg')
+                        ui.icon('inbox', size='4rem'); ui.label('列表为空').classes('text-lg')
                 elif current_real_scope == 'SINGLE': 
                     await render_single_server_view(targets[0], force_refresh)
                 else: 
-                    await render_aggregated_view(targets, show_ping=show_ping, force_refresh=False)
+                    # ✨ 传递令牌给聚合视图，让它在循环内部也能中断
+                    await render_aggregated_view(targets, show_ping=show_ping, force_refresh=False, token=current_token)
 
     asyncio.create_task(_render())
 
@@ -2925,15 +2919,17 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# =================  聚合视图  =================
-async def render_aggregated_view(server_list, show_ping=False, force_refresh=False):
+# =================  聚合视图 =================
+async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     list_container = ui.column().classes('w-full gap-4')
     
     results = []
     if force_refresh:
+        # 如果是强制刷新，去后台获取数据
         tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in server_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
+        # 否则直接读缓存
         for s in server_list:
             results.append(NODES_DATA.get(s['url'], []))
 
@@ -2944,15 +2940,12 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     use_special_mode = is_all_servers or show_ping
     current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
 
-    # --- 定义强力重连函数 (放在循环外复用) ---
+    # --- 内部定义强力重连函数 ---
     async def force_retry_ping(btn, icon, host, port, key):
-        if not btn: return # 防止空指针
-        
-        # 1. UI 反馈：转圈，图标变灰
+        if not btn: return 
         btn.props('loading') 
         icon.classes(remove='text-red-500 text-green-500', add='text-gray-300') 
         
-        # 内部函数：单次连接
         async def _try_connect(timeout_sec):
             try:
                 start = asyncio.get_running_loop().time()
@@ -2960,42 +2953,27 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 writer.close()
                 await writer.wait_closed()
                 return int((asyncio.get_running_loop().time() - start) * 1000)
-            except:
-                return None
-
-        # 2. 执行 3 次重试循环 (每次 3秒)
+            except: return None
+            
         final_latency = None
-        
         for i in range(3):
-            # 发起连接尝试
             final_latency = await _try_connect(3.0)
+            if final_latency is not None: break
+            if i < 2: await asyncio.sleep(0.5)
             
-            if final_latency is not None:
-                # 🎉 成功了！直接跳出循环
-                break
-            
-            # 如果失败了，且不是最后一次，就稍微休息 0.5秒 再试
-            if i < 2:
-                await asyncio.sleep(0.5)
-
-        # 3. 处理最终结果
         if final_latency is not None:
-            # 成功
             PING_CACHE[key] = final_latency
             icon.classes(remove='text-gray-300 text-red-500', add='text-green-500')
-            btn.set_visibility(False) # 救活了，隐藏急救按钮
+            btn.set_visibility(False) 
             safe_notify(f'✅ 重连成功: {final_latency}ms', 'positive')
         else:
-            # 3次全部失败
             PING_CACHE[key] = -1
             icon.classes(remove='text-gray-300 text-green-500', add='text-red-500')
             safe_notify('❌ 依然无法连接 (3次尝试均失败)', 'negative')
-        
-        # 4. 停止转圈
         btn.props(remove='loading')
 
     with list_container:
-        # --- 表头 ---
+        # --- 绘制表头 ---
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(current_css):
             ui.label('服务器').classes('text-left pl-2')
             ui.label('备注名称').classes('text-left pl-2')
@@ -3007,8 +2985,19 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             if not use_special_mode: ui.label('状态').classes('text-center')
             ui.label('操作').classes('text-center')
         
-        # --- 数据行 ---
+        # --- 绘制数据行 (分批渲染) ---
         for i, res in enumerate(results):
+            
+            # ✨✨✨ [核心防线 1] 检查令牌是否过期 ✨✨✨
+            # 如果 token 传进来了，且跟全局最新 token 不一致，说明用户切走了，立即停止渲染
+            if token and CURRENT_VIEW_STATE.get('render_token') != token:
+                return 
+
+            # ✨✨✨ [核心防线 2] 喘口气，防止主线程卡死 ✨✨✨
+            # 每渲染 10 行，强制休息 0 秒，让出 CPU 给心跳包
+            if i > 0 and i % 10 == 0:
+                await asyncio.sleep(0) 
+            
             srv = server_list[i]
             if isinstance(res, Exception): res = []
             if res is None: res = []
@@ -3020,14 +3009,14 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
             except: pass
 
-            # 触发后台 Ping
+            # 如果需要显示 Ping，则发起后台 Ping 任务
             if show_ping and res:
                  asyncio.create_task(batch_ping_nodes(res, raw_host))
 
             row_wrapper = ui.element('div').classes('w-full')
             
             with row_wrapper:
-                # --- 情况 A: 无数据 ---
+                # --- 情况 A: 无数据 (显示连接失败或暂无数据) ---
                 if not res:
                     with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(current_css):
                         ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
@@ -3040,7 +3029,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                             except: ip_display = raw_host
                             with ui.row().classes('w-full justify-center items-center gap-1'):
                                 ui.icon('bolt').classes('text-red-500 text-sm')
-                                # ✨ 绑定 IP 静默更新
+                                # 绑定 IP 静默更新
                                 ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
                                 bind_ip_label(srv['url'], ip_label)
                         else:
@@ -3050,10 +3039,12 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                         if not use_special_mode:
                             with ui.element('div').classes('flex justify-center w-full'): ui.icon('help_outline', color='grey').props('size=xs')
                         
-                        with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary').tooltip('单独同步')
+                        with ui.row().classes('gap-2 justify-center w-full'): 
+                            # 注意：这里调用 refresh_content 最好也带上 force_refresh=True
+                            ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary').tooltip('单独同步')
                     continue
 
-                # --- 情况 B: 有数据 ---
+                # --- 情况 B: 有数据 (正常渲染节点) ---
                 for n in res:
                     try:
                         traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
@@ -3066,42 +3057,39 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                             ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
                             
-                            # ✨✨✨ Col 3: 状态逻辑 (含 IP 静默更新) ✨✨✨
+                            # Col 3: 状态/分组
                             if use_special_mode:
                                 try: ip_display = get_real_ip_display(srv['url'])
                                 except: ip_display = raw_host
                                 
                                 with ui.row().classes('w-full justify-center items-center gap-1'):
                                     status_icon = ui.icon('bolt').classes('text-gray-300 text-sm')
-                                    
-                                    # ✨✨✨ [修改点] 创建 Label 并绑定静默更新 ✨✨✨
+                                    # 绑定 IP 显示
                                     ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
                                     bind_ip_label(srv['url'], ip_label) 
                                     
-                                    # 创建按钮
+                                    # 强力重连按钮
                                     retry_btn = ui.button(icon='refresh').props('flat dense round size=xs text-color=red')
                                     retry_btn.tooltip('尝试强力重连 (3次x3秒)')
-                                    retry_btn.set_visibility(False) # 默认隐藏
-
-                                    # 绑定事件
+                                    retry_btn.set_visibility(False)
                                     retry_btn.on_click(lambda e, b=retry_btn, i=status_icon, h=target_host, p=target_port, k=ping_key: force_retry_ping(b, i, h, p, k))
 
-                                # 自动更新状态的定时器
+                                # 自动更新 Ping 状态逻辑
                                 if show_ping:
                                     def check_ping_result(icon_ref=status_icon, key_ref=ping_key, btn_ref=retry_btn):
                                         val = PING_CACHE.get(key_ref, None)
                                         if val is not None:
                                             if val == -1: 
                                                 icon_ref.classes(remove='text-gray-300 text-green-500', add='text-red-500')
-                                                btn_ref.set_visibility(True) # 失败显示按钮
+                                                btn_ref.set_visibility(True)
                                             else: 
                                                 icon_ref.classes(remove='text-gray-300 text-red-500', add='text-green-500')
-                                                btn_ref.set_visibility(False) # 成功隐藏按钮
-                                            return False 
-                                        return True
+                                                btn_ref.set_visibility(False)
+                                            return False # 停止定时器
+                                        return True # 继续等待
                                     ui.timer(1.0, lambda i=status_icon, k=ping_key, b=retry_btn: check_ping_result(i, k, b))
                                 else:
-                                    # 非区域分组模式，读 API 状态
+                                    # 如果不显示 Ping，就读服务器级状态
                                     status_code = srv.get('_status', 'online')
                                     if status_code == 'online': status_icon.classes(replace='text-green-500')
                                     elif status_code == 'offline': status_icon.classes(replace='text-red-500')
@@ -3115,7 +3103,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                             ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                             ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
 
-                            # Col Status Dot
+                            # Col Status Dot (Circle)
                             if not use_special_mode:
                                 with ui.element('div').classes('flex justify-center w-full'): 
                                     ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
