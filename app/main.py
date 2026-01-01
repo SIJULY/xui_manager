@@ -2407,6 +2407,12 @@ COLS_NO_PING   = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 50px 15
 # 单个服务器视图直接复用带延迟的样式
 SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
 
+# 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 操作(150)
+COLS_ALL_SERVERS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 150px; align-items: center;'
+
+# 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 延迟(90) 操作(150)
+COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 90px 150px; align-items: center;'
+
 # ================= [修复版] 刷新逻辑 (增加样式重置 & 智能回退) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     # 1. 安全检查 UI 上下文
@@ -2765,7 +2771,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
     # 5. 立即执行一次
     ui.timer(0.1, update_data_task, once=True)
     
-# ================= 聚合视图  =================
+# ================= [修改版 3.0] 聚合视图 (所有服务器+区域分组 统一风格) =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False):
     list_container = ui.column().classes('w-full gap-4')
     
@@ -2779,52 +2785,101 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
 
     list_container.clear()
     
-    current_css = COLS_WITH_PING if show_ping else COLS_NO_PING
+    # ✨✨✨ 模式判断逻辑 ✨✨✨
+    # 1. is_all_servers: 判断是否为"所有服务器"
+    is_all_servers = (server_list == SERVERS_CACHE) or (len(server_list) == len(SERVERS_CACHE) and not show_ping)
     
+    # 2. use_special_mode: 启用特殊样式 (闪电+IP，无圆点)
+    #    条件: 是"所有服务器" OR 是"区域分组"(即 show_ping=True)
+    use_special_mode = is_all_servers or show_ping
+    
+    # 3. 确定 CSS
+    if use_special_mode:
+        if show_ping:
+            current_css = COLS_SPECIAL_WITH_PING # 区域分组: 带延迟，无圆点
+        else:
+            current_css = COLS_ALL_SERVERS       # 所有服务器: 无延迟，无圆点
+    else:
+        # 自定义分组: 保持原样 (无延迟，有圆点)
+        current_css = COLS_NO_PING
+
     with list_container:
-        # 表头
+        # --- 表头 ---
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(current_css):
             ui.label('服务器').classes('text-left pl-2')
             ui.label('备注名称').classes('text-left pl-2')
-            headers = ['所在组', '已用流量', '协议', '端口']
-            if show_ping: headers.append('延迟') 
-            headers.extend(['状态', '操作'])
-            for h in headers: ui.label(h).classes('text-center')
+            
+            # Col 3
+            if use_special_mode: ui.label('在线状态').classes('text-center')
+            else: ui.label('所在组').classes('text-center')
+            
+            ui.label('已用流量').classes('text-center')
+            ui.label('协议').classes('text-center')
+            ui.label('端口').classes('text-center')
+            
+            # Col 延迟 (仅区域分组)
+            if show_ping: ui.label('延迟').classes('text-center')
+            
+            # Col 状态圆点 (仅自定义分组)
+            if not use_special_mode: ui.label('状态').classes('text-center')
+            
+            ui.label('操作').classes('text-center')
         
+        # --- 数据行 ---
         for i, res in enumerate(results):
             if i % 5 == 0: await asyncio.sleep(0.001)
             srv = server_list[i]
             if isinstance(res, Exception): res = []
             if res is None: res = []
             mgr = get_manager(srv)
+            
             raw_host = srv['url']
             try:
                 if '://' not in raw_host: raw_host = f'http://{raw_host}'
                 p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
             except: pass
 
-            # ✨✨✨  1：如果是区域分组(show_ping=True)，主动触发测速 ✨✨✨
             if show_ping and res:
                  asyncio.create_task(batch_ping_nodes(res, raw_host))
 
             row_wrapper = ui.element('div').classes('w-full')
             SERVER_UI_MAP[srv['url']] = row_wrapper
+            
             with row_wrapper:
+                # --- 情况 A: 无数据 ---
                 if not res:
                     with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(current_css):
                         ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                         msg = '❌ 连接失败' if force_refresh else '⏳ 暂无数据'
                         color = 'text-red-500' if force_refresh else 'text-gray-400'
                         ui.label(msg).classes(f'{color} font-bold w-full text-left pl-2')
-                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
                         
-                        placeholder_count = 3 if show_ping else 2 
-                        for _ in range(placeholder_count): ui.label('-').classes('w-full text-center')
+                        # Col 3: 在线状态/所在组
+                        if use_special_mode:
+                            try: ip_display = get_real_ip_display(srv['url'])
+                            except: ip_display = raw_host
+                            with ui.row().classes('w-full justify-center items-center gap-1'):
+                                ui.icon('bolt').classes('text-red-500 text-sm')
+                                ui.label(ip_display).classes('text-xs font-mono text-gray-500')
+                        else:
+                            ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
                         
-                        with ui.element('div').classes('flex justify-center w-full'): ui.icon('help_outline', color='grey').props('size=xs')
+                        # 占位符
+                        # 流量, 协议, 端口
+                        for _ in range(3): ui.label('-').classes('w-full text-center')
+                        
+                        # 延迟占位 (如果有)
+                        if show_ping: ui.label('-').classes('w-full text-center')
+
+                        # 状态圆点 (仅自定义组)
+                        if not use_special_mode:
+                            with ui.element('div').classes('flex justify-center w-full'): ui.icon('help_outline', color='grey').props('size=xs')
+                            
+                        # 操作按钮
                         with ui.row().classes('gap-2 justify-center w-full'): ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary').tooltip('单独同步')
                     continue
 
+                # --- 情况 B: 有数据 ---
                 for n in res:
                     try:
                         traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
@@ -2833,14 +2888,31 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                         ping_key = f"{target_host}:{target_port}"
                         
                         with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(current_css):
+                            # Col 1 & 2
                             ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                             ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                            ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                            
+                            # ✨✨✨ Col 3: 特殊模式(闪电+IP) vs 普通模式(组名) ✨✨✨
+                            if use_special_mode:
+                                try: ip_display = get_real_ip_display(srv['url'])
+                                except: ip_display = raw_host
+                                status_code = srv.get('_status', 'online')
+                                if status_code == 'online': s_c='green-500'; s_i='bolt'
+                                elif status_code == 'offline': s_c='red-500'; s_i='bolt'
+                                else: s_c='grey-400'; s_i='help_outline'
+                                
+                                with ui.row().classes('w-full justify-center items-center gap-1'):
+                                    ui.icon(s_i).classes(f'text-{s_c} text-sm')
+                                    ui.label(ip_display).classes('text-xs font-mono text-gray-500')
+                            else:
+                                ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+
+                            # Col 4, 5, 6
                             ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
                             ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
                             ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                             
-                            # ✨✨✨ 2：如果是区域分组，恢复动态刷新逻辑 ✨✨✨
+                            # ✨✨✨ Col: 延迟 (仅 show_ping) ✨✨✨
                             if show_ping:
                                 with ui.row().classes('w-full justify-center items-center gap-1 no-wrap'):
                                     spinner = ui.spinner('dots', size='1em', color='primary')
@@ -2849,28 +2921,22 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
 
                                 def update_ping_display(l=lbl_ping, s=spinner, k=ping_key):
                                     val = PING_CACHE.get(k, None)
-                                    if val is None: 
-                                        s.set_visibility(True)
-                                        l.set_visibility(False)
-                                    elif val == -1: 
-                                        s.set_visibility(False)
-                                        l.set_visibility(True)
-                                        l.set_text('超时')
-                                        l.classes(replace='text-red-500')
+                                    if val is None: s.set_visibility(True); l.set_visibility(False)
+                                    elif val == -1: s.set_visibility(False); l.set_visibility(True); l.set_text('超时'); l.classes(replace='text-red-500')
                                     else:
-                                        s.set_visibility(False)
-                                        l.set_visibility(True)
-                                        l.set_text(f"{val} ms")
+                                        s.set_visibility(False); l.set_visibility(True); l.set_text(f"{val} ms")
                                         l.classes(remove='text-red-500 text-green-600 text-yellow-600 text-red-400')
                                         if val < 100: l.classes(add='text-green-600')
                                         elif val < 200: l.classes(add='text-yellow-600')
                                         else: l.classes(add='text-red-400')
-                                
-                                # 恢复定时器，1秒刷新一次（比单个服务器的0.5秒稍慢，减轻压力）
                                 ui.timer(1.0, update_ping_display)
 
-                            with ui.element('div').classes('flex justify-center w-full'): ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                            # ✨✨✨ Col: 状态圆点 (仅非特殊模式) ✨✨✨
+                            if not use_special_mode:
+                                with ui.element('div').classes('flex justify-center w-full'): 
+                                    ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
                             
+                            # Col: 操作
                             with ui.row().classes('gap-2 justify-center w-full no-wrap'):
                                 link = generate_node_link(n, raw_host)
                                 if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
@@ -2879,7 +2945,6 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                                 ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
                                 ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
                     except: continue
-
 
 # ==============================================================
 
@@ -3647,9 +3712,6 @@ def render_sidebar_content():
                 ui.label('所有服务器').classes('font-bold')
             
             with ui.row().classes('items-center gap-1'):
-                # 全部服务器依然保留批量编辑器 (因为不能删除"所有服务器"这个组)
-                ui.button(icon='edit_note', on_click=lambda: open_bulk_edit_dialog(SERVERS_CACHE, "所有服务器")) \
-                    .props('flat dense round size=xs color=grey').on('click.stop').tooltip('批量管理所有')
                 ui.badge(str(all_count), color='blue')
 
         # --- B. 自定义分组 (Tags) ---
