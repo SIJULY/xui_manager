@@ -2317,7 +2317,7 @@ class SubEditor:
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
     
-# ================= 探针页面渲染 (终极完整版：修复初始化 + 找回顶部按钮) =================
+# ================= 探针页面渲染 (终极完整无省略版) =================
 async def render_probe_page():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'PROBE'
@@ -2335,22 +2335,20 @@ async def render_probe_page():
         # 3. 触发后台批量安装
         asyncio.create_task(batch_install_all_probes())
         
-        # 4. 刷新页面 (移除初始化遮罩)
+        # 4. 刷新页面
         await render_probe_page()
 
-    # 1. 检查功能是否启用 (未启用显示初始化页)
+    # 1. 检查功能是否启用
     if not ADMIN_CONFIG.get('probe_enabled', False):
         with content_container:
             with ui.column().classes('w-full h-[60vh] justify-center items-center opacity-50 gap-4'):
                 ui.icon('monitor_heart', size='5rem').classes('text-gray-300')
                 ui.label('探针监控功能未开启').classes('text-2xl font-bold text-gray-400')
                 ui.label('开启后将自动获取服务器的 CPU/内存/硬盘/流量 实时数据').classes('text-sm text-gray-400')
-                
-                # 点击直接开启
                 ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
         return
 
-    # 2. 功能已启用，渲染主界面
+    # 2. 功能已启用，准备渲染
     monitor_refs = {}
 
     # --- UI 辅助函数 ---
@@ -2367,20 +2365,21 @@ async def render_probe_page():
             ui.label(label).classes('text-[10px] text-gray-400 transform scale-90')
             refs_dict[value_ref_key] = ui.label(initial_text).classes('text-xs font-bold text-slate-700')
 
-    # --- 自动刷新任务 (定义在界面渲染之前) ---
+    # --- 自动刷新任务 ---
     async def refresh_task():
         if CURRENT_VIEW_STATE['scope'] != 'PROBE': return
 
+        # 限制并发，防止内存溢出
         sema = asyncio.Semaphore(20)
         async def check_one(srv):
             url = srv['url']
             refs = monitor_refs.get(url)
             if not refs: return
             async with sema:
-                # 使用 try-except 防止单个失败影响整体
                 try:
-                    res = await get_server_status(srv) # 自动写入缓存
+                    res = await get_server_status(srv) # 这里会自动写入全局缓存
                     
+                    # 防止页面元素销毁报错
                     if refs['cpu_bar'].is_deleted: return
 
                     if res and res.get('status') == 'online':
@@ -2418,9 +2417,9 @@ async def render_probe_page():
         safe_notify('正在刷新...', 'ongoing')
         asyncio.create_task(refresh_task())
 
-    # --- 开始渲染界面内容 ---
+    # --- 开始渲染界面 ---
     with content_container:
-        # ✨✨✨ [重点找回] 顶部标题栏 + 按钮组 ✨✨✨
+        # 1. 顶部按钮栏
         with ui.row().classes('w-full items-center justify-between mb-4 px-2'):
             # 左侧标题
             with ui.row().classes('items-center gap-2'):
@@ -2428,10 +2427,8 @@ async def render_probe_page():
                 ui.label('实时监控墙').classes('text-2xl font-bold text-slate-800 tracking-tight')
                 ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e] animate-pulse')
             
-            # 右侧按钮组 (功能定义)
+            # 右侧按钮组
             with ui.row().classes('items-center gap-2'):
-                
-                # 功能 A: 复制命令
                 async def copy_auto_register_cmd():
                     try:
                         origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
@@ -2441,27 +2438,30 @@ async def render_probe_page():
 
                     token = ADMIN_CONFIG.get('probe_token', 'default_token')
                     register_api = f"{origin}/api/probe/register"
+                    
+                    # 使用 GitHub 源
                     github_script_url = "https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/x-install.sh"
                     
-                    # 优先使用 GitHub 源，如果需要也可以改成使用本地 /static/x-install.sh
+                    # 生成短命令
                     cmd = f'curl -sL {github_script_url} | bash -s -- "{token}" "{register_api}"'
                     
                     await safe_copy_to_clipboard(cmd)
                     safe_notify("📋 极简安装命令已复制！", "positive")
 
-                # 功能 B: 重置所有探针
                 async def reinstall_all_btn():
                     safe_notify("正在后台为所有服务器重置探针...", "ongoing")
                     await batch_install_all_probes()
 
-                # 渲染按钮
                 ui.button('复制单机命令', icon='content_copy', on_click=copy_auto_register_cmd).props('flat dense color=blue-6').tooltip('复制一键安装脚本')
                 ui.button('重置所有探针', icon='restart_alt', on_click=reinstall_all_btn).props('flat dense color=orange').tooltip('重新安装探针')
                 ui.button(icon='refresh', on_click=manual_refresh).props('flat round dense color=grey').tooltip('立即刷新')
 
-        # --- 渲染卡片网格 ---
-        with ui.grid().classes('w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-10'):
-            sorted_servers = sorted(SERVERS_CACHE, key=lambda x: (x.get('_status') != 'online', smart_sort_key(x)))
+        # 2. 渲染卡片网格
+        # ✨ 布局修复：使用 minmax 实现自动多列，防止大屏卡片变扁
+        with ui.grid().classes('w-full gap-4 pb-10').style('grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))'):
+            
+            # ✨ 排序修复：强制按照 [分组, 名称] 排序，确保新服务器自动归位
+            sorted_servers = sorted(SERVERS_CACHE, key=lambda x: smart_sort_key(x))
 
             for s in sorted_servers:
                 url = s['url']
@@ -2474,12 +2474,14 @@ async def render_probe_page():
                 card = ui.card().classes('w-full p-4 bg-white/90 backdrop-blur-sm rounded-xl shadow-sm border border-gray-100 hover:shadow-lg transition-all duration-300 flex flex-col gap-3 relative overflow-hidden')
                 
                 with card:
-                    # 1. 标题行
+                    # (1) 标题行
                     with ui.row().classes('w-full justify-between items-start'):
                         with ui.row().classes('items-center gap-2'):
+                            # ✨ 国旗修复：传入 s 对象，让它读取正确的存档分组，避免误判智利
                             flag = "🏳️"
-                            try: flag = detect_country_group(s['name']).split(' ')[0]
+                            try: flag = detect_country_group(s['name'], s).split(' ')[0]
                             except: pass
+                            
                             ui.label(flag).classes('text-2xl filter drop-shadow-sm')
                             with ui.column().classes('gap-0'):
                                 ui.label(s['name']).classes('font-bold text-slate-700 text-sm leading-tight line-clamp-1')
@@ -2493,7 +2495,7 @@ async def render_probe_page():
 
                     ui.separator().classes('opacity-50')
 
-                    # 2. 硬件数据
+                    # (2) 硬件配置数据 (Cores / RAM / Disk)
                     c_cores = f"{cache.get('cpu_cores', '-')} Cores" if has_cache else '-- Cores'
                     c_mem = f"{cache.get('mem_total', '-')} GB" if has_cache else '-- GB'
                     c_disk = f"{cache.get('disk_total', '-')} GB" if has_cache else '-- GB'
@@ -2509,7 +2511,7 @@ async def render_probe_page():
                             ui.icon('hard_drive', size='xs').classes('text-purple-500')
                             refs['disk_total'] = ui.label(c_disk).classes('text-xs font-bold text-slate-600')
 
-                    # 3. 进度条
+                    # (3) 资源占用进度条
                     with ui.column().classes('w-full gap-2 mt-1'):
                         bar_cpu, val_cpu = create_progress_row('CPU', 'bg-blue-500', cache.get('cpu_usage', 0) if has_cache else 0)
                         refs['cpu_bar'] = bar_cpu; refs['cpu_val'] = val_cpu
@@ -2522,7 +2524,7 @@ async def render_probe_page():
 
                     ui.separator().classes('opacity-50')
 
-                    # 4. 底部统计
+                    # (4) 底部统计 (负载 / 在线时间)
                     with ui.row().classes('w-full justify-between items-center bg-gray-50/50 p-2 rounded-lg'):
                         create_stat_block('负载 (1m)', 'load_val', refs, str(cache.get('load_1', 0)) if has_cache else '--')
                         ui.element('div').classes('w-px h-6 bg-gray-200')
@@ -2530,9 +2532,9 @@ async def render_probe_page():
 
                 monitor_refs[url] = refs
 
-    # 启动后台刷新
+    # 3. 启动后台刷新
     asyncio.create_task(refresh_task())
-    refresh_timer = ui.timer(10.0, refresh_task) # 建议 10秒刷新一次，避免卡死
+    refresh_timer = ui.timer(15.0, refresh_task)
     
 # =================刷新逻辑 =================
 async def update_probe_stats(card_refs, is_manual=False):
@@ -4864,10 +4866,15 @@ def open_combined_group_management(group_name):
 
     d.open()
         
-# ================= [侧边栏渲染：终极完整版] =================
+# ================= [侧边栏渲染：纯粹 6 点拖拽版] =================
+# 全局变量：记录当前正在被拖动的那个组的名字
+_current_dragged_group = None
+
 @ui.refreshable
 def render_sidebar_content():
-    # 1. 顶部区域
+    global _current_dragged_group
+
+    # --- 1. 顶部固定区域 (仪表盘/探针/订阅) ---
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
         ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
         btn_cls = 'w-full text-slate-700 active:scale-95 transition-transform duration-150'
@@ -4875,9 +4882,9 @@ def render_sidebar_content():
         ui.button('服务器探针', icon='monitor_heart', on_click=render_probe_page).props('flat align=left').classes(btn_cls)
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes(btn_cls)
 
-    # 2. 列表区域 (可滚动)
+    # --- 2. 列表区域 ---
     with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-1'):
-        # 功能按钮栏
+        # 功能按钮
         with ui.row().classes('w-full gap-2 px-1 mb-4'):
             func_btn_cls = 'flex-grow text-xs active:scale-95 transition-transform duration-150'
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-600 text-white {func_btn_cls}')
@@ -4891,93 +4898,138 @@ def render_sidebar_content():
                 ui.label('所有服务器').classes('font-bold')
             ui.badge(str(len(SERVERS_CACHE)), color='blue')
 
-        # --- B. 自定义分组 (Tags/Group) ---
+        # --- B. 自定义分组 (不可拖拽) ---
         if 'custom_groups' in ADMIN_CONFIG and ADMIN_CONFIG['custom_groups']:
             ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
             for tag_group in ADMIN_CONFIG['custom_groups']:
-                # 统计逻辑：包含 Tag 或者 主Group 名字匹配
-                tag_servers = [
-                    s for s in SERVERS_CACHE 
-                    if tag_group in s.get('tags', []) or s.get('group') == tag_group
-                ]
-                
-                # 排序：使用智能排序
+                tag_servers = [s for s in SERVERS_CACHE if tag_group in s.get('tags', []) or s.get('group') == tag_group]
                 try: tag_servers.sort(key=smart_sort_key)
                 except: tag_servers.sort(key=lambda x: x.get('name', ''))
 
                 is_open = tag_group in EXPANDED_GROUPS
                 with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                     with exp.add_slot('header'):
-                        header_cls = 'w-full h-full items-center justify-between no-wrap cursor-pointer active:scale-95 transition-transform duration-150'
-                        with ui.row().classes(header_cls).props('clickable v-ripple').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
+                        with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer active:scale-95 transition-transform duration-150').props('clickable v-ripple').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
                             ui.label(tag_group).classes('flex-grow font-bold truncate')
-                            # 分组设置按钮
-                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').on('click.stop').tooltip('管理此分组')
+                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').on('click.stop')
                             ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
-                    
                     with ui.column().classes('w-full gap-0 bg-gray-50'):
-                        if not tag_servers: ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
                         for s in tag_servers:
-                            sub_row_cls = 'w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group active:scale-95 transition-transform duration-150'
-                            with ui.row().classes(sub_row_cls).props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                            with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group active:scale-95 transition-transform duration-150').props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
                                 ui.label(s['name']).classes('text-sm truncate flex-grow')
                                 with ui.row().classes('gap-1 items-center'):
                                     ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)).props('flat dense round size=xs color=grey-8').on('click.stop')
                                     ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
-        # --- C. 智能区域分组 ---
+        # --- C. 区域分组 (✨ 纯粹 6 点拖拽 ✨) ---
         ui.label('区域分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
         
         country_buckets = {}
         for s in SERVERS_CACHE:
-            # 调用升级后的识别逻辑 (传入 s 对象以读取隐藏 GeoIP 字段)
             c_group = detect_country_group(s.get('name', ''), s)
-            
-            # 过滤无效/默认分组，统一归入“其他地区”
-            if c_group in ['默认分组', '自动注册', '自动导入', '未分组', '', None]:
-                c_group = '🏳️ 其他地区'
-                
+            if c_group in ['默认分组', '自动注册', '自动导入', '未分组', '', None]: c_group = '🏳️ 其他地区'
             if c_group not in country_buckets: country_buckets[c_group] = []
             country_buckets[c_group].append(s)
         
-        # 渲染区域列表
-        for c_name in sorted(country_buckets.keys()):
-            c_servers = country_buckets[c_name]
+        saved_order = ADMIN_CONFIG.get('group_order', [])
+        def region_sort_key(name):
+            if name in saved_order: return saved_order.index(name)
+            return 9999
+        sorted_regions = sorted(country_buckets.keys(), key=region_sort_key)
+
+        # ---------------- 拖拽核心逻辑 ----------------
+        def on_drag_start(e, name):
+            """只有按住图标时才会触发这个"""
+            global _current_dragged_group
+            _current_dragged_group = name
+
+        async def on_drop(e, target_name):
+            """放下时，只要是在目标行的范围内松手，都算Drop"""
+            global _current_dragged_group
             
-            # ✨✨✨ 关键修复：恢复使用 smart_sort_key 进行智能排序 ✨✨✨
+            # 如果拖的和放的是同一个，或者是空的，直接忽略
+            if not _current_dragged_group or _current_dragged_group == target_name:
+                return
+            
             try:
-                c_servers.sort(key=smart_sort_key)
-            except:
-                # 兜底防止排序崩溃
-                c_servers.sort(key=lambda x: x.get('name', ''))
+                current_list = list(sorted_regions)
+                if _current_dragged_group in current_list and target_name in current_list:
+                    # 1. 拿出被拖动的那一项
+                    old_idx = current_list.index(_current_dragged_group)
+                    item = current_list.pop(old_idx)
+                    
+                    # 2. 找到目标位置的新索引
+                    # (注意：pop之后，后面的索引会变，所以要重新获取target的index)
+                    new_idx = current_list.index(target_name)
+                    
+                    # 3. 插入进去 (插队到目标前面)
+                    current_list.insert(new_idx, item)
+                    
+                    # 4. 保存并立即硬刷新
+                    ADMIN_CONFIG['group_order'] = current_list
+                    await save_admin_config()
+                    _current_dragged_group = None
+                    render_sidebar_content.refresh()
+            except: pass
 
-            is_open = c_name in EXPANDED_GROUPS
-            
-            with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                 with exp.add_slot('header'):
-                    with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').props('clickable v-ripple').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
-                        ui.label(c_name).classes('flex-grow font-bold truncate')
-                        
-                        # ✨✨✨ 找回：批量管理按钮 (小铅笔图标) ✨✨✨
-                        ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey').on('click.stop').tooltip('批量管理此区域')
-                        
-                        ui.badge(str(len(c_servers)), color='green')
-                 
-                 with ui.column().classes('w-full gap-0 bg-gray-50'):
-                    for s in c_servers:
-                         with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
-                                ui.label(s['name']).classes('text-sm truncate flex-grow')
-                                with ui.row().classes('gap-1 items-center'):
-                                    ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)).props('flat dense round size=xs color=grey-8').on('click.stop')
-                                    ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+        # ---------------- 渲染列表 ----------------
+        with ui.column().classes('w-full gap-1'):
+            for c_name in sorted_regions:
+                c_servers = country_buckets[c_name]
+                try: c_servers.sort(key=smart_sort_key)
+                except: c_servers.sort(key=lambda x: x.get('name', ''))
+                is_open = c_name in EXPANDED_GROUPS
 
-    # 3. 底部功能区 (完整找回)
+                # ✨ 放置区 (Drop Zone) ✨
+                # 我们把整个 Expansion 包裹在一个可以接收 Drop 的 Div 里
+                # 这样你拖着小图标，只要扔到这一行任何地方，都能触发排序
+                with ui.element('div').classes('w-full') \
+                    .on('dragover.prevent', lambda _: None) \
+                    .on('drop', lambda e, n=c_name: on_drop(e, n)):
+
+                    with ui.expansion('', icon=None, value=is_open).classes('w-full border rounded bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
+                        
+                        with exp.add_slot('header'):
+                            with ui.row().classes('w-full h-full items-center justify-between no-wrap group').props('clickable v-ripple'):
+                                # 左侧
+                                with ui.row().classes('items-center gap-2 flex-grow overflow-hidden'):
+                                    
+                                    # ✨✨✨ 唯一的拖拽源头 (Drag Source) ✨✨✨
+                                    # draggable="true": 只在这里！
+                                    # text-gray-600: 颜色加深，更明显
+                                    # cursor-move: 鼠标变成十字移动形状
+                                    ui.icon('drag_indicator') \
+                                        .props('draggable="true"') \
+                                        .classes('cursor-move text-gray-600 hover:text-black p-1 rounded transition-colors') \
+                                        .on('dragstart', lambda e, n=c_name: on_drag_start(e, n)) \
+                                        .on('click.stop') \
+                                        .tooltip('按住拖拽')
+                                    
+                                    # 组名 (点击切换内容，不可拖拽)
+                                    with ui.row().classes('items-center gap-2 flex-grow cursor-pointer').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
+                                        flag = c_name.split(' ')[0] if ' ' in c_name else '🏳️'
+                                        ui.label(flag).classes('text-lg')
+                                        display_name = c_name.split(' ')[1] if ' ' in c_name else c_name
+                                        ui.label(display_name).classes('font-bold truncate text-slate-700')
+                                
+                                # 右侧 (功能区)
+                                with ui.row().classes('items-center gap-2 cursor-default').on('mousedown.stop').on('click.stop'):
+                                    ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey').tooltip('批量管理')
+                                    ui.badge(str(len(c_servers)), color='green')
+
+                        with ui.column().classes('w-full gap-0 bg-gray-50'):
+                            for s in c_servers:
+                                with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                                    ui.label(s['name']).classes('text-sm truncate flex-grow')
+                                    with ui.row().classes('gap-1 items-center'):
+                                        ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)).props('flat dense round size=xs color=grey-8').on('click.stop')
+                                        ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+
+    # --- 3. 底部功能区 ---
     with ui.column().classes('w-full p-2 border-t mt-auto mb-15 gap-2 bg-white z-10'):
         bottom_btn_cls = 'w-full font-bold mb-1 active:scale-95 transition-transform duration-150'
         ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(f'text-slate-800 bg-blue-50 hover:bg-blue-100 {bottom_btn_cls}')
-        
         ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
-        
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
         
 # ================== 登录与 MFA 逻辑 ==================
