@@ -5026,7 +5026,7 @@ def render_sidebar_content():
                                         ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
     # --- 3. 底部功能区 ---
-    with ui.column().classes('w-full p-2 border-t mt-auto mb-15 gap-2 bg-white z-10'):
+    with ui.column().classes('w-full p-2 border-t mt-auto mb-4 gap-2 bg-white z-10'):
         bottom_btn_cls = 'w-full font-bold mb-1 active:scale-95 transition-transform duration-150'
         ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(f'text-slate-800 bg-blue-50 hover:bg-blue-100 {bottom_btn_cls}')
         ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
