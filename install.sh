@@ -6,10 +6,9 @@
 # ==============================================================================
 
 # --- 全局变量 ---
-# ✨✨✨ 修改：目录名正式更名为 x-fusion-panel ✨✨✨
 PROJECT_NAME="x-fusion-panel"
 INSTALL_DIR="/root/${PROJECT_NAME}"
-OLD_INSTALL_DIR="/root/xui_manager" # 定义旧目录以便迁移
+OLD_INSTALL_DIR="/root/xui_manager" 
 
 # 仓库地址
 REPO_URL="https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main"
@@ -81,7 +80,6 @@ check_docker() {
 
 # --- 核心功能函数 ---
 
-# ✨✨✨ 新增：数据迁移函数 ✨✨✨
 migrate_old_data() {
     if [ -d "$OLD_INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
         echo -e "${YELLOW}=================================================${PLAIN}"
@@ -126,6 +124,11 @@ deploy_base() {
     print_info "正在下载主程序..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
 
+    # ✨✨✨ 新增：下载探针安装脚本到 static 目录 ✨✨✨
+    # 这样可以通过 http://面板IP:端口/static/x-install.sh 访问，作为 GitHub 的备用源
+    print_info "正在下载最新探针脚本..."
+    curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
+
     print_info "正在下载静态资源 (xterm.js)..."
     curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
@@ -148,7 +151,6 @@ generate_compose() {
     local PASS=$4
     local SECRET=$5 
 
-    # ✨✨✨ 修改：容器名和服务名统一改为 x-fusion-panel ✨✨✨
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
 services:
@@ -337,6 +339,10 @@ update_panel() {
     
     print_info "更新静态资源..."
     mkdir -p static
+    
+    # ✨✨✨ 新增：更新时同步最新的探针脚本 ✨✨✨
+    curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
+    
     curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
