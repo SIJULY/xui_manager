@@ -16,8 +16,8 @@ import qrcode
 import time
 import io
 import paramiko
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor # ✅ 修正
-from apscheduler.schedulers.asyncio import AsyncIOScheduler # ✅ 修正
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler 
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
@@ -301,7 +301,7 @@ def open_global_settings_dialog():
         ui.button('保存全局密钥', on_click=lambda: [save_global_key(key_input.value), d.close(), safe_notify('全局密钥已保存', 'positive')]).classes('w-full bg-slate-900 text-white')
     d.open()
 
-# ================= 探针安装脚本 (引号修复版) =================
+# ================= 探针安装脚本 =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
 # 1. 智能判断 Root
@@ -331,10 +331,10 @@ $CMD_PREFIX bash -s << "EOF"
         fi
     fi
 
-    # 3. 写入探针 (✨关键修改：TOKEN 使用双引号，避免与外层单引号冲突✨)
+    # 3. 写入探针 (✨TOKEN 使用占位符，稍后动态替换✨)
     cat > /root/mini_probe.py << 'PYTHON_EOF'
 import http.server,json,subprocess,sys
-PORT=54322; TOKEN="sijuly_probe_token"
+PORT=54322; TOKEN="__REPLACE_ME__"
 class H(http.server.BaseHTTPRequestHandler):
  def do_GET(s):
   if s.path!=f"/status?token={TOKEN}": s.send_response(403); s.end_headers(); return
@@ -402,8 +402,8 @@ ADMIN_CONFIG_FILE = 'data/admin_config.json'
 # ✨✨✨ 自动注册密钥 (优先从环境变量获取) ✨✨✨
 AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
 
-ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
-ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
+ADMIN_USER = os.getenv('XUI_USERNAME', 'sijuly')
+ADMIN_PASS = os.getenv('XUI_PASSWORD', '050148Sq$')
 
 SERVERS_CACHE = []
 SUBS_CACHE = []
@@ -517,6 +517,17 @@ def init_data():
         try:
             with open(ADMIN_CONFIG_FILE, 'r', encoding='utf-8') as f: ADMIN_CONFIG = json.load(f)
         except: ADMIN_CONFIG = {}
+
+    # ✨✨✨ [新增] 首次启动自动生成随机探针 Token ✨✨✨
+    if 'probe_token' not in ADMIN_CONFIG:
+        # 生成一个随机的 32 位字符串
+        ADMIN_CONFIG['probe_token'] = uuid.uuid4().hex
+        try:
+            with open(ADMIN_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(ADMIN_CONFIG, f, indent=4, ensure_ascii=False)
+            logger.info(f"🔑 系统初始化: 已生成唯一的探针安全令牌")
+        except Exception as e:
+            logger.error(f"❌ 保存 Config 失败: {e}")
 
 def _save_file_sync_internal(filename, data):
     temp_file = f"{filename}.{uuid.uuid4()}.tmp"
@@ -1075,14 +1086,20 @@ async def install_probe_on_server(server_conf):
     """给单个服务器安装探针 (智能宽容版)"""
     name = server_conf.get('name', 'Unknown')
     
+    # ✨✨✨  获取动态 Token 并替换脚本中的占位符 ✨✨✨
+    my_token = ADMIN_CONFIG.get('probe_token', 'default_token')
+    
+    # 把脚本里的占位符，替换成真正的 Token
+    real_script = PROBE_INSTALL_SCRIPT.replace("__REPLACE_ME__", my_token)
+    
     def _do_install():
         client = None
         try:
             client, msg = get_ssh_client(server_conf)
             if not client: return False, f"连接失败: {msg}"
             
-            # 执行安装 (300秒超时)
-            stdin, stdout, stderr = client.exec_command(PROBE_INSTALL_SCRIPT, timeout=300)
+            # ✨✨✨ 注意：这里执行的是 real_script (带有真实 Token 的脚本) ✨✨✨
+            stdin, stdout, stderr = client.exec_command(real_script, timeout=300)
             
             # 获取结果
             exit_status = stdout.channel.recv_exit_status() 
@@ -1129,8 +1146,11 @@ async def get_server_status(server_conf):
             raw = server_conf['url']
             host = raw.split('://')[-1].split(':')[0]
             
+            # ✨✨✨ [新增] 获取动态 Token ✨✨✨
+            my_token = ADMIN_CONFIG.get('probe_token', 'default_token')
+            
             # 构造请求 (3秒超时)
-            target_url = f"http://{host}:54322/status?token=sijuly_probe_token"
+            target_url = f"http://{host}:54322/status?token={my_token}"
             
             # ✨✨✨ 核心修复：proxies={"http": None, "https": None} ✨✨✨
             # 这句代码的意思是：无视系统代理，必须直连！
@@ -4309,7 +4329,7 @@ def open_combined_group_management(group_name):
 def render_sidebar_content():
     # 1. 顶部区域
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0'):
-        ui.label('小龙女她爸').classes('text-xl font-bold mb-4 text-slate-800')
+        ui.label('X-Fusion Panel').classes('text-xl font-bold mb-4 text-slate-800')
         btn_cls = 'w-full text-slate-700 active:scale-95 transition-transform duration-150'
         ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes(btn_cls)
         ui.button('服务器探针', icon='monitor_heart', on_click=render_probe_page).props('flat align=left').classes(btn_cls)
