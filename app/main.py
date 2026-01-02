@@ -440,22 +440,29 @@ AUTO_COUNTRY_MAP = {
 }
 
 def detect_country_group(name, server_config=None):
-    # 1. 优先：尊重手动设置的主分组 (解决你手动移动无效的问题)
+    # 1. ✨ 最高优先级：手动设置的分组 ✨
+    # 如果你在网页上“移动分组”到了 "日本"，saved_group 就是 "日本"
     if server_config:
         saved_group = server_config.get('group')
-        # 如果手动指定了分组，且这个分组不是系统保留字，直接用它
-        if saved_group and saved_group not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区']:
-            # 只有当这个分组是“国家名”时，才返回国家，否则继续走下面的逻辑
+        # 如果用户手动设置了非空的组名，直接通过！
+        if saved_group and saved_group.strip():
+            # 这里做一个小映射，防止用户只写了 "Japan" 而没写 emoji
+            # 如果 group 是 "日本"，尝试去 AUTO_COUNTRY_MAP 找对应的带 Emoji 的名字
             for v in AUTO_COUNTRY_MAP.values():
-                if saved_group in v or v in saved_group: return v
+                if saved_group in v or v in saved_group:
+                    return v # 返回标准的 "🇯🇵 日本"
+            
+            # 如果没找到标准国家名（比如用户填了 "我的爱机"），也直接返回，当作自定义组
+            # 但既然你想统一管理，这里我们假设你只会移到国家组
+            return saved_group
 
-    # 2. 其次：看名字 (Name Regex)
+    # 2. 第二优先级：名字里的 Emoji (由第一步的自动重命名任务生成)
     name_upper = name.upper()
     for key, val in AUTO_COUNTRY_MAP.items():
         if key in name_upper:
             return val
 
-    # 3. 兜底：读隐藏数据 (解决“其他地区”不归位的问题)
+    # 3. 第三优先级：IP 检测的隐藏字段 (兜底)
     if server_config and server_config.get('_detected_region'):
         detected = server_config['_detected_region'].upper()
         for key, val in AUTO_COUNTRY_MAP.items():
@@ -2676,7 +2683,7 @@ async def open_data_mgmt_dialog():
             tab_export = ui.tab('完整备份 (导出)')
             tab_import = ui.tab('恢复 / 批量添加')
             
-        with ui.tab_panels(tabs, value=tab_export).classes('w-full p-6 overflow-y-auto flex-grow'):
+        with ui.tab_panels(tabs, value=tab_import).classes('w-full p-6 overflow-y-auto flex-grow'):
             # --- 面板 A: 导出 ---
             with ui.tab_panel(tab_export).classes('flex flex-col gap-8 items-center justify-center h-full'):
                 full_backup = {
@@ -2760,7 +2767,7 @@ async def open_data_mgmt_dialog():
                             count = 0
                             existing_urls = {s['url'] for s in SERVERS_CACHE}
                             
-                            # ✨✨✨ 准备后台自动安装任务列表 ✨✨✨
+                            # 准备后台自动安装任务
                             install_tasks = []
                             
                             for line in lines:
@@ -2779,26 +2786,27 @@ async def open_data_mgmt_dialog():
                                 if final_url in existing_urls: continue
                                 auth_type = '独立密码' if def_ssh_pwd.value.strip() else '全局密钥'
                                 
+                                # ✨✨✨ 核心修改：Group 留空，不设为“默认分组” ✨✨✨
+                                # 这样可以让 GeoIP 任务后续自动接管并分类
                                 new_server = {
-                                    'name': name, 'group': '默认分组', 'url': final_url,
+                                    'name': name, 
+                                    'group': '',  # <--- 关键：留空！
+                                    'url': final_url,
                                     'user': def_xui_user.value, 'pass': def_xui_pass.value, 'prefix': '',
                                     'ssh_user': def_ssh_user.value, 'ssh_port': target_ssh_port,
                                     'ssh_auth_type': auth_type, 'ssh_password': def_ssh_pwd.value, 'ssh_key': ''
                                 }
 
-                                # 1. 自动命名
+                                # 简单的自动命名 (IP -> Name)
                                 if name == host_ip or name == final_url:
-                                    safe_notify(f"正在智能处理: {host_ip}...", "ongoing")
-                                    new_server['name'] = await generate_smart_name(new_server)
-                                
-                                # 2. 补全国旗
-                                new_server['name'] = await auto_prepend_flag(new_server['name'], final_url)
+                                    # 尝试保留原始 IP 作为名字，等待后台 GeoIP 任务来修正加国旗
+                                    new_server['name'] = name 
 
                                 SERVERS_CACHE.append(new_server)
                                 existing_urls.add(final_url)
                                 count += 1
                                 
-                                # ✨✨✨ 如果开启了探针，将安装任务加入队列 ✨✨✨
+                                # 如果开启了探针，加入安装队列
                                 if ADMIN_CONFIG.get('probe_enabled', False):
                                     install_tasks.append(install_probe_on_server(new_server))
 
@@ -2808,7 +2816,7 @@ async def open_data_mgmt_dialog():
                                 safe_notify(f"成功添加 {count} 台服务器", 'positive')
                                 d.close()
                                 
-                                # ✨✨✨ 在后台并发执行所有探针安装任务 ✨✨✨
+                                # 后台并发安装探针
                                 if install_tasks:
                                     safe_notify(f"正在后台为 {len(install_tasks)} 台新服务器配置探针...", "ongoing")
                                     asyncio.create_task(asyncio.gather(*install_tasks))
@@ -4302,87 +4310,60 @@ def render_sidebar_content():
         ui.button('服务器探针', icon='monitor_heart', on_click=render_probe_page).props('flat align=left').classes(btn_cls)
         ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes(btn_cls)
 
-    # 2. 列表
+    # 2. 列表区域
     with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-1'):
         with ui.row().classes('w-full gap-2 px-1 mb-4'):
             func_btn_cls = 'flex-grow text-xs active:scale-95 transition-transform duration-150'
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-600 text-white {func_btn_cls}')
             ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes(func_btn_cls)
 
-        list_item_props = 'clickable v-ripple'
-        list_item_cls = 'w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer group active:scale-95 transition-transform duration-150'
-
-        # --- A. 全部节点 ---
-        with ui.row().classes(list_item_cls).props(list_item_props).on('click', lambda _: refresh_content('ALL')):
+        # --- A. 全部服务器 (核心入口) ---
+        with ui.row().classes('w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer group active:scale-95 transition-transform duration-150').props('clickable v-ripple').on('click', lambda _: refresh_content('ALL')):
             with ui.row().classes('items-center gap-2'):
                 ui.icon('dns', color='primary')
                 ui.label('所有服务器').classes('font-bold')
             ui.badge(str(len(SERVERS_CACHE)), color='blue')
 
-        # --- B. 自定义分组 (✨这里修复了 0 计数的问题✨) ---
-        if 'custom_groups' in ADMIN_CONFIG and ADMIN_CONFIG['custom_groups']:
-            ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
-            for tag_group in ADMIN_CONFIG['custom_groups']:
-                # ✨ 核心修复：同时统计 Group 和 Tags
-                tag_servers = [
-                    s for s in SERVERS_CACHE 
-                    if tag_group in s.get('tags', []) or s.get('group') == tag_group
-                ]
-                
-                is_open = tag_group in EXPANDED_GROUPS
-                with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
-                    with exp.add_slot('header'):
-                        header_cls = 'w-full h-full items-center justify-between no-wrap cursor-pointer active:scale-95 transition-transform duration-150'
-                        with ui.row().classes(header_cls).props('clickable v-ripple').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
-                            ui.label(tag_group).classes('flex-grow font-bold truncate')
-                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').on('click.stop')
-                            ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
-                    
-                    with ui.column().classes('w-full gap-0 bg-gray-50'):
-                        if not tag_servers: ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
-                        for s in tag_servers:
-                            sub_row_cls = 'w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group active:scale-95 transition-transform duration-150'
-                            with ui.row().classes(sub_row_cls).props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
-                                ui.label(s['name']).classes('text-sm truncate flex-grow')
-                                with ui.row().classes('gap-1 items-center'):
-                                    ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)).props('flat dense round size=xs color=grey-8').on('click.stop')
-                                    ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
-
-        # --- C. 智能区域分组 (✨这里修复了"其他地区"无法归类的问题✨) ---
-        ui.label('区域分组 (智能)').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
+        # --- B. 智能区域分组 (✨ 只展示这个！) ---
+        ui.label('区域分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
+        
         country_buckets = {}
         for s in SERVERS_CACHE:
-            # ✨ 核心修复：传入 s 对象，让它能读取 _detected_region
+            # 调用升级后的识别逻辑
             c_group = detect_country_group(s.get('name', ''), s)
+            
+            # ✨ 过滤垃圾分组：如果是空的或者 "默认分组" 这种，直接归入 "其他地区" 或忽略
+            if c_group in ['默认分组', '自动注册', '自动导入', '未分组', '']:
+                # 再次尝试检测，如果真检测不出来，就去 "其他地区"
+                c_group = '🏳️ 其他地区'
+                
             if c_group not in country_buckets: country_buckets[c_group] = []
             country_buckets[c_group].append(s)
         
+        # 渲染分组列表
         for c_name in sorted(country_buckets.keys()):
             c_servers = country_buckets[c_name]
-            c_servers.sort(key=smart_sort_key)
+            # 简单的排序
+            c_servers.sort(key=lambda x: x.get('name',''))
+            
             is_open = c_name in EXPANDED_GROUPS
             with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                  with exp.add_slot('header'):
-                    header_cls = 'w-full h-full items-center justify-between no-wrap cursor-pointer active:scale-95 transition-transform duration-150'
-                    with ui.row().classes(header_cls).props('clickable v-ripple').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
+                    with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').props('clickable v-ripple').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                         ui.label(c_name).classes('flex-grow font-bold truncate')
-                        ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey').on('click.stop')
                         ui.badge(str(len(c_servers)), color='green')
+                 
                  with ui.column().classes('w-full gap-0 bg-gray-50'):
                     for s in c_servers:
-                         sub_row_cls = 'w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group active:scale-95 transition-transform duration-150'
-                         with ui.row().classes(sub_row_cls).props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                         with ui.row().classes('w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer').props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
                                 ui.label(s['name']).classes('text-sm truncate flex-grow')
                                 with ui.row().classes('gap-1 items-center'):
-                                    ui.button(icon='terminal', on_click=lambda _, s=s: open_ssh_interface(s)).props('flat dense round size=xs color=grey-8').on('click.stop')
                                     ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
-    # 3. 底部功能区
+    # 3. 底部功能区 (保持不变)
     with ui.column().classes('w-full p-2 border-t mt-auto mb-15 gap-2 bg-white z-10'):
-        bottom_btn_cls = 'w-full font-bold mb-1 active:scale-95 transition-transform duration-150'
-        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(f'text-slate-800 bg-blue-50 hover:bg-blue-100 {bottom_btn_cls}')
-        ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
-        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
+        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes('w-full font-bold mb-1 bg-blue-50 text-slate-800 hover:bg-blue-100')
+        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
         
 # ================== 登录与 MFA 逻辑 ==================
 @ui.page('/login')
@@ -4632,25 +4613,43 @@ async def job_sync_all_traffic():
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
-    logger.info("🌍 [定时任务] 检查服务器地理位置...")
+    logger.info("🌍 [定时任务] 开始全量 IP 归属地检测与名称修正...")
     geo_updated = False
+    
     for s in SERVERS_CACHE:
-        # 如果已经有探测数据，跳过
-        if s.get('_detected_region') and s.get('lat'): continue
+        # 如果名字里已经有 emoji 国旗了 (比如 "🇯🇵")，就跳过，避免重复请求
+        # 我们检测常见的国旗 Emoji 范围，或者简单的判断
+        current_name = s.get('name', '')
+        if any(c in current_name for c in ['🇯🇵','🇺🇸','🇸🇬','🇭🇰','🇰🇷','🇩🇪','🇬🇧','🇹🇼','🇨🇳']):
+            continue
+
         try:
+            # 请求 API 获取地理位置
             geo = await run.io_bound(fetch_geo_from_ip, s['url'])
             if geo:
+                # geo = (lat, lon, country_name)
                 s['lat'] = geo[0]
                 s['lon'] = geo[1]
-                s['_detected_region'] = geo[2] # ✨ 关键：保存隐藏的地区标签
-                geo_updated = True
-        except: pass
+                s['_detected_region'] = geo[2] 
+                
+                # ✨✨✨ 核心改变：强制重命名 (加国旗) ✨✨✨
+                # 获取 "🇯🇵 日本" 这样的字符串
+                flag_prefix = get_flag_for_country(geo[2]) 
+                flag_icon = flag_prefix.split(' ')[0] # 只取 "🇯🇵"
+                
+                # 如果名字开头不是这个国旗，就强行加上去
+                if not current_name.startswith(flag_icon):
+                    s['name'] = f"{flag_icon} {current_name}"
+                    logger.info(f"✨ [自动修正] {current_name} -> {s['name']}")
+                    geo_updated = True
+        except Exception as e:
+            pass
             
     if geo_updated:
         await save_servers()
         await refresh_dashboard_ui()
         render_sidebar_content.refresh()
-        logger.info("✅ 地理位置信息已更新")
+        safe_notify("已完成所有服务器的地理位置修正", "positive")
 
 # 3. 初始化调度器
 scheduler = AsyncIOScheduler()
