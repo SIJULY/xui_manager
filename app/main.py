@@ -441,28 +441,33 @@ AUTO_COUNTRY_MAP = {
 
 def detect_country_group(name, server_config=None):
     # 1. ✨ 最高优先级：手动设置的分组 ✨
-    # 如果你在网页上“移动分组”到了 "日本"，saved_group 就是 "日本"
     if server_config:
         saved_group = server_config.get('group')
-        # 如果用户手动设置了非空的组名，直接通过！
-        if saved_group and saved_group.strip():
-            # 这里做一个小映射，防止用户只写了 "Japan" 而没写 emoji
-            # 如果 group 是 "日本"，尝试去 AUTO_COUNTRY_MAP 找对应的带 Emoji 的名字
+        # 只有当分组有内容，且不是那些“无意义”的默认分组时，才强制生效
+        # ⚠️ 关键修改：如果手动设为 '其他地区'，我们认为这是无效分类，允许继续走下面的智能识别
+        if saved_group and saved_group.strip() and saved_group not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区', '其他地区']:
+            # 尝试标准化 (输入 "美国" -> "🇺🇸 美国")
             for v in AUTO_COUNTRY_MAP.values():
                 if saved_group in v or v in saved_group:
-                    return v # 返回标准的 "🇯🇵 日本"
-            
-            # 如果没找到标准国家名（比如用户填了 "我的爱机"），也直接返回，当作自定义组
-            # 但既然你想统一管理，这里我们假设你只会移到国家组
+                    return v 
             return saved_group
 
-    # 2. 第二优先级：名字里的 Emoji (由第一步的自动重命名任务生成)
+    # 2. ✨✨✨ 第二优先级：看图识字 (国旗) + 关键字 ✨✨✨
     name_upper = name.upper()
     for key, val in AUTO_COUNTRY_MAP.items():
+        # A. 找关键字
         if key in name_upper:
             return val
+        
+        # B. 找国旗 (比如名字里有 🇺🇸)
+        try:
+            flag_icon = val.split(' ')[0]
+            if flag_icon and flag_icon in name:
+                return val
+        except:
+            continue
 
-    # 3. 第三优先级：IP 检测的隐藏字段 (兜底)
+    # 3. 第三优先级：IP 检测的隐藏字段
     if server_config and server_config.get('_detected_region'):
         detected = server_config['_detected_region'].upper()
         for key, val in AUTO_COUNTRY_MAP.items():
@@ -4300,6 +4305,7 @@ def open_combined_group_management(group_name):
     d.open()
         
 # =================侧边栏渲染 =====================
+# ================= [侧边栏渲染：修复完整版] =================
 @ui.refreshable
 def render_sidebar_content():
     # 1. 顶部
@@ -4317,40 +4323,68 @@ def render_sidebar_content():
             ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-600 text-white {func_btn_cls}')
             ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes(func_btn_cls)
 
-        # --- A. 全部服务器 (核心入口) ---
-        with ui.row().classes('w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer group active:scale-95 transition-transform duration-150').props('clickable v-ripple').on('click', lambda _: refresh_content('ALL')):
+        # --- A. 全部服务器 ---
+        list_item_cls = 'w-full items-center justify-between p-3 border rounded mb-2 bg-slate-100 hover:bg-slate-200 cursor-pointer group active:scale-95 transition-transform duration-150'
+        with ui.row().classes(list_item_cls).props('clickable v-ripple').on('click', lambda _: refresh_content('ALL')):
             with ui.row().classes('items-center gap-2'):
                 ui.icon('dns', color='primary')
                 ui.label('所有服务器').classes('font-bold')
             ui.badge(str(len(SERVERS_CACHE)), color='blue')
 
-        # --- B. 智能区域分组 (✨ 只展示这个！) ---
+        # --- B. ✨✨✨ 找回：自定义分组 (Tags) ✨✨✨ ---
+        if 'custom_groups' in ADMIN_CONFIG and ADMIN_CONFIG['custom_groups']:
+            ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
+            for tag_group in ADMIN_CONFIG['custom_groups']:
+                # 统计逻辑：包含 Tag 或者 Group 名字匹配
+                tag_servers = [
+                    s for s in SERVERS_CACHE 
+                    if tag_group in s.get('tags', []) or s.get('group') == tag_group
+                ]
+                
+                is_open = tag_group in EXPANDED_GROUPS
+                with ui.expansion('', icon='label', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
+                    with exp.add_slot('header'):
+                        header_cls = 'w-full h-full items-center justify-between no-wrap cursor-pointer active:scale-95 transition-transform duration-150'
+                        with ui.row().classes(header_cls).props('clickable v-ripple').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
+                            ui.label(tag_group).classes('flex-grow font-bold truncate')
+                            # 分组设置按钮
+                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').on('click.stop').tooltip('管理此分组')
+                            ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey')
+                    
+                    with ui.column().classes('w-full gap-0 bg-gray-50'):
+                        if not tag_servers: ui.label('空分组').classes('text-xs text-gray-400 p-2 italic')
+                        for s in tag_servers:
+                            sub_row_cls = 'w-full justify-between items-center p-2 pl-4 border-b border-gray-100 hover:bg-blue-100 cursor-pointer group active:scale-95 transition-transform duration-150'
+                            with ui.row().classes(sub_row_cls).props('clickable v-ripple').on('click', lambda _, s=s: refresh_content('SINGLE', s)):
+                                ui.label(s['name']).classes('text-sm truncate flex-grow')
+                                with ui.row().classes('gap-1 items-center'):
+                                    ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
+
+        # --- C. 智能区域分组 ---
         ui.label('区域分组').classes('text-xs font-bold text-gray-400 mt-2 mb-1 px-2')
         
         country_buckets = {}
         for s in SERVERS_CACHE:
-            # 调用升级后的识别逻辑
             c_group = detect_country_group(s.get('name', ''), s)
-            
-            # ✨ 过滤垃圾分组：如果是空的或者 "默认分组" 这种，直接归入 "其他地区" 或忽略
+            # 过滤垃圾分组
             if c_group in ['默认分组', '自动注册', '自动导入', '未分组', '']:
-                # 再次尝试检测，如果真检测不出来，就去 "其他地区"
                 c_group = '🏳️ 其他地区'
-                
             if c_group not in country_buckets: country_buckets[c_group] = []
             country_buckets[c_group].append(s)
         
-        # 渲染分组列表
         for c_name in sorted(country_buckets.keys()):
             c_servers = country_buckets[c_name]
-            # 简单的排序
             c_servers.sort(key=lambda x: x.get('name',''))
-            
             is_open = c_name in EXPANDED_GROUPS
+            
             with ui.expansion('', icon='public', value=is_open).classes('w-full border rounded mb-1 bg-white shadow-sm').props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                  with exp.add_slot('header'):
                     with ui.row().classes('w-full h-full items-center justify-between no-wrap cursor-pointer').props('clickable v-ripple').on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                         ui.label(c_name).classes('flex-grow font-bold truncate')
+                        
+                        # ✨✨✨ 找回：批量管理按钮 (小铅笔图标) ✨✨✨
+                        ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey').on('click.stop').tooltip('批量管理此区域')
+                        
                         ui.badge(str(len(c_servers)), color='green')
                  
                  with ui.column().classes('w-full gap-0 bg-gray-50'):
@@ -4360,10 +4394,15 @@ def render_sidebar_content():
                                 with ui.row().classes('gap-1 items-center'):
                                     ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey').on('click.stop')
 
-    # 3. 底部功能区 (保持不变)
+    # 3. ✨✨✨ 找回：底部功能区 (含备份按钮) ✨✨✨
     with ui.column().classes('w-full p-2 border-t mt-auto mb-15 gap-2 bg-white z-10'):
-        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes('w-full font-bold mb-1 bg-blue-50 text-slate-800 hover:bg-blue-100')
-        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm')
+        bottom_btn_cls = 'w-full font-bold mb-1 active:scale-95 transition-transform duration-150'
+        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(f'text-slate-800 bg-blue-50 hover:bg-blue-100 {bottom_btn_cls}')
+        
+        ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
+        
+        # 备份按钮回来了！
+        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes('w-full text-slate-600 text-sm active:scale-95 transition-transform duration-150')
         
 # ================== 登录与 MFA 逻辑 ==================
 @ui.page('/login')
