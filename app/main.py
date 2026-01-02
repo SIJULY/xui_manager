@@ -16,8 +16,8 @@ import qrcode
 import time
 import io
 import paramiko
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor # ✅ 修正
-from apscheduler.schedulers.asyncio import AsyncIOScheduler # ✅ 修正
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
@@ -28,7 +28,7 @@ IP_GEO_CACHE = {}
 # ✨✨✨ 定义全局进程池变量 ✨✨✨
 PROCESS_POOL = None 
 
-# ✨✨✨ [新增] 同步 Ping 函数 (将由独立进程执行) ✨✨✨
+# ✨✨✨同步 Ping 函数 (将由独立进程执行) ✨✨✨
 def sync_ping_worker(host, port):
     try:
         start = time.time()
@@ -224,7 +224,7 @@ def get_flag_for_country(country_name):
     # 3. 实在找不到，返回白旗
     return f"🏳️ {country_name}"
 
-# ✨✨✨ [逻辑修正] 自动给名称添加国旗 ✨✨✨
+# ✨✨✨自动给名称添加国旗 ✨✨✨
 async def auto_prepend_flag(name, url):
     """
     检查名字是否已经包含任意已知国旗。
@@ -314,7 +314,7 @@ def open_global_settings_dialog():
     d.open()
     
 # ================= 全局变量区 (新增缓存) =================
-PROBE_DATA_CACHE = {} # ✨ 新增：全局探针数据缓存 {url: data_dict}
+PROBE_DATA_CACHE = {} # ✨全局探针数据缓存 {url: data_dict}
 # ================= 探针安装脚本 (回退稳定版：只读资源，极速安装) =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
@@ -1226,7 +1226,7 @@ async def install_probe_on_server(server_conf):
     return success
         
 
-# ================= 批量安装所有探针 (优化版：带并发控制) =================
+# ================= 批量安装所有探针  =================
 async def batch_install_all_probes():
     if not SERVERS_CACHE:
         safe_notify("没有服务器可安装", "warning")
@@ -1258,7 +1258,7 @@ async def batch_install_all_probes():
     
     safe_notify("✅ 所有探针安装/更新任务已完成", "positive")
     
-# ================= [修改] 获取服务器状态 (带缓存 + 移除OS) =================
+# =================  获取服务器状态 (带缓存 + 移除OS) =================
 async def get_server_status(server_conf):
     """仅通过 HTTP 探针获取状态 (写入全局缓存版)"""
     def _try_http_probe():
@@ -1442,7 +1442,7 @@ def generate_detail_config(node, server_host):
         return ""
 
 
-# ================= 延迟测试核心逻辑 (多进程优化版) =================
+# ================= 延迟测试核心逻辑  =================
 PING_CACHE = {}
 
 async def batch_ping_nodes(nodes, raw_host):
@@ -1631,8 +1631,7 @@ async def short_sub_handler(target: str, token: str):
 
 
 
-# ================= 探针主动注册接口 (新增) =================
-# ================= 探针主动注册接口 (修正版：去除自动注册组) =================
+# ================= 探针主动注册接口  =================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
     try:
@@ -1683,7 +1682,7 @@ async def probe_register(request: Request):
         logger.error(f"❌ 注册接口异常: {e}")
         return Response(json.dumps({"success": False, "msg": str(e)}), status_code=500)
         
-# ================= 辅助：单机极速修正 (修复重复国旗问题) =================
+# ================= 辅助：单机极速修正  =================
 async def fast_resolve_single_server(s):
     """
     后台全自动修正流程：
@@ -2318,20 +2317,40 @@ class SubEditor:
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
     
-# ================= 探针页面渲染 (最终完整版：GitHub短命令 + 自动注册 + 秒开缓存) =================
+# ================= 探针页面渲染 (终极完整版：修复初始化 + 找回顶部按钮) =================
 async def render_probe_page():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'PROBE'
     content_container.clear()
     
-    # 1. 检查功能是否启用
+    # --- 内部函数：开启探针功能 ---
+    async def enable_probe_feature():
+        # 1. 开启开关
+        ADMIN_CONFIG['probe_enabled'] = True
+        await save_admin_config()
+        
+        # 2. 提示用户
+        safe_notify("✅ 探针功能已激活！后台正在尝试为现有服务器安装...", "positive")
+        
+        # 3. 触发后台批量安装
+        asyncio.create_task(batch_install_all_probes())
+        
+        # 4. 刷新页面 (移除初始化遮罩)
+        await render_probe_page()
+
+    # 1. 检查功能是否启用 (未启用显示初始化页)
     if not ADMIN_CONFIG.get('probe_enabled', False):
         with content_container:
-            with ui.column().classes('w-full h-[60vh] justify-center items-center opacity-50'):
-                ui.label('探针功能未初始化').classes('text-2xl font-bold text-gray-400')
-                ui.button('初始化并重装', on_click=lambda: open_global_settings_dialog()).props('outline')
+            with ui.column().classes('w-full h-[60vh] justify-center items-center opacity-50 gap-4'):
+                ui.icon('monitor_heart', size='5rem').classes('text-gray-300')
+                ui.label('探针监控功能未开启').classes('text-2xl font-bold text-gray-400')
+                ui.label('开启后将自动获取服务器的 CPU/内存/硬盘/流量 实时数据').classes('text-sm text-gray-400')
+                
+                # 点击直接开启
+                ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
         return
 
+    # 2. 功能已启用，渲染主界面
     monitor_refs = {}
 
     # --- UI 辅助函数 ---
@@ -2348,8 +2367,60 @@ async def render_probe_page():
             ui.label(label).classes('text-[10px] text-gray-400 transform scale-90')
             refs_dict[value_ref_key] = ui.label(initial_text).classes('text-xs font-bold text-slate-700')
 
+    # --- 自动刷新任务 (定义在界面渲染之前) ---
+    async def refresh_task():
+        if CURRENT_VIEW_STATE['scope'] != 'PROBE': return
+
+        sema = asyncio.Semaphore(20)
+        async def check_one(srv):
+            url = srv['url']
+            refs = monitor_refs.get(url)
+            if not refs: return
+            async with sema:
+                # 使用 try-except 防止单个失败影响整体
+                try:
+                    res = await get_server_status(srv) # 自动写入缓存
+                    
+                    if refs['cpu_bar'].is_deleted: return
+
+                    if res and res.get('status') == 'online':
+                        refs['status_badge'].set_text('运行中')
+                        refs['status_badge'].classes(replace='bg-green-100 text-green-600', remove='bg-gray-100 bg-red-100 text-gray-500 text-red-500')
+                        
+                        if 'cpu_cores' in res: refs['cpu_cores'].set_text(f"{res['cpu_cores']} Cores")
+                        if 'mem_total' in res: refs['mem_total'].set_text(f"{res['mem_total']} GB")
+                        if 'disk_total' in res: refs['disk_total'].set_text(f"{res['disk_total']} GB")
+
+                        cpu_p = res.get('cpu_usage', 0)
+                        refs['cpu_bar'].style(f'width: {cpu_p}%')
+                        refs['cpu_val'].set_text(f'{int(cpu_p)}%')
+                        
+                        mem_p = res.get('mem_usage', 0)
+                        refs['mem_bar'].style(f'width: {mem_p}%')
+                        refs['mem_val'].set_text(f'{int(mem_p)}%')
+
+                        disk_p = res.get('disk_usage', 0)
+                        refs['disk_bar'].style(f'width: {disk_p}%')
+                        refs['disk_val'].set_text(f'{int(disk_p)}%')
+
+                        refs['load_val'].set_text(str(res.get('load_1', 0)))
+                        refs['uptime_val'].set_text(res.get('uptime', ''))
+                    else:
+                        refs['status_badge'].set_text('已离线')
+                        refs['status_badge'].classes(replace='bg-red-100 text-red-500', remove='bg-green-100 bg-gray-100')
+                        refs['cpu_bar'].style('width: 0%'); refs['mem_bar'].style('width: 0%'); refs['disk_bar'].style('width: 0%')
+                except: pass
+
+        tasks = [check_one(s) for s in SERVERS_CACHE]
+        await asyncio.gather(*tasks)
+
+    def manual_refresh():
+        safe_notify('正在刷新...', 'ongoing')
+        asyncio.create_task(refresh_task())
+
+    # --- 开始渲染界面内容 ---
     with content_container:
-        # --- 顶部标题栏 ---
+        # ✨✨✨ [重点找回] 顶部标题栏 + 按钮组 ✨✨✨
         with ui.row().classes('w-full items-center justify-between mb-4 px-2'):
             # 左侧标题
             with ui.row().classes('items-center gap-2'):
@@ -2357,48 +2428,38 @@ async def render_probe_page():
                 ui.label('实时监控墙').classes('text-2xl font-bold text-slate-800 tracking-tight')
                 ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e] animate-pulse')
             
-            # 右侧按钮组
+            # 右侧按钮组 (功能定义)
             with ui.row().classes('items-center gap-2'):
                 
-                # --- 功能 A: 复制极简 GitHub 安装命令 ---
+                # 功能 A: 复制命令
                 async def copy_auto_register_cmd():
                     try:
-                        # 1. 动态获取面板地址
                         origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
                     except:
-                        safe_notify("无法获取面板地址，请检查浏览器环境", "negative")
+                        safe_notify("无法获取面板地址", "negative")
                         return
 
-                    # 2. 准备参数
                     token = ADMIN_CONFIG.get('probe_token', 'default_token')
                     register_api = f"{origin}/api/probe/register"
-                    
-                    # 3. 你的 GitHub 脚本 Raw 地址
                     github_script_url = "https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/x-install.sh"
                     
-                    # 4. 生成短命令 (curl 下载 | bash 执行，带参数)
+                    # 优先使用 GitHub 源，如果需要也可以改成使用本地 /static/x-install.sh
                     cmd = f'curl -sL {github_script_url} | bash -s -- "{token}" "{register_api}"'
                     
-                    # 5. 复制
                     await safe_copy_to_clipboard(cmd)
                     safe_notify("📋 极简安装命令已复制！", "positive")
 
-                # --- 功能 B: 重置所有探针 (后台批量安装) ---
+                # 功能 B: 重置所有探针
                 async def reinstall_all_btn():
                     safe_notify("正在后台为所有服务器重置探针...", "ongoing")
                     await batch_install_all_probes()
 
-                # --- 渲染按钮 ---
-                # 1. 复制单机命令 (蓝色)
-                ui.button('复制单机命令', icon='content_copy', on_click=copy_auto_register_cmd).props('flat dense color=blue-6').tooltip('复制 GitHub 极简安装脚本')
-                
-                # 2. 重置所有探针 (橙色)
-                ui.button('重置所有探针', icon='restart_alt', on_click=reinstall_all_btn).props('flat dense color=orange').tooltip('为列表内所有服务器重新安装探针')
-                
-                # 3. 刷新页面 (灰色)
-                ui.button(icon='refresh', on_click=lambda: manual_refresh()).props('flat round dense color=grey').tooltip('刷新状态')
+                # 渲染按钮
+                ui.button('复制单机命令', icon='content_copy', on_click=copy_auto_register_cmd).props('flat dense color=blue-6').tooltip('复制一键安装脚本')
+                ui.button('重置所有探针', icon='restart_alt', on_click=reinstall_all_btn).props('flat dense color=orange').tooltip('重新安装探针')
+                ui.button(icon='refresh', on_click=manual_refresh).props('flat round dense color=grey').tooltip('立即刷新')
 
-        # --- 渲染卡片网格 (带缓存秒开逻辑) ---
+        # --- 渲染卡片网格 ---
         with ui.grid().classes('w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-10'):
             sorted_servers = sorted(SERVERS_CACHE, key=lambda x: (x.get('_status') != 'online', smart_sort_key(x)))
 
@@ -2430,7 +2491,6 @@ async def render_probe_page():
                         init_cls = 'bg-green-100 text-green-600' if has_cache and cache.get('status')=='online' else 'bg-gray-100 text-gray-500'
                         refs['status_badge'] = ui.label(init_status).classes(f'text-[10px] px-2 py-0.5 rounded-full font-bold {init_cls}')
 
-                    # (已移除 OS/Port 显示行，保持清爽)
                     ui.separator().classes('opacity-50')
 
                     # 2. 硬件数据
@@ -2470,59 +2530,11 @@ async def render_probe_page():
 
                 monitor_refs[url] = refs
 
-    # --- 自动刷新任务 (自动更新缓存) ---
-    async def refresh_task():
-        if CURRENT_VIEW_STATE['scope'] != 'PROBE': return
-
-        sema = asyncio.Semaphore(20)
-        async def check_one(srv):
-            url = srv['url']
-            refs = monitor_refs.get(url)
-            if not refs: return
-            async with sema:
-                res = await get_server_status(srv) # 这里会自动写入全局缓存
-                
-                # 防止页面元素销毁报错
-                if refs['cpu_bar'].is_deleted: return
-
-                if res and res.get('status') == 'online':
-                    refs['status_badge'].set_text('运行中')
-                    refs['status_badge'].classes(replace='bg-green-100 text-green-600', remove='bg-gray-100 bg-red-100 text-gray-500 text-red-500')
-                    
-                    if 'cpu_cores' in res: refs['cpu_cores'].set_text(f"{res['cpu_cores']} Cores")
-                    if 'mem_total' in res: refs['mem_total'].set_text(f"{res['mem_total']} GB")
-                    if 'disk_total' in res: refs['disk_total'].set_text(f"{res['disk_total']} GB")
-
-                    cpu_p = res.get('cpu_usage', 0)
-                    refs['cpu_bar'].style(f'width: {cpu_p}%')
-                    refs['cpu_val'].set_text(f'{int(cpu_p)}%')
-                    
-                    mem_p = res.get('mem_usage', 0)
-                    refs['mem_bar'].style(f'width: {mem_p}%')
-                    refs['mem_val'].set_text(f'{int(mem_p)}%')
-
-                    disk_p = res.get('disk_usage', 0)
-                    refs['disk_bar'].style(f'width: {disk_p}%')
-                    refs['disk_val'].set_text(f'{int(disk_p)}%')
-
-                    refs['load_val'].set_text(str(res.get('load_1', 0)))
-                    refs['uptime_val'].set_text(res.get('uptime', ''))
-                else:
-                    refs['status_badge'].set_text('已离线')
-                    refs['status_badge'].classes(replace='bg-red-100 text-red-500', remove='bg-green-100 bg-gray-100')
-                    refs['cpu_bar'].style('width: 0%'); refs['mem_bar'].style('width: 0%'); refs['disk_bar'].style('width: 0%')
-
-        tasks = [check_one(s) for s in SERVERS_CACHE]
-        await asyncio.gather(*tasks)
-
-    def manual_refresh():
-        safe_notify('正在刷新...', 'ongoing')
-        asyncio.create_task(refresh_task())
-
+    # 启动后台刷新
     asyncio.create_task(refresh_task())
-    refresh_timer = ui.timer(2.0, refresh_task)
+    refresh_timer = ui.timer(10.0, refresh_task) # 建议 10秒刷新一次，避免卡死
     
-# ================= [UI 修复] 刷新逻辑 =================
+# =================刷新逻辑 =================
 async def update_probe_stats(card_refs, is_manual=False):
     # 如果页面已销毁，停止
     if CURRENT_VIEW_STATE.get('scope') != 'PROBE': return
@@ -4406,7 +4418,7 @@ class BulkEditor:
                     ui.button('移动分组', icon='folder_open', on_click=move_group).props('flat dense color=blue')
 
                     # =========================================================
-                    # ✨✨✨ [新增] 批量修改 SSH 设置 (用户名/认证方式) ✨✨✨
+                    # ✨✨✨批量修改 SSH 设置 (用户名/认证方式) ✨✨✨
                     # =========================================================
                     async def batch_ssh_config():
                         if not self.selected_urls: return safe_notify('未选择服务器', 'warning')
