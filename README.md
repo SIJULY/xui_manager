@@ -19,7 +19,7 @@
 
 ##  ✨ 核心功能
 
-* **1. 🛡️ 混合双轨制监控 (Hybrid Monitor)* **
+***1. 🛡️ 混合双轨制监控 (Hybrid Monitor)***
 打破传统面板限制，采用 主动拉取 + 被动推送 双重机制：
 
 被动推送 (Probe Mode)：通过一键安装 Python 轻量探针，服务器主动每 3 秒汇报 CPU、内存、硬盘、负载及实时流量。数据走 HTTP 推送，无需开放额外端口，不受防火墙限制。
@@ -28,14 +28,14 @@
 
 高容错设计：探针内置沙盒隔离机制，即使 X-UI 面板崩溃或 API 变动，探针依然能稳定汇报系统状态，永不掉线。
 
-* **2. 💻 沉浸式 WebSSH 终端* **
+***2. 💻 沉浸式 WebSSH 终端***
 内置 Xterm.js：提供类似本地终端的丝滑体验，支持全彩显示、命令补全、自适应窗口大小。
 
 灵活认证：支持 全局密钥、独立密钥、独立密码 三种认证方式，满足不同服务器的安全需求。
 
 批量执行：支持向选定的多台服务器批量发送 Shell 命令，并在统一的日志窗口查看执行结果（支持 sudo 交互）。
 
-* ** 3. 🤖 智能运维与自动化
+***3. 🤖 智能运维与自动化***
 智能分组与命名：
 
 自动识别服务器 IP 归属地，添加国旗 Emoji（如 🇺🇸、🇭🇰、🇯🇵）。
@@ -50,14 +50,14 @@
 
 批量添加：支持 双独立开关（[ ] 添加 X-UI 面板 | [ ] 启用 Root 探针），灵活控制批量导入的服务器行为。
 
-* ** 4. 🔗 强大的订阅管理
+***4. 🔗 强大的订阅管理***
 聚合与分组：一键生成包含所有节点的聚合订阅，或按“国家/地区”、“自定义 Tag”生成专属订阅。
 
 内置转换：集成 SubConverter，直接输出 Clash、Surge、Loon 等格式配置。
 
 高级策略：支持 正则重命名（Rename）、正则筛选（Include/Exclude）、自动排序、强制开启 UDP 等高级处理策略。
 
-* ** 5. 📊 可视化仪表盘
+***5. 📊 可视化仪表盘***
 全球实景地图：基于 Leaflet 的动态地图，直观展示全球节点分布。
 
 实时数据：协议分布饼图、流量排行柱状图、实时上传/下载速率。
@@ -65,28 +65,28 @@
 安全防护：支持 MFA (TOTP) 二次验证，记录登录 IP，保障面板安全。
 
 ---
-## 📸 界面预览
+## 📸 界面预览## 
 
-* ** 📊 全景仪表盘与地图
+***📊 全景仪表盘与地图***
 <img width="100%" alt="Dashboard" src="https://github.com/user-attachments/assets/7c8b2163-50aa-4b6a-b550-8dde09e57818" />
 
-* ** 🧱 智能监控墙 (支持拖拽排序)
+***🧱 智能监控墙 (支持拖拽排序)***
 <img width="100%" alt="Monitor Wall" src="https://github.com/user-attachments/assets/7746c2b5-c0da-4fbf-8499-e6431e7e5d94" />
 
-* ** 🛠️ 批量添加 (支持双独立开关)
+***🛠️ 批量添加 (支持双独立开关)***
 <img width="100%" alt="Batch Add" src="https://github.com/user-attachments/assets/4dbdcb" />
 
-* ** 💻 WebSSH 终端与单机管理
+***💻 WebSSH 终端与单机管理***
 <img width="100%" alt="WebSSH" src="https://github.com/user-attachments/assets/fae65091-c411-46c3-a4a3-8af97eac50b9" />
 
-* ** 🔗 订阅策略编辑器
+***🔗 订阅策略编辑器***
 <img width="100%" alt="Subscription" src="https://github.com/user-attachments/assets/db7439ee-7cbc-4860-b723-598d8517f1e2" />
 
 
 
 
 
-## 🚀 快速安装
+## 🚀 快速安装## 
 
 推荐使用 Docker 一键启动，脚本会自动处理环境依赖和配置。
 
