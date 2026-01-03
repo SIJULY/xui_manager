@@ -649,7 +649,10 @@ def init_data():
     
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f: SERVERS_CACHE = json.load(f)
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f: 
+                raw_data = json.load(f)
+                # ✨✨✨ 修复：过滤掉非字典类型的脏数据 (解决 AttributeError: 'str' object has no attribute 'get') ✨✨✨
+                SERVERS_CACHE = [s for s in raw_data if isinstance(s, dict)]
             logger.info(f"✅ 加载服务器配置: {len(SERVERS_CACHE)} 个")
         except: SERVERS_CACHE = []
     
@@ -4977,7 +4980,11 @@ def render_sidebar_content():
         if custom_groups:
             ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-4 mb-2 px-2 uppercase tracking-wider')
             for tag_group in custom_groups:
-                tag_servers = [s for s in SERVERS_CACHE if tag_group in s.get('tags', []) or s.get('group') == tag_group]
+                # ✨✨✨ 修复：增加类型检查，防止因脏数据导致网页打不开 ✨✨✨
+                tag_servers = [
+                    s for s in SERVERS_CACHE 
+                    if isinstance(s, dict) and (tag_group in s.get('tags', []) or s.get('group') == tag_group)
+                ]
                 try: tag_servers.sort(key=smart_sort_key)
                 except: tag_servers.sort(key=lambda x: x.get('name', ''))
 
