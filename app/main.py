@@ -4927,7 +4927,7 @@ def render_sidebar_content():
     # --- 1. 顶部固定区域 (带水印) ---
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0 relative overflow-hidden'):
         
-        # ✨ 水印：位于右上角，小龙女她爸背后 ✨
+        # ✨ 水印：位于右上角 ✨
         ui.label('X-Fusion').classes(
             'absolute top-2 right-6 text-[3rem] font-black text-slate-300 '
             'opacity-20 pointer-events-none -rotate-12 select-none z-0 tracking-tighter leading-tight'
@@ -4935,7 +4935,7 @@ def render_sidebar_content():
 
         # ✨✨✨ [修改] 艺术字标题 ✨✨✨
         # 使用 bg-clip-text 实现渐变色文字效果
-        ui.label('小龙女她爸').classes(
+        ui.label('X-Fusion Panel').classes(
             'text-2xl font-black mb-4 z-10 relative '
             'bg-gradient-to-r from-blue-600 via-purple-600 to-pink-500 bg-clip-text text-transparent '
             'tracking-wide drop-shadow-sm'
