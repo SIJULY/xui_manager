@@ -305,17 +305,52 @@ def load_global_key():
 def save_global_key(content):
     with open(GLOBAL_SSH_KEY_FILE, 'w') as f: f.write(content)
 
+# ================= 全局设置弹窗 (修复版：增加主控端地址) =================
 def open_global_settings_dialog():
-    with ui.dialog() as d, ui.card().classes('w-full max-w-2xl'):
-        ui.label('🔐 全局 SSH 密钥设置').classes('text-lg font-bold')
-        ui.label('当服务器未单独配置密钥时，将默认使用此私钥连接。').classes('text-xs text-gray-400')
-        key_input = ui.textarea(placeholder='-----BEGIN OPENSSH PRIVATE KEY-----', value=load_global_key()).classes('w-full h-64 font-mono text-xs').props('outlined')
-        ui.button('保存全局密钥', on_click=lambda: [save_global_key(key_input.value), d.close(), safe_notify('全局密钥已保存', 'positive')]).classes('w-full bg-slate-900 text-white')
+    with ui.dialog() as d, ui.card().classes('w-full max-w-2xl p-6 flex flex-col gap-4'):
+        with ui.row().classes('justify-between items-center w-full border-b pb-2'):
+            ui.label('⚙️ 全局系统设置').classes('text-xl font-bold')
+            ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
+        
+        # 1. 主控端地址 (核心修复)
+        with ui.column().classes('w-full bg-blue-50 p-4 rounded-lg'):
+            ui.label('📡 主控端外部地址 (重要)').classes('text-sm font-bold text-blue-900')
+            ui.label('用于让远程节点的探针 Agent 知道向哪里推送数据。').classes('text-xs text-blue-700 mb-1')
+            ui.label('请填写: http://你的公网IP:8080 或 https://你的域名').classes('text-xs text-gray-400 mb-2')
+            
+            # 读取配置，默认为空或 Docker名
+            default_url = ADMIN_CONFIG.get('manager_base_url', 'http://xui-manager:8080')
+            manager_url_input = ui.input(value=default_url, placeholder='http://1.2.3.4:8080').classes('w-full bg-white').props('outlined dense')
+
+        # 2. 全局 SSH 密钥
+        with ui.column().classes('w-full mt-2'):
+            ui.label('🔐 全局 SSH 私钥').classes('text-sm font-bold text-gray-700')
+            ui.label('当服务器未单独配置密钥时，默认使用此密钥连接。').classes('text-xs text-gray-400 mb-2')
+            key_input = ui.textarea(placeholder='-----BEGIN OPENSSH PRIVATE KEY-----', value=load_global_key()).classes('w-full font-mono text-xs').props('outlined rows=6')
+
+        async def save_all():
+            # 保存密钥
+            save_global_key(key_input.value)
+            
+            # 保存主控端地址 (去除末尾斜杠)
+            url_val = manager_url_input.value.strip().rstrip('/')
+            if url_val:
+                ADMIN_CONFIG['manager_base_url'] = url_val
+                await save_admin_config()
+                safe_notify(f'✅ 设置已保存 (Agent 推送地址: {url_val})', 'positive')
+            else:
+                safe_notify('主控端地址不能为空', 'warning')
+                return
+
+            d.close()
+
+        ui.button('保存所有设置', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white shadow-lg h-12 mt-2')
     d.open()
     
 # ================= 全局变量区 (新增缓存) =================
 PROBE_DATA_CACHE = {} # ✨全局探针数据缓存 {url: data_dict}
-# ================= 探针安装脚本 (回退稳定版：只读资源，极速安装) =================
+# ================= 探针安装脚本 (新版：被动推送模式) =================
+# 这里的 __MANAGER_URL__ 和 __TOKEN__ 会在安装时被替换
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
 if [ "$(id -u)" -eq 0 ]; then CMD_PREFIX=""; else 
@@ -323,100 +358,99 @@ if [ "$(id -u)" -eq 0 ]; then CMD_PREFIX=""; else
 fi
 $CMD_PREFIX bash -s << "EOF"
     export DEBIAN_FRONTEND=noninteractive
+    
+    # 1. 安装 Python3
     if ! command -v python3 >/dev/null 2>&1; then
         if [ -f /etc/debian_version ]; then apt-get update -y && apt-get install -y python3;
         elif [ -f /etc/redhat-release ]; then yum install -y python3;
         elif [ -f /etc/alpine-release ]; then apk add python3; fi
     fi
 
-    cat > /root/mini_probe.py << 'PYTHON_EOF'
-import http.server, json, subprocess, sys, os, time, socketserver
+    # 2. 写入 Python 推送脚本
+    cat > /root/x_fusion_agent.py << 'PYTHON_EOF'
+import time, json, os, socket, sys
+import urllib.request, urllib.error
 
-PORT = 54322
-TOKEN = "__REPLACE_ME__"
+# 配置参数
+MANAGER_URL = "__MANAGER_URL__/api/probe/push"
+TOKEN = "__TOKEN__"
+SERVER_URL = "__SERVER_URL__" # 用于识别是哪台机器
 
-def get_cpu():
+def get_sys_info():
+    data = {"token": TOKEN, "server_url": SERVER_URL}
     try:
+        # CPU
         with open("/proc/stat") as f: fields = [float(x) for x in f.readline().split()[1:5]]
         t1, i1 = sum(fields), fields[3]
-        time.sleep(0.5)
+        time.sleep(1)
         with open("/proc/stat") as f: fields = [float(x) for x in f.readline().split()[1:5]]
         t2, i2 = sum(fields), fields[3]
-        return round((1 - (i2-i1)/(t2-t1)) * 100, 1)
-    except: return 0.0
+        data["cpu_usage"] = round((1 - (i2-i1)/(t2-t1)) * 100, 1)
+        data["cpu_cores"] = os.cpu_count() or 1
+        
+        # Load
+        with open("/proc/loadavg") as f: data["load_1"] = float(f.read().split()[0])
 
-class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(s):
-        if s.path != "/status?token=" + TOKEN: 
-            s.send_response(403); s.end_headers(); return
+        # Memory
+        with open("/proc/meminfo") as f: lines = f.readlines()
+        m = {}
+        for line in lines[:5]:
+            parts = line.split()
+            if len(parts) >= 2: m[parts[0].rstrip(":")] = int(parts[1])
+        total = m.get("MemTotal", 1); avail = m.get("MemAvailable", m.get("MemFree", 0))
+        data["mem_total"] = round(total / 1024 / 1024, 2)
+        data["mem_usage"] = round(((total - avail) / total) * 100, 1)
+
+        # Disk
+        st = os.statvfs("/")
+        total_d = st.f_blocks * st.f_frsize
+        free_d = st.f_bavail * st.f_frsize
+        data["disk_total"] = round(total_d / 1024 / 1024 / 1024, 2)
+        data["disk_usage"] = round(((total_d - free_d) / total_d) * 100, 1)
+
+        # Uptime
+        with open("/proc/uptime") as f: u = float(f.read().split()[0])
+        dy = int(u // 86400); hr = int((u % 86400) // 3600); mn = int((u % 3600) // 60)
+        data["uptime"] = f"{dy}天 {hr}时 {mn}分"
+        
+    except: pass
+    return data
+
+def push_data():
+    while True:
         try:
-            # 1. CPU
-            cpu_u = get_cpu()
-            try: cores = os.cpu_count() or 1
-            except: cores = 1
-
-            # 2. Load
-            try:
-                with open("/proc/loadavg") as f: l = float(f.read().split()[0])
-            except: l = 0.0
-
-            # 3. Memory
-            mem_u = 0; mem_t = 0
-            try:
-                with open("/proc/meminfo") as f: lines = f.readlines()
-                m = {}
-                for line in lines[:5]:
-                    parts = line.split()
-                    if len(parts) >= 2: m[parts[0].rstrip(":")] = int(parts[1])
-                total_kb = m.get("MemTotal", 1)
-                avail_kb = m.get("MemAvailable", m.get("MemFree", 0))
-                mem_u = round(((total_kb - avail_kb) / total_kb) * 100, 1)
-                mem_t = round(total_kb / 1024 / 1024, 2)
-            except: pass
-
-            # 4. Disk
-            disk_u = 0; disk_t = 0
-            try:
-                out = subprocess.check_output(["df", "-k", "/"]).decode().splitlines()[1].split()
-                total_kb = int(out[1])
-                disk_t = round(total_kb / 1024 / 1024, 2)
-                disk_u = int(out[-2].strip("%"))
-            except: pass
-
-            # 5. Uptime
-            uptime_str = "-"
-            try:
-                with open("/proc/uptime") as f: u = float(f.read().split()[0])
-                dy = int(u // 86400); hr = int((u % 86400) // 3600)
-                uptime_str = f"{dy}d {hr}h"
-            except: pass
-
-            data = {
-                "status": "online",
-                "load": l,
-                "cpu_usage": cpu_u, "cpu_cores": cores,
-                "mem_usage": mem_u, "mem_total": mem_t,
-                "disk_usage": disk_u, "disk_total": disk_t,
-                "uptime": uptime_str
-            }
-            s.send_response(200); s.send_header("Content-Type", "application/json"); s.end_headers()
-            s.wfile.write(json.dumps(data).encode())
-        except: s.send_response(500)
-    def log_message(s,f,*a): pass
+            payload = json.dumps(get_sys_info()).encode("utf-8")
+            req = urllib.request.Request(MANAGER_URL, data=payload, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as r: pass
+        except Exception as e:
+            pass # 静默失败，等待重试
+        time.sleep(3) # 每3秒推送一次
 
 if __name__ == "__main__":
-    try: 
-        socketserver.TCPServer.allow_reuse_address = True
-        http.server.HTTPServer(("0.0.0.0", PORT), H).serve_forever()
-    except: pass
+    push_data()
 PYTHON_EOF
 
-    pkill -f mini_probe.py || true
-    nohup python3 /root/mini_probe.py >/dev/null 2>&1 &
+    # 3. 创建 Systemd 服务 (开机自启)
+    cat > /etc/systemd/system/x-fusion-agent.service << SERVICE_EOF
+[Unit]
+Description=X-Fusion Probe Agent
+After=network.target
 
-    # 简单放行端口
-    if command -v iptables >/dev/null; then iptables -I INPUT -p tcp --dport 54322 -j ACCEPT || true; fi
-    if command -v ufw >/dev/null; then ufw allow 54322/tcp || true; fi
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /root/x_fusion_agent.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    # 4. 启动服务
+    systemctl daemon-reload
+    systemctl enable x-fusion-agent
+    systemctl restart x-fusion-agent
     
     echo "Install sequence completed"
     exit 0
@@ -1158,73 +1192,62 @@ async def silent_refresh_all(is_auto_trigger=False):
  
 # =================  单台安装探针 (智能跳过 + 30秒超时 + 稳定版) =================
 async def install_probe_on_server(server_conf):
-    """给单个服务器安装探针"""
     name = server_conf.get('name', 'Unknown')
     
-    # --- 1. ✨ 智能预检：如果没填 SSH 信息，直接跳过，不报错 ---
+    # 1. 检查 SSH 配置
     auth_type = server_conf.get('ssh_auth_type', '全局密钥')
-    ssh_pwd = server_conf.get('ssh_password', '').strip()
-    ssh_key = server_conf.get('ssh_key', '').strip()
+    if auth_type == '独立密码' and not server_conf.get('ssh_password'): return False
+    if auth_type == '独立密钥' and not server_conf.get('ssh_key'): return False
     
-    # 情况 A: 选了独立密码，但没填 -> 跳过
-    if auth_type == '独立密码' and not ssh_pwd:
-        logger.info(f"⏭️ [AutoInstall] {name} (纯面板模式) 跳过探针安装")
-        return False
-
-    # 情况 B: 选了独立密钥，但没填 -> 跳过
-    if auth_type == '独立密钥' and not ssh_key:
-        logger.info(f"⏭️ [AutoInstall] {name} (无私钥) 跳过探针安装")
-        return False
-        
-    # 情况 C: 选了全局密钥，但全局文件为空 -> 跳过 (静默)
-    if auth_type == '全局密钥' and not load_global_key().strip():
-        return False
-    # -----------------------------------------------------
-
-    # 2. 准备脚本与 Token
+    # 2. 准备脚本参数
     my_token = ADMIN_CONFIG.get('probe_token', 'default_token')
-    real_script = PROBE_INSTALL_SCRIPT.replace("__REPLACE_ME__", my_token)
     
-    # 3. 定义实际执行的同步函数
+    # ✨✨✨ 获取主控端地址 ✨✨✨
+    # 这是一个难点，因为主控端不知道自己的外部 URL。
+    # 这里我们先尝试用 Javascript 获取浏览器地址栏的 Origin，但这是一个后台任务，没法直接跑 JS。
+    # 方案：默认使用当前服务器在 SERVERS_CACHE 里配置的 URL 的反向？不行。
+    # 方案：强制读取 ADMIN_CONFIG 里的 'manager_url'，如果没有，默认告知用户去配置。
+    # 简化方案：假设主控端和节点在同一内网或公网可达，这里暂用一个占位符，实际使用建议在设置里加一个 "主控端外部地址"
+    
+    # ⚠️ 临时方案：硬编码或从 request 获取（如果是在请求上下文中）。
+    # 最好的方式是让用户在全局设置里填一次。如果没有填，我们尝试根据当前环境猜测。
+    manager_url = ADMIN_CONFIG.get('manager_base_url', 'http://xui-manager:8080') 
+    
+    # 替换脚本中的变量
+    real_script = PROBE_INSTALL_SCRIPT \
+        .replace("__MANAGER_URL__", manager_url) \
+        .replace("__TOKEN__", my_token) \
+        .replace("__SERVER_URL__", server_conf['url'])
+
+    # 3. 执行安装 (保持原有 Paramiko 逻辑)
     def _do_install():
         client = None
         try:
-            # 建立 SSH 连接
             client, msg = get_ssh_client_sync(server_conf)
-            if not client: return False, f"连接失败: {msg}"
+            if not client: return False, f"SSH连接失败: {msg}"
             
-            # ✨ 关键优化：执行命令设置 30秒 超时
-            # 如果服务器卡顿超过 30秒，直接断开，把机会让给下一个
-            stdin, stdout, stderr = client.exec_command(real_script, timeout=30)
+            # 执行安装，超时 60秒 (安装 Python 可能慢)
+            stdin, stdout, stderr = client.exec_command(real_script, timeout=60)
+            exit_status = stdout.channel.recv_exit_status()
+            out_log = stdout.read().decode('utf-8', errors='ignore')
             
-            # 获取退出状态
-            exit_status = stdout.channel.recv_exit_status() 
-            out_log = stdout.read().decode('utf-8', errors='ignore').strip()
-            
-            # 判断成功标志
-            if "Install sequence completed" in out_log or exit_status == 0:
-                return True, "安装成功"
-            
-            return False, f"未完成 (Exit {exit_status})"
-            
+            if exit_status == 0: return True, "Agent 安装成功并启动"
+            return False, f"安装脚本错误 (Exit {exit_status})"
         except Exception as e:
-            return False, f"超时或异常: {str(e)}"
+            return False, f"异常: {str(e)}"
         finally:
-            if client:
-                try: client.close()
-                except: pass
+            if client: client.close()
 
-    # 4. 在后台线程池执行 (不阻塞主界面)
     success, msg = await run.io_bound(_do_install)
     
     if success:
-        logger.info(f"✅ [AutoInstall] {name} 安装成功")
+        server_conf['probe_installed'] = True # 标记已安装
+        await save_servers() # 保存状态
+        logger.info(f"✅ [Push Agent] {name} 部署成功")
     else:
-        # 失败使用 warning 级别，避免红色的 ERROR 刷屏吓人
-        logger.warning(f"⚠️ [AutoInstall] {name} 跳过/失败: {msg}")
+        logger.warning(f"⚠️ [Push Agent] {name} 部署失败: {msg}")
         
     return success
-        
 
 # ================= 批量安装所有探针  =================
 async def batch_install_all_probes():
@@ -1258,43 +1281,47 @@ async def batch_install_all_probes():
     
     safe_notify("✅ 所有探针安装/更新任务已完成", "positive")
     
-# =================  获取服务器状态 (带缓存 + 移除OS) =================
+# =================  获取服务器状态 (混合模式：被动推送 + 主动警告) =================
 async def get_server_status(server_conf):
-    """仅通过 HTTP 探针获取状态 (写入全局缓存版)"""
-    def _try_http_probe():
-        try:
-            raw = server_conf['url']
-            host = raw.split('://')[-1].split(':')[0]
-            token = ADMIN_CONFIG.get('probe_token', '')
-            target_url = f"http://{host}:54322/status?token={token}"
-            
-            with requests.get(target_url, timeout=3, proxies={"http": None, "https": None}) as r:
-                if r.status_code == 200:
-                    data = r.json()
-                    
-                    data['cpu_usage'] = float(data.get('cpu_usage', 0))
-                    data['mem_usage'] = float(data.get('mem_usage', 0))
-                    data['disk_usage'] = float(data.get('disk_usage', 0))
-                    data['load_1'] = data.get('load', 0)
-                    
-                    data.setdefault('cpu_cores', 1)
-                    data.setdefault('mem_total', 0)
-                    data.setdefault('disk_total', 0)
-                    
-                    up_str = str(data.get('uptime', ''))
-                    up_str = up_str.replace('d', '天').replace('h', '时').replace('m', '分')
-                    data['uptime'] = up_str
-                    
-                    # ✨ 依然写入缓存，保证秒开
-                    PROBE_DATA_CACHE[raw] = data
-                    
-                    return data
-        except: pass
-        return None 
+    raw_url = server_conf['url']
+    
+    # --- 策略 A: 检查是否有被动推送的缓存数据 ---
+    # 如果服务器标记为 "已安装探针" 或 缓存里有数据
+    if server_conf.get('probe_installed', False) or raw_url in PROBE_DATA_CACHE:
+        cache = PROBE_DATA_CACHE.get(raw_url)
+        if cache:
+            # 检查数据是否过期 (超过 15 秒没推送视为离线)
+            last_up = cache.get('last_updated', 0)
+            if time.time() - last_up < 15:
+                return cache # 返回健康的缓存数据
+            else:
+                return {'status': 'offline', 'msg': '探针离线 (超时)'}
+        
+    # --- 策略 B: 纯 X-UI 模式 (未安装探针) ---
+    # 这里我们不再去 ping 54322 端口，而是直接返回一个警告状态
+    # 但为了让界面不仅显示警告，还能显示一点点信息，我们可以尝试调用 X-UI 面板的 status API (如果面板支持)
+    
+    try:
+        # 尝试通过面板 API 获取少量信息 (CPU/Mem)，通常 X-UI 只有简略信息
+        mgr = get_manager(server_conf)
+        panel_stats = await run.io_bound(mgr.get_server_status)
+        
+        if panel_stats:
+            # 构造一个模拟的探针数据，但在 UI 上会通过状态区分
+            return {
+                'status': 'warning', # 特殊状态
+                'msg': '⚠️ 未安装探针',
+                'cpu_usage': float(panel_stats.get('cpu', 0)) * 100, # 面板API通常返回0-1小数
+                'mem_usage': float(panel_stats.get('mem', 0)) * 100,
+                'uptime': f"{int(panel_stats.get('uptime', 0)/86400)}天",
+                'disk_usage': 0, # 面板API通常不准
+                # 标记这些数据不可信/简略
+                '_is_lite': True 
+            }
+    except: pass
 
-    http_result = await run.io_bound(_try_http_probe)
-    if http_result: return http_result
-    return {'status': 'offline', 'msg': '探针未连接'}
+    # --- 策略 C: 彻底连不上 ---
+    return {'status': 'offline', 'msg': '无信号'}
 
 
 # ================= 使用 URL 安全的 Base64 =================
@@ -1480,6 +1507,38 @@ async def batch_ping_nodes(nodes, raw_host):
     if tasks:
         await asyncio.gather(*tasks)
 
+
+# ================= 探针数据被动接收接口 =================
+@app.post('/api/probe/push')
+async def probe_push_data(request: Request):
+    try:
+        data = await request.json()
+        token = data.get('token')
+        server_url = data.get('server_url')
+        
+        # 1. 校验 Token
+        correct_token = ADMIN_CONFIG.get('probe_token')
+        if not token or token != correct_token:
+            return Response("Invalid Token", 403)
+            
+        # 2. 校验 Server URL 是否存在于我们的缓存中
+        # (为了防止恶意数据注入，确保推送来源是已知的服务器)
+        target_server = next((s for s in SERVERS_CACHE if s['url'] == server_url), None)
+        
+        if target_server:
+            # 标记该服务器已安装探针（自动激活状态）
+            if not target_server.get('probe_installed'):
+                 target_server['probe_installed'] = True
+                 # 注意：这里不立即 save_servers 防止频繁 IO，依靠内存状态即可
+            
+            # 3. 写入缓存 (添加最后更新时间戳)
+            data['status'] = 'online'
+            data['last_updated'] = time.time()
+            PROBE_DATA_CACHE[server_url] = data
+            
+        return Response("OK", 200)
+    except Exception as e:
+        return Response("Error", 500)
 
 # ================= 接口处理 =================
 @app.get('/sub/{token}')
@@ -2536,99 +2595,19 @@ async def render_probe_page():
     asyncio.create_task(refresh_task())
     refresh_timer = ui.timer(15.0, refresh_task)
     
-# =================刷新逻辑 =================
-async def update_probe_stats(card_refs, is_manual=False):
-    # 如果页面已销毁，停止
-    if CURRENT_VIEW_STATE.get('scope') != 'PROBE': return
-
-    sema = asyncio.Semaphore(15)
-
-    async def check_one(srv):
-        url = srv['url']
-        refs = card_refs.get(url)
-        if not refs: return
-
-        async with sema:
-            res = await get_server_status(srv)
-            if not refs['status_badge'].client: return # 页面元素已销毁
-
-            if res and res.get('status') == 'online':
-                # 状态标签
-                refs['status_badge'].set_text('运行中')
-                refs['status_badge'].classes(replace='bg-green-100 text-green-600', remove='bg-gray-100 bg-red-100 text-gray-500 text-red-500')
-                
-                # --- A. 硬件参数填充 (修复 -- GB 问题) ---
-                if 'cpu_cores' in res: refs['cpu_cores'].set_text(f"{res['cpu_cores']} Cores")
-                if 'mem_total' in res: refs['mem_total'].set_text(f"{res['mem_total']} GB")
-                if 'disk_total' in res: refs['disk_total'].set_text(f"{res['disk_total']} GB")
-
-                # --- B. 进度条更新 (修复 0% 问题) ---
-                # CPU
-                cpu = float(res.get('cpu', 0))
-                refs['cpu_bar'].set_value(cpu / 100.0)
-                refs['cpu_val'].set_text(f'{int(cpu)}%')
-                
-                # MEM (使用 Hex 颜色代码，避免 Quasar 颜色名冲突)
-                mem = float(res.get('mem', 0))
-                refs['mem_bar'].set_value(mem / 100.0)
-                mem_color = '#ef4444' if mem > 90 else ('#f97316' if mem > 75 else '#22c55e') # Red/Orange/Green
-                refs['mem_bar'].props(f'color="{mem_color}"') # 强制使用引号包裹 hex
-                refs['mem_val'].set_text(f'{int(mem)}%')
-
-                # DISK
-                disk = float(res.get('disk', 0))
-                refs['disk_bar'].set_value(disk / 100.0)
-                disk_color = '#ef4444' if disk > 90 else '#a855f7' # Red / Purple
-                refs['disk_bar'].props(f'color="{disk_color}"')
-                refs['disk_val'].set_text(f'{int(disk)}%')
-
-                # --- C. 在线时间 (修复中文闪烁) ---
-                # 强制替换英文单位为中文
-                uptime_raw = str(res.get('uptime', ''))
-                uptime_cn = uptime_raw.replace('d', '天').replace('h', '时').replace('m', '分')
-                refs['uptime_val'].set_text(uptime_cn)
-                
-                refs['load_val'].set_text(str(res.get('load', 0)))
-
-            else:
-                # 离线处理
-                refs['status_badge'].set_text('已离线')
-                refs['status_badge'].classes(replace='bg-red-100 text-red-500', remove='bg-green-100 bg-gray-100')
-                refs['cpu_bar'].set_value(0); refs['mem_bar'].set_value(0); refs['disk_bar'].set_value(0)
-
-    tasks = [check_one(s) for s in SERVERS_CACHE]
-    await asyncio.gather(*tasks)
-    
-    if is_manual: safe_notify('✅ 刷新完毕', 'positive')
 
         
-# ================= 批量刷新卡片数据 (无闪烁/静默更新版) =================
-# 全局锁，防止定时器重叠执行
-PROBE_LOCK = False
-
+# ================= 批量刷新卡片数据 (监控墙) =================
 async def update_probe_stats(card_refs, is_manual=False):
     global PROBE_LOCK
-    
-    # 1. 只有当页面还在显示时才执行
+    # 只有当在 PROBE 页面时才运行
     if CURRENT_VIEW_STATE.get('scope') != 'PROBE': return
-
-    # 2. 如果正在运行，且不是手动强制刷新，则跳过本次定时任务
-    if PROBE_LOCK and not is_manual:
-        # logger.info("⏳ 上次探针任务未完成，跳过本次定时刷新")
-        return
+    if PROBE_LOCK and not is_manual: return
 
     PROBE_LOCK = True
-    
-    # 仅手动点击时，在右上角给一个轻微提示，但不改动卡片状态
-    if is_manual:
-        safe_notify('正在刷新服务器状态...', 'ongoing')
+    if is_manual: safe_notify('正在刷新服务器状态...', 'ongoing')
 
-    # ❌❌❌ [已删除] 不再将所有卡片重置为橙色，保持现有状态直到新数据到来 ❌❌❌
-    # for refs in card_refs.values():
-    #     try: refs['badge'].props('color=orange') ...
-    #     except: pass
-
-    # 3. 定义并发限制
+    # 限制并发 (主要保护纯面板的 HTTP 请求)
     sema = asyncio.Semaphore(15) 
 
     async def check_one(srv):
@@ -2637,66 +2616,75 @@ async def update_probe_stats(card_refs, is_manual=False):
         if not refs: return 
 
         async with sema:
-            # 获取数据 (优先HTTP，回退SSH)
+            # ✨ 调用全局混合获取
             res = await get_server_status(srv)
             
-            # --- 更新 UI ---
             try:
-                # 再次检查页面元素是否存在
-                if refs['badge'].is_deleted: return
+                if refs['status_badge'].is_deleted: return
 
-                if res and res['status'] == 'online':
-                    # === 在线处理 ===
-                    # 只有当之前不是 Online 或者由红变绿时，这里才会产生视觉变化
-                    # 如果本来就是绿的，用户感觉不到闪烁，只会看到数字跳动
-                    refs['badge'].set_text('Online')
-                    refs['badge'].props('color=green')
+                if res and res.get('status') == 'online':
+                    # === 在线 (Root 探针) ===
+                    refs['status_badge'].set_text('运行中')
+                    refs['status_badge'].classes(replace='bg-green-100 text-green-600', remove='bg-gray-100 bg-red-100 bg-orange-100 text-orange-600')
                     
-                    # 更新数值
-                    try:
-                        load_val = float(res['load'])
-                        refs['cpu_val'].set_text(f"{load_val}")
-                        load_pct = min(load_val * 20, 100)
-                        refs['cpu_bar'].set_value(load_pct / 100)
-                        refs['cpu_bar'].props(f'color={"red" if load_val > 4 else "blue"}')
-                    except: pass
+                    # 硬件数据
+                    if 'cpu_cores' in res: refs['cpu_cores'].set_text(f"{res['cpu_cores']} Cores")
+                    if 'mem_total' in res: refs['mem_total'].set_text(f"{res['mem_total']} GB")
+                    if 'disk_total' in res: refs['disk_total'].set_text(f"{res['disk_total']} GB")
 
-                    mem_p = res['mem']
-                    refs['mem_bar'].set_value(mem_p / 100)
-                    refs['mem_bar'].props(f'color={"red" if mem_p > 90 else ("orange" if mem_p > 75 else "green")}')
-                    refs['mem_val'].set_text(f"{int(mem_p)}%")
+                    # 进度条
+                    cpu = float(res.get('cpu_usage', 0))
+                    refs['cpu_bar'].set_value(cpu / 100.0)
+                    refs['cpu_val'].set_text(f'{int(cpu)}%')
+                    refs['cpu_bar'].props('color=blue')
+                    
+                    mem = float(res.get('mem_usage', 0))
+                    refs['mem_bar'].set_value(mem / 100.0)
+                    mem_color = '#ef4444' if mem > 90 else ('#f97316' if mem > 75 else '#22c55e')
+                    refs['mem_bar'].props(f'color="{mem_color}"')
+                    refs['mem_val'].set_text(f'{int(mem)}%')
 
-                    disk_p = res['disk']
-                    refs['disk_bar'].set_value(disk_p / 100)
-                    refs['disk_bar'].props(f'color={"red" if disk_p > 90 else "purple"}')
-                    refs['disk_val'].set_text(f"{int(disk_p)}%")
+                    disk = float(res.get('disk_usage', 0))
+                    refs['disk_bar'].set_value(disk / 100.0)
+                    refs['disk_bar'].props('color=purple')
+                    refs['disk_val'].set_text(f'{int(disk)}%')
 
-                    refs['uptime'].set_text(res['uptime'])
-                    refs['load'].set_text(f"Load: {res['load']}")
+                    refs['uptime_val'].set_text(str(res.get('uptime', '')))
+
+                elif res and res.get('status') == 'warning':
+                    # === 警告 (纯 X-UI 面板) ===
+                    refs['status_badge'].set_text('未安装探针')
+                    # 橙色样式
+                    refs['status_badge'].classes(replace='bg-orange-100 text-orange-600', remove='bg-green-100 bg-red-100 bg-gray-100')
+                    
+                    # 仅显示 CPU/内存 (面板通常只给这两个)
+                    cpu = float(res.get('cpu_usage', 0))
+                    refs['cpu_bar'].set_value(cpu / 100.0)
+                    refs['cpu_val'].set_text(f'{int(cpu)}%')
+                    refs['cpu_bar'].props('color=orange') # 橙色警告条
+                    
+                    mem = float(res.get('mem_usage', 0))
+                    refs['mem_bar'].set_value(mem / 100.0)
+                    refs['mem_val'].set_text(f'{int(mem)}%')
+                    refs['mem_bar'].props('color=orange')
+
+                    # 硬盘/负载置空
+                    refs['disk_bar'].set_value(0); refs['disk_val'].set_text('--')
+                    refs['load_val'].set_text('--')
+                    refs['uptime_val'].set_text(str(res.get('uptime', '-')))
 
                 else:
-                    # === 离线处理 ===
-                    # 只有真的检测失败了，才变红
-                    refs['badge'].set_text('Offline')
-                    refs['badge'].props('color=red')
+                    # === 离线 ===
+                    refs['status_badge'].set_text('已离线')
+                    refs['status_badge'].classes(replace='bg-red-100 text-red-500', remove='bg-green-100 bg-orange-100 bg-gray-100')
+                    refs['cpu_bar'].set_value(0); refs['mem_bar'].set_value(0); refs['disk_bar'].set_value(0)
                     
-                    # 离线时，可以选择清空进度条，或者保持最后一次的数值
-                    # 这里选择清零，直观显示断连
-                    refs['cpu_bar'].set_value(0)
-                    refs['mem_bar'].set_value(0)
-                    refs['disk_bar'].set_value(0)
-                    
-            except: 
-                pass
+            except: pass
 
-    # 4. 执行任务
-    try:
-        tasks = [check_one(s) for s in SERVERS_CACHE]
-        await asyncio.gather(*tasks)
-    finally:
-        PROBE_LOCK = False # 释放锁
-        if is_manual:
-            safe_notify('✅ 状态刷新完毕', 'positive')
+    tasks = [check_one(s) for s in SERVERS_CACHE]
+    await asyncio.gather(*tasks)
+    PROBE_LOCK = False 
+    if is_manual: safe_notify('✅ 状态刷新完毕', 'positive')
 
 
     
@@ -3072,6 +3060,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 # ================= 小巧卡片式弹窗 (带切换功能 & 自动探针安装) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
+    # 如果是编辑模式，读取现有配置；否则初始化为空字典
     data = SERVERS_CACHE[idx] if is_edit else {}
     
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm p-5 flex flex-col gap-4'):
@@ -3082,16 +3071,17 @@ async def open_server_dialog(idx=None):
             tabs = ui.tabs().classes('text-blue-600')
             with tabs:
                 t_xui = ui.tab('面板', icon='settings')
-                t_ssh = ui.tab('SSH', icon='terminal')
+                t_ssh = ui.tab('SSH / 探针', icon='terminal') # 更新标签名
 
-        # 2. 变量绑定
-        # 注意：这里的 new_value_mode='add-unique' 允许用户手动输入新分组
+        # 2. 通用字段 (名称/分组)
+        # new_value_mode='add-unique' 允许用户手动输入新分组
         name = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
         group = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('w-full').props('outlined dense')
         
         # 3. 内容面板区域
         with ui.tab_panels(tabs, value=t_xui).classes('w-full animated fadeIn'):
-            # --- 面板设置 ---
+            
+            # --- Tab 1: 面板设置 ---
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 url = ui.input(value=data.get('url',''), label='面板 URL (http://ip:port)').classes('w-full').props('outlined dense')
                 with ui.row().classes('w-full gap-2'):
@@ -3099,22 +3089,36 @@ async def open_server_dialog(idx=None):
                     pwd = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
                 prefix = ui.input(value=data.get('prefix',''), label='API 前缀 (选填)').classes('w-full').props('outlined dense')
 
-            # --- SSH 设置 ---
+            # --- Tab 2: SSH 与 探针设置 ---
             with ui.tab_panel(t_ssh).classes('p-0 flex flex-col gap-3'):
-                with ui.row().classes('w-full gap-2'):
-                    ssh_user = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
-                    ssh_port = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
                 
-                auth_type = ui.select(['全局密钥', '独立密码', '独立密钥'], value=data.get('ssh_auth_type', '全局密钥'), label='认证方式').classes('w-full').props('outlined dense options-dense')
-                
-                # 显隐控制
-                ssh_pwd = ui.input(label='SSH 密码', password=True, value=data.get('ssh_password','')).classes('w-full').props('outlined dense')
-                ssh_pwd.bind_visibility_from(auth_type, 'value', value='独立密码')
-                
-                ssh_key = ui.textarea(label='SSH 私钥', value=data.get('ssh_key','')).classes('w-full').props('outlined dense rows=3 input-class=font-mono text-xs')
-                ssh_key.bind_visibility_from(auth_type, 'value', value='独立密钥')
-                
-                ui.label('✅ 将自动使用全局私钥连接').bind_visibility_from(auth_type, 'value', value='全局密钥').classes('text-green-600 text-xs text-center mt-2')
+                # ✨✨✨ 核心开关：是否安装探针 (决定是否进行 SSH 连接) ✨✨✨
+                # 如果是编辑模式，读取已有状态；如果是新建，默认 False
+                probe_chk = ui.checkbox('启用 Root 探针 (自动安装)', value=data.get('probe_installed', False))
+                probe_chk.classes('text-sm font-bold text-slate-700')
+                ui.label('勾选后将尝试 SSH 连接并写入推送脚本。不勾选则仅添加面板。').classes('text-[10px] text-gray-400 ml-8 -mt-2 leading-tight')
+
+                ui.separator().classes('my-1')
+
+                # SSH 配置输入框
+                with ui.column().classes('w-full gap-3'):
+                    # 绑定显隐：虽然数据会保存，但视觉上可以让用户知道如果不勾选这些是非必要的
+                    # 这里选择始终显示，方便用户预填数据，但你可以根据需求加上 .bind_visibility_from(probe_chk, 'value')
+                    
+                    with ui.row().classes('w-full gap-2'):
+                        ssh_user = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
+                        ssh_port = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
+                    
+                    auth_type = ui.select(['全局密钥', '独立密码', '独立密钥'], value=data.get('ssh_auth_type', '全局密钥'), label='认证方式').classes('w-full').props('outlined dense options-dense')
+                    
+                    # 显隐控制：根据认证方式显示密码或密钥框
+                    ssh_pwd = ui.input(label='SSH 密码', password=True, value=data.get('ssh_password','')).classes('w-full').props('outlined dense')
+                    ssh_pwd.bind_visibility_from(auth_type, 'value', value='独立密码')
+                    
+                    ssh_key = ui.textarea(label='SSH 私钥', value=data.get('ssh_key','')).classes('w-full').props('outlined dense rows=3 input-class=font-mono text-xs')
+                    ssh_key.bind_visibility_from(auth_type, 'value', value='独立密钥')
+                    
+                    ui.label('✅ 将自动使用全局私钥连接').bind_visibility_from(auth_type, 'value', value='全局密钥').classes('text-green-600 text-xs text-center mt-2')
 
         # 4. 底部按钮
         with ui.row().classes('w-full justify-end gap-2 mt-2'):
@@ -3130,7 +3134,7 @@ async def open_server_dialog(idx=None):
                     
                 ui.button('删除', on_click=delete, color='red').props('flat dense')
 
-            # --- 保存按钮 ---
+            # --- 保存按钮 (核心逻辑修改) ---
             async def save():
                 # A. 自动命名逻辑 (如果用户没填名字)
                 final_name = name.value.strip()
@@ -3152,13 +3156,25 @@ async def open_server_dialog(idx=None):
                     'ssh_user': ssh_user.value,
                     'ssh_auth_type': auth_type.value, 
                     'ssh_password': ssh_pwd.value, 
-                    'ssh_key': ssh_key.value
+                    'ssh_key': ssh_key.value,
+                    # ✨ 保存探针安装状态 (True/False)
+                    'probe_installed': probe_chk.value 
                 }
                 
-                # C. 调用通用保存函数 (处理所有脏活累活)
+                # C. 调用通用保存函数 (处理查重、GeoIP修正等通用逻辑)
                 success = await save_server_config(server_data, is_add=not is_edit, idx=idx)
                 
+                # D. ✨✨✨ 根据勾选状态决定是否发起 SSH 连接 ✨✨✨
                 if success:
+                    if probe_chk.value:
+                        # 情况 1: 用户勾选了探针 -> 触发 SSH 连接并写入 Agent 脚本
+                        safe_notify(f"🚀 正在后台连接 SSH 并推送 Agent...", "ongoing")
+                        asyncio.create_task(install_probe_on_server(server_data))
+                    else:
+                        # 情况 2: 用户未勾选 -> 仅保存数据，不连接 SSH
+                        # 此时探针状态为 "未安装"，UI 将显示 "⚠️ 未安装探针"
+                        safe_notify(f"✅ 面板配置已保存 (无 SSH 连接)", "positive")
+                        
                     d.close()
             
             ui.button('保存配置', on_click=save).classes('bg-slate-900 text-white shadow-lg')
@@ -3502,147 +3518,131 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px
 # ✨✨✨ 新增：单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
-# =================  刷新逻辑 (防闪烁 + 静默后台更新 + 令牌防冲突) =================
+
+# =================  刷新逻辑 (混合双轨制：优先渲染缓存 + 后台补拉纯面板) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
-    # 1. 安全检查 UI 上下文
     try: client = ui.context.client
     except: return 
 
     global CURRENT_VIEW_STATE
-    
-    # ✨✨✨ [新增] 生成本次操作的唯一令牌 (时间戳) ✨✨✨
     import time
     current_token = time.time()
     
-    # 更新全局状态（包含令牌）
+    # 更新全局视图状态
     if not force_refresh:
         CURRENT_VIEW_STATE['scope'] = scope
         CURRENT_VIEW_STATE['data'] = data
     
-    # 无论是否强制刷新，都要更新令牌，标记这是最新的一次操作
     CURRENT_VIEW_STATE['render_token'] = current_token
-
-    # 记录任务开始时的视图状态
-    task_start_scope = scope
-    task_start_data = data
-
-    with client: 
-        if (not content_container or len(list(content_container)) == 0) and not force_refresh:
-            content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
-            show_loading(content_container)
     
-    # --- A. 执行数据同步 ---
-    sync_targets = []
-    if force_refresh:
-        # ... (同步逻辑保持不变，为了节省篇幅省略，逻辑与之前一致) ...
-        try:
-            if scope == 'ALL': sync_targets = list(SERVERS_CACHE)
-            elif scope == 'TAG': sync_targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
-            elif scope == 'COUNTRY':
-                for s in SERVERS_CACHE:
-                    saved = s.get('group')
-                    real = saved if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区'] else detect_country_group(s.get('name', ''))
-                    if real == data: sync_targets.append(s)
-            elif scope == 'SINGLE':
-                 if data in SERVERS_CACHE: sync_targets = [data]
-        except: pass
-        
-        if sync_targets:
-            # ✨ 检查令牌：如果在同步准备期间用户切走了，直接取消同步（节省资源）
-            if CURRENT_VIEW_STATE.get('render_token') != current_token: return
+    # 准备目标服务器列表
+    targets = []
+    try:
+        if scope == 'ALL': 
+            targets = list(SERVERS_CACHE)
+        elif scope == 'TAG': 
+            targets = [s for s in SERVERS_CACHE if data in s.get('tags', [])]
+        elif scope == 'COUNTRY':
+            for s in SERVERS_CACHE:
+                saved = s.get('group')
+                real = saved if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区'] else detect_country_group(s.get('name', ''))
+                if real == data: targets.append(s)
+        elif scope == 'SINGLE':
+             if data in SERVERS_CACHE: targets = [data]
+    except: pass
 
-            safe_notify(f'正在后台同步 {len(sync_targets)} 个服务器...')
-            tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in sync_targets]
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    # --- B. 渲染界面 (核心修改) ---
-    async def _render():
-        # ✨✨✨ [第一道防线] 任务跑完回来，先检查令牌 ✨✨✨
-        # 如果全局令牌变了，说明在这个任务等待期间，用户又点了别的地方
-        # 此时必须直接退出，绝对不能去碰 UI
-        if CURRENT_VIEW_STATE.get('render_token') != current_token:
-            # logger.info("渲染被拦截：令牌过期")
-            return
-
-        # 1. 获取用户现在真正所在的页面
-        current_real_scope = CURRENT_VIEW_STATE['scope']
-        current_real_data = CURRENT_VIEW_STATE['data']
-
-        # 2. 如果是后台任务，检查是否还在原页面 (防跳转逻辑)
-        if force_refresh:
-            if current_real_scope != task_start_scope or current_real_data != task_start_data:
-                return
-
-        # 3. 准备数据
-        targets = []
-        title = ""
-        is_group_view = False
-        show_ping = False
-        
-        try:
-            # ... (数据准备逻辑保持不变) ...
-            if current_real_scope == 'ALL':
-                targets = list(SERVERS_CACHE)
-                title = f"🌍 所有服务器 ({len(targets)})"
-            elif current_real_scope == 'TAG':
-                targets = [s for s in SERVERS_CACHE if current_real_data in s.get('tags', [])]
-                title = f"🏷️ 自定义分组: {current_real_data} ({len(targets)})"
-                is_group_view = True
-            elif current_real_scope == 'COUNTRY':
-                targets = []
-                for s in SERVERS_CACHE:
-                    saved = s.get('group')
-                    real_g = saved if saved and saved not in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区'] else detect_country_group(s.get('name', ''))
-                    if real_g == current_real_data: targets.append(s)
-                title = f"🏳️ 区域: {current_real_data} ({len(targets)})"
-                is_group_view = True
-                show_ping = True 
-            elif current_real_scope == 'SINGLE':
-                if current_real_data in SERVERS_CACHE:
-                    targets = [current_real_data]
-                    raw_url = current_real_data['url']; parsed = urlparse(raw_url if '://' in raw_url else f'http://{raw_url}')
-                    host_display = parsed.hostname or raw_url
-                    title = f"🖥️ {current_real_data['name']} ({host_display})"
-                else:
-                    current_real_scope = 'ALL'; targets = list(SERVERS_CACHE); title = f"🌍 所有服务器 ({len(targets)})"
-
-            if current_real_scope != 'SINGLE':
-                targets.sort(key=smart_sort_key)
-                
-        except Exception as e:
-            logger.error(f"Render Error: {e}")
-            targets = []
-
-        # ✨✨✨ [第二道防线] 数据准备好了，准备画图前，再查一次令牌 ✨✨✨
+    # --- 1. 立即渲染界面 (基于当前缓存，实现秒开) ---
+    async def _render_ui():
+        # 令牌校验：防止用户手快切走了
         if CURRENT_VIEW_STATE.get('render_token') != current_token: return
-
+        
         with client:
+            if not content_container: return
             content_container.clear()
+            
+            # 恢复容器样式
+            content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
+            
             with content_container:
-                # 顶部栏
+                # 标题栏逻辑
+                title = ""
+                is_group_view = False
+                show_ping = False
+                
+                if scope == 'ALL': title = f"🌍 所有服务器 ({len(targets)})"
+                elif scope == 'TAG': 
+                    title = f"🏷️ 自定义分组: {data} ({len(targets)})"
+                    is_group_view = True
+                elif scope == 'COUNTRY':
+                    title = f"🏳️ 区域: {data} ({len(targets)})"
+                    is_group_view = True
+                    show_ping = True 
+                elif scope == 'SINGLE':
+                    if targets:
+                        title = f"🖥️ {targets[0]['name']}"
+                    else: return
+
+                # 渲染顶部栏
                 with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
                     with ui.row().classes('items-center gap-4'):
                         ui.label(title).classes('text-2xl font-bold')
+                        # 分组操作按钮
                         if is_group_view and targets:
                             with ui.row().classes('gap-1'):
-                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(current_real_data)).props('flat dense round size=sm color=grey')
-                                ui.button(icon='bolt', on_click=lambda: copy_group_link(current_real_data, target='surge')).props('flat dense round size=sm text-color=orange')
-                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(current_real_data, target='clash')).props('flat dense round size=sm text-color=green')
+                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey')
+                                ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange')
+                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green')
+                    
+                    if targets and scope != 'SINGLE':
+                         ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
 
-                    if targets:
-                        ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(current_real_scope, current_real_data, force_refresh=True)).props('outline color=primary')
-                
-                # 内容渲染
+                # 渲染内容
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
                         ui.icon('inbox', size='4rem'); ui.label('列表为空').classes('text-lg')
-                elif current_real_scope == 'SINGLE': 
-                    await render_single_server_view(targets[0], force_refresh)
+                elif scope == 'SINGLE': 
+                    await render_single_server_view(targets[0])
                 else: 
-                    # ✨ 传递令牌给聚合视图，让它在循环内部也能中断
-                    await render_aggregated_view(targets, show_ping=show_ping, force_refresh=False, token=current_token)
+                    # 排序
+                    try: targets.sort(key=smart_sort_key)
+                    except: pass
+                    # 渲染列表
+                    await render_aggregated_view(targets, show_ping=show_ping, token=current_token)
 
-    asyncio.create_task(_render())
+    # 先执行一次渲染 (显示 Root 机的缓存 + 面板机的旧缓存/空状态)
+    await _render_ui()
+
+    # --- 2. 后台补拉逻辑 (混合制核心) ---
+    # 筛选出：没有安装探针的“纯面板”服务器
+    panel_only_servers = [s for s in targets if not s.get('probe_installed', False)]
+    
+    # 或者是强制刷新模式下，所有机器都要拉
+    if force_refresh:
+        panel_only_servers = targets
+
+    if panel_only_servers:
+        # 定义后台任务
+        async def _background_fetch():
+            if not panel_only_servers: return
+            
+            # 显示轻量级提示
+            if scope != 'SINGLE': 
+                safe_notify(f"正在后台更新 {len(panel_only_servers)} 台面板数据...", "ongoing", timeout=2000)
+            
+            # 并发拉取
+            tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in panel_only_servers]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # 拉取完再次渲染，更新数据
+            if CURRENT_VIEW_STATE.get('render_token') == current_token:
+                if scope == 'SINGLE':
+                    # 单机页面的话，fetch_inbounds_safe 会更新缓存，UI定时器会自动读到，不需要全页重绘
+                    pass 
+                else:
+                    await _render_ui() # 列表页重绘以显示新流量/状态
+        
+        # 丢进后台跑，不阻塞当前页面交互
+        asyncio.create_task(_background_fetch())
 
 # ================= 状态面板辅助函数 =================
 
@@ -3666,14 +3666,12 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
                 if sub_text: ui.label(sub_text).classes('text-[10px] text-gray-400')
 
     
-# =================单个服务器视图 =========================
+# =================单个服务器视图 (详情页) =========================
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf)
-    
-    # UI 引用字典
     ui_refs = {}
 
-    # --- 辅助函数：环形进度条 ---
+    # --- UI 组件定义 (保持原样) ---
     def _create_live_ring(label, color, key_prefix):
         with ui.column().classes('items-center justify-center min-w-[100px]'):
             with ui.element('div').classes('relative flex items-center justify-center w-16 h-16 mb-2'):
@@ -3682,7 +3680,6 @@ async def render_single_server_view(server_conf, force_refresh=False):
             ui.label(label).classes('text-xs font-bold text-gray-600')
             ui_refs[f'{key_prefix}_detail'] = ui.label('-- / --').classes('text-[10px] text-gray-400 font-mono text-center leading-tight')
 
-    # --- 辅助函数：网络卡片 ---
     def _create_live_net_card(title, icon, key_prefix):
         with ui.card().classes('p-3 shadow-sm border border-gray-100 flex-grow min-w-[180px] flex-row items-center gap-3 bg-white'):
             with ui.column().classes('p-2 bg-blue-50 rounded-full'):
@@ -3697,7 +3694,6 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         ui.icon('arrow_downward').classes('text-xs text-green-500')
                         ui_refs[f'{key_prefix}_down'] = ui.label('--').classes('text-sm font-bold text-slate-700 font-mono')
 
-    # --- 辅助函数：状态卡片 ---
     def _create_live_stat_card(title, icon, color_cls, key_prefix):
         with ui.card().classes('p-3 shadow-sm border flex-grow items-center justify-between min-w-[150px]'):
             with ui.row().classes('items-center gap-3'):
@@ -3712,179 +3708,106 @@ async def render_single_server_view(server_conf, force_refresh=False):
     with ui.row().classes('w-full justify-end mb-2'):
         ui.button('新建节点', icon='add', color='green', on_click=lambda: open_inbound_dialog(mgr, None, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('dense')
 
-    # 布局容器
     list_container = ui.column().classes('w-full mb-6') 
     status_container = ui.column().classes('w-full') 
 
-    # ================= 1. 渲染节点列表 =================
-    try:
-        res = await fetch_inbounds_safe(server_conf, force_refresh=force_refresh)
-        list_container.clear()
+    # 1. 节点列表渲染 (混合模式)
+    # 如果有探针(probe=True)，这里 fetch_inbounds_safe 默认读缓存
+    # 如果无探针，refresh_content 的后台任务可能还没跑完，这里先渲染旧缓存，后台跑完后会自动更新
+    res = await fetch_inbounds_safe(server_conf, force_refresh=force_refresh)
+    
+    with list_container:
+        with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS_NO_PING):
+            ui.label('备注名称').classes('text-left pl-2')
+            for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
         
-        raw_host = server_conf['url']
-        try:
-            if '://' not in raw_host: 
-                raw_host = f'http://{raw_host}'
-            p = urlparse(raw_host)
-            raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
-        except: 
-            pass
-
-        # 单服务器视图下，我们依然可以发起 Ping 任务来检测连通性，但不需要在 UI 上显示数值
-        # 这有助于更新全局的在线状态
-        if res:
-            asyncio.create_task(batch_ping_nodes(res, raw_host))
-
-        with list_container:
-            # ✨✨✨ 修改表头：移除延迟，调整状态列 ✨✨✨
-            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS_NO_PING):
-                ui.label('备注名称').classes('text-left pl-2')
-                # 所在组, 已用流量, 协议, 端口, 状态, 操作
-                headers = ['所在组', '已用流量', '协议', '端口', '状态', '操作']
-                for h in headers: ui.label(h).classes('text-center')
-            
-            if not res: 
-                ui.label('暂无节点或连接失败').classes('text-gray-400 mt-4 text-center w-full')
-            else:
-                if not force_refresh: 
-                    ui.label('本地缓存模式 (点击右上角同步以刷新)').classes('text-xs text-gray-300 w-full text-right px-2')
-                
-                for n in res:
-                    traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+        if not res: 
+            msg = '暂无节点 (后台同步中...)' if not server_conf.get('probe_installed') else '暂无节点数据'
+            ui.label(msg).classes('text-gray-400 mt-4 text-center w-full')
+        else:
+            for n in res:
+                traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+                with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS_NO_PING):
+                    ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
+                    ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                    ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
+                    ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
+                    ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
                     
-                    with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS_NO_PING):
-                        ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                        ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                        ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
-                        ui.label(n.get('protocol', 'unknown')).classes('uppercase text-xs font-bold w-full text-center')
-                        ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
-                        
-                        # ✨✨✨ 修改状态列：闪电 + 文字 ✨✨✨
-                        # 这里的逻辑：如果能获取到节点列表(res存在)，说明面板就是连通的(Online)
-                        # 如果 n.get('enable') 是 False，说明节点被禁用了
-                        
-                        is_enable = n.get('enable', True)
-                        status_text = "运行中" if is_enable else "已停止"
-                        status_color = "green" if is_enable else "red"
-                        status_icon = "bolt"
-                        
-                        with ui.row().classes('w-full justify-center items-center gap-1'):
-                            ui.icon(status_icon).classes(f'text-{status_color}-500 text-sm')
-                            ui.label(status_text).classes(f'text-xs font-bold text-{status_color}-600')
+                    # 状态显示
+                    is_enable = n.get('enable', True)
+                    with ui.row().classes('w-full justify-center items-center gap-1'):
+                        ui.icon('bolt').classes(f'text-{"green" if is_enable else "red"}-500 text-sm')
+                        ui.label("运行中" if is_enable else "已停止").classes(f'text-xs font-bold text-{"green" if is_enable else "red"}-600')
 
-                        # 操作按钮
-                        with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                            l_url = generate_node_link(n, raw_host)
-                            if l_url: 
-                                ui.button(icon='content_copy', on_click=lambda u=l_url: safe_copy_to_clipboard(u)).props('flat dense size=sm').tooltip('复制链接')
-                            d_conf = generate_detail_config(n, raw_host)
-                            if d_conf: 
-                                ui.button(icon='description', on_click=lambda u=d_conf: safe_copy_to_clipboard(u)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
-                            ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
-                            ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
-    except Exception as e: 
-        logger.error(f"Render List Error: {e}")
+                    # 操作
+                    with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                        l = generate_node_link(n, server_conf['url'])
+                        if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm')
+                        ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
+                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
 
-    # ================= 2. 渲染状态面板框架  =================
+    # 2. 状态面板框架
     with status_container:
         ui.separator().classes('my-4') 
         with ui.card().classes('w-full p-4 bg-white rounded-xl shadow-sm border border-gray-100'):
-            # 标题栏 + 心跳
             with ui.row().classes('w-full justify-between items-center mb-2'):
                 ui.label('服务器实时监控').classes('text-sm font-bold text-gray-500')
                 ui_refs['heartbeat'] = ui.spinner('dots', size='1em', color='green').classes('opacity-0 transition-opacity')
 
-            # Row 1: 资源
             with ui.row().classes('w-full justify-around items-start mb-6 border-b pb-4'):
                 _create_live_ring('CPU', 'blue', 'cpu')
                 _create_live_ring('内存', 'green', 'mem')
                 _create_live_ring('硬盘', 'purple', 'disk')
 
-            # Row 2: 流量
             with ui.row().classes('w-full gap-4 mb-6 flex-wrap'):
                 _create_live_net_card('实时网速', 'speed', 'speed')
                 _create_live_net_card('服务器总流量', 'data_usage', 'total')
 
-            # Row 3: 详情
             with ui.row().classes('w-full gap-4 flex-wrap'):
                 _create_live_stat_card('Xray 状态', 'settings_power', 'text-gray-400', 'xray')
                 _create_live_stat_card('运行时间', 'schedule', 'text-cyan-600', 'uptime')
                 _create_live_stat_card('系统负载', 'analytics', 'text-pink-600', 'load')
 
-    # ================= 3. 数据更新任务 =================
+    # 3. 数据更新任务 (核心混合逻辑)
     async def update_data_task():
         try:
-            # 心跳显示
-            if 'heartbeat' in ui_refs: 
-                ui_refs['heartbeat'].classes(remove='opacity-0')
+            if 'heartbeat' in ui_refs: ui_refs['heartbeat'].classes(remove='opacity-0')
             
-            status = await run.io_bound(mgr.get_server_status)
+            # ✨ 调用全局混合获取函数 (自动区分 Cache/Active)
+            status = await get_server_status(server_conf)
             
             if status:
-                # CPU
-                cpu_val = status.get('cpu', 0)
-                if 'cpu_ring' in ui_refs: ui_refs['cpu_ring'].set_value(cpu_val / 100)
-                if 'cpu_pct' in ui_refs: ui_refs['cpu_pct'].set_text(f"{round(cpu_val, 1)}%")
-                if 'cpu_detail' in ui_refs: ui_refs['cpu_detail'].set_text(f"{status.get('cpuModel','')[:12]}..")
-
-                # 内存
-                mem = status.get('mem', {})
-                mem_curr = mem.get('current', 0)
-                mem_total = mem.get('total', 1)
-                if mem_total > 0:
-                    if 'mem_ring' in ui_refs: ui_refs['mem_ring'].set_value(mem_curr / mem_total)
-                    if 'mem_pct' in ui_refs: ui_refs['mem_pct'].set_text(f"{round(mem_curr/mem_total*100, 1)}%")
-                if 'mem_detail' in ui_refs: ui_refs['mem_detail'].set_text(f"{format_bytes(mem_curr)} / {format_bytes(mem_total)}")
-
-                # 硬盘
-                disk = status.get('disk', {})
-                disk_curr = disk.get('current', 0)
-                disk_total = disk.get('total', 1)
-                if disk_total > 0:
-                    if 'disk_ring' in ui_refs: ui_refs['disk_ring'].set_value(disk_curr / disk_total)
-                    if 'disk_pct' in ui_refs: ui_refs['disk_pct'].set_text(f"{round(disk_curr/disk_total*100, 1)}%")
-                if 'disk_detail' in ui_refs: ui_refs['disk_detail'].set_text(f"{format_bytes(disk_curr)} / {format_bytes(disk_total)}")
-
-                # 网速
-                net = status.get('netIO', {})
-                if 'speed_up' in ui_refs: ui_refs['speed_up'].set_text(f"{format_bytes(net.get('up',0))}/s")
-                if 'speed_down' in ui_refs: ui_refs['speed_down'].set_text(f"{format_bytes(net.get('down',0))}/s")
-
-                # 总流量
-                traf = status.get('netTraffic', {})
-                if 'total_up' in ui_refs: ui_refs['total_up'].set_text(format_bytes(traf.get('sent',0)))
-                if 'total_down' in ui_refs: ui_refs['total_down'].set_text(format_bytes(traf.get('recv',0)))
-
-                # Xray
-                xray = status.get('xray', {})
-                state = str(xray.get('state', 'Unknown')).upper()
-                if 'xray_main' in ui_refs: ui_refs['xray_main'].set_text(state)
-                if 'xray_sub' in ui_refs: ui_refs['xray_sub'].set_text(f"Ver: {xray.get('version','')}")
-                if 'xray_icon' in ui_refs:
-                    if state == 'RUNNING': 
-                        ui_refs['xray_icon'].classes(replace='text-green-600', remove='text-red-500 text-gray-400')
-                    else: 
-                        ui_refs['xray_icon'].classes(replace='text-red-500', remove='text-green-600 text-gray-400')
-
-                # Uptime & Load
-                if 'uptime_main' in ui_refs: ui_refs['uptime_main'].set_text(format_uptime(status.get('uptime', 0)))
-                if 'uptime_sub' in ui_refs: ui_refs['uptime_sub'].set_text('System Uptime')
+                is_lite = status.get('_is_lite', False) # 是否为纯面板模式
                 
-                loads = status.get('loads', [0,0,0])
-                if not loads: loads = [0,0,0]
-                if 'load_main' in ui_refs: ui_refs['load_main'].set_text(f"{loads[0]} | {loads[1]}")
-                if 'load_sub' in ui_refs: ui_refs['load_sub'].set_text('1min | 5min')
+                # CPU
+                cpu = float(status.get('cpu_usage', 0))
+                if 'cpu_ring' in ui_refs: 
+                    ui_refs['cpu_ring'].set_value(cpu / 100)
+                    ui_refs['cpu_ring'].props(f'color={"orange" if is_lite else "blue"}')
+                if 'cpu_pct' in ui_refs: ui_refs['cpu_pct'].set_text(f"{round(cpu, 1)}%")
+                
+                # Mem
+                mem_curr = status.get('mem_usage', 0); mem_total = status.get('mem_total', 1)
+                # 面板模式下 mem_usage 可能是百分比，标准化一下
+                if is_lite: mem_pct = mem_curr # Lite 模式直接存的是百分比
+                else: mem_pct = (mem_curr / mem_total * 100) if mem_total > 0 else 0
+                
+                if 'mem_ring' in ui_refs: ui_refs['mem_ring'].set_value(mem_pct / 100)
+                if 'mem_pct' in ui_refs: ui_refs['mem_pct'].set_text(f"{int(mem_pct)}%")
+                
+                # Uptime
+                if 'uptime_main' in ui_refs: ui_refs['uptime_main'].set_text(status.get('uptime', '-'))
+                
+                # Xray
+                if 'xray_main' in ui_refs: ui_refs['xray_main'].set_text("Lite Mode" if is_lite else "RUNNING")
+                
+            if 'heartbeat' in ui_refs: ui_refs['heartbeat'].classes(add='opacity-0')
+        except: pass
 
-            # 心跳隐藏
-            if 'heartbeat' in ui_refs: 
-                ui_refs['heartbeat'].classes(add='opacity-0')
-
-        except Exception as e:
-            pass
-
-    # 4. 启动定时器 (每3秒一次)
-    ui.timer(3.0, update_data_task)
-    # 5. 立即执行一次
+    # ✨ 智能频率：有探针(内存读) 3秒，无探针(HTTP请求) 5秒
+    interval = 3.0 if server_conf.get('probe_installed') else 5.0
+    ui.timer(interval, update_data_task)
     ui.timer(0.1, update_data_task, once=True)
     
 # ================= 聚合视图 (局部静默刷新 + 自动状态更新) =================
@@ -3893,61 +3816,28 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# =================  聚合视图 =================
+# =================  聚合视图 (列表渲染) =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     list_container = ui.column().classes('w-full gap-4')
     
+    # 这里的 force_refresh 只影响是否在渲染前**阻塞**去拉取
+    # 在新的 refresh_content 逻辑下，通常这里 force_refresh=False (读缓存)
     results = []
     if force_refresh:
-        # 如果是强制刷新，去后台获取数据
         tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in server_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        # 否则直接读缓存
         for s in server_list:
             results.append(NODES_DATA.get(s['url'], []))
 
     list_container.clear()
     
-    # 模式判断
-    is_all_servers = (server_list == SERVERS_CACHE) or (len(server_list) == len(SERVERS_CACHE) and not show_ping)
+    is_all_servers = (len(server_list) == len(SERVERS_CACHE) and not show_ping)
     use_special_mode = is_all_servers or show_ping
     current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
 
-    # --- 内部定义强力重连函数 ---
-    async def force_retry_ping(btn, icon, host, port, key):
-        if not btn: return 
-        btn.props('loading') 
-        icon.classes(remove='text-red-500 text-green-500', add='text-gray-300') 
-        
-        async def _try_connect(timeout_sec):
-            try:
-                start = asyncio.get_running_loop().time()
-                _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout_sec)
-                writer.close()
-                await writer.wait_closed()
-                return int((asyncio.get_running_loop().time() - start) * 1000)
-            except: return None
-            
-        final_latency = None
-        for i in range(3):
-            final_latency = await _try_connect(3.0)
-            if final_latency is not None: break
-            if i < 2: await asyncio.sleep(0.5)
-            
-        if final_latency is not None:
-            PING_CACHE[key] = final_latency
-            icon.classes(remove='text-gray-300 text-red-500', add='text-green-500')
-            btn.set_visibility(False) 
-            safe_notify(f'✅ 重连成功: {final_latency}ms', 'positive')
-        else:
-            PING_CACHE[key] = -1
-            icon.classes(remove='text-gray-300 text-green-500', add='text-red-500')
-            safe_notify('❌ 依然无法连接 (3次尝试均失败)', 'negative')
-        btn.props(remove='loading')
-
     with list_container:
-        # --- 绘制表头 ---
+        # 表头
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(current_css):
             ui.label('服务器').classes('text-left pl-2')
             ui.label('备注名称').classes('text-left pl-2')
@@ -3959,22 +3849,13 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             if not use_special_mode: ui.label('状态').classes('text-center')
             ui.label('操作').classes('text-center')
         
-        # --- 绘制数据行 (分批渲染) ---
+        # 数据行
         for i, res in enumerate(results):
-            
-            # ✨✨✨ [核心防线 1] 检查令牌是否过期 ✨✨✨
-            # 如果 token 传进来了，且跟全局最新 token 不一致，说明用户切走了，立即停止渲染
-            if token and CURRENT_VIEW_STATE.get('render_token') != token:
-                return 
-
-            # ✨✨✨ [核心防线 2] 喘口气，防止主线程卡死 ✨✨✨
-            # 每渲染 10 行，强制休息 0 秒，让出 CPU 给心跳包
-            if i > 0 and i % 10 == 0:
-                await asyncio.sleep(0) 
+            if token and CURRENT_VIEW_STATE.get('render_token') != token: return 
+            if i > 0 and i % 20 == 0: await asyncio.sleep(0) # 让出主线程
             
             srv = server_list[i]
-            if isinstance(res, Exception): res = []
-            if res is None: res = []
+            if isinstance(res, Exception) or res is None: res = []
             mgr = get_manager(srv)
             
             raw_host = srv['url']
@@ -3983,114 +3864,77 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
             except: pass
 
-            # 如果需要显示 Ping，则发起后台 Ping 任务
-            if show_ping and res:
-                 asyncio.create_task(batch_ping_nodes(res, raw_host))
+            if show_ping and res: asyncio.create_task(batch_ping_nodes(res, raw_host))
 
-            row_wrapper = ui.element('div').classes('w-full')
-            
-            with row_wrapper:
-                # --- 情况 A: 无数据 (显示连接失败或暂无数据) ---
-                if not res:
-                    with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(current_css):
-                        ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                        msg = '❌ 连接失败' if force_refresh else '⏳ 暂无数据'
-                        color = 'text-red-500' if force_refresh else 'text-gray-400'
-                        ui.label(msg).classes(f'{color} font-bold w-full text-left pl-2')
-                        
-                        if use_special_mode:
-                            try: ip_display = get_real_ip_display(srv['url'])
-                            except: ip_display = raw_host
-                            with ui.row().classes('w-full justify-center items-center gap-1'):
-                                ui.icon('bolt').classes('text-red-500 text-sm')
-                                # 绑定 IP 静默更新
-                                ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
-                                bind_ip_label(srv['url'], ip_label)
-                        else:
-                            ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                        
-                        for _ in range(3): ui.label('-').classes('w-full text-center')
-                        if not use_special_mode:
-                            with ui.element('div').classes('flex justify-center w-full'): ui.icon('help_outline', color='grey').props('size=xs')
-                        
-                        with ui.row().classes('gap-2 justify-center w-full'): 
-                            # 注意：这里调用 refresh_content 最好也带上 force_refresh=True
-                            ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary').tooltip('单独同步')
-                    continue
+            # --- 渲染行 ---
+            # 如果没有节点数据
+            if not res:
+                with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(current_css):
+                    ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
+                    
+                    # ✨ 状态判定：正在后台拉取 or 真的挂了？
+                    # 由于我们是先渲染后拉取，如果是纯面板且没数据，显示"同步中"比较友好
+                    is_probe = srv.get('probe_installed', False)
+                    msg = '⏳ 同步中...' if not is_probe else '❌ 离线/无节点'
+                    color = 'text-blue-400' if not is_probe else 'text-red-500'
+                    
+                    ui.label(msg).classes(f'{color} font-bold w-full text-left pl-2')
+                    
+                    if use_special_mode:
+                        ip_disp = get_real_ip_display(srv['url'])
+                        bind_ip_label(srv['url'], ui.label(ip_disp).classes('text-xs font-mono text-gray-500'))
+                    else:
+                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                    
+                    for _ in range(3): ui.label('-').classes('w-full text-center')
+                    if not use_special_mode: ui.icon('help_outline', color='grey').props('size=xs').classes('w-full text-center')
+                    
+                    with ui.row().classes('gap-2 justify-center w-full'): 
+                        ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary')
+                continue
 
-                # --- 情况 B: 有数据 (正常渲染节点) ---
-                for n in res:
-                    try:
-                        traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
-                        target_host = n.get('listen') or raw_host
-                        target_port = n.get('port')
-                        ping_key = f"{target_host}:{target_port}"
-                        
-                        with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(current_css):
-                            # Col 1 & 2
-                            ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                            ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
+            # 有节点数据
+            for n in res:
+                traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+                
+                with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(current_css):
+                    ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
+                    ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
+                    
+                    if use_special_mode:
+                        # 在线状态列
+                        with ui.row().classes('w-full justify-center items-center gap-1'):
+                            # 默认图标
+                            status_icon = ui.icon('bolt').classes('text-gray-300 text-sm')
                             
-                            # Col 3: 状态/分组
-                            if use_special_mode:
-                                try: ip_display = get_real_ip_display(srv['url'])
-                                except: ip_display = raw_host
-                                
-                                with ui.row().classes('w-full justify-center items-center gap-1'):
-                                    status_icon = ui.icon('bolt').classes('text-gray-300 text-sm')
-                                    # 绑定 IP 显示
-                                    ip_label = ui.label(ip_display).classes('text-xs font-mono text-gray-500')
-                                    bind_ip_label(srv['url'], ip_label) 
-                                    
-                                    # 强力重连按钮
-                                    retry_btn = ui.button(icon='refresh').props('flat dense round size=xs text-color=red')
-                                    retry_btn.tooltip('尝试强力重连 (3次x3秒)')
-                                    retry_btn.set_visibility(False)
-                                    retry_btn.on_click(lambda e, b=retry_btn, i=status_icon, h=target_host, p=target_port, k=ping_key: force_retry_ping(b, i, h, p, k))
-
-                                # 自动更新 Ping 状态逻辑
-                                if show_ping:
-                                    def check_ping_result(icon_ref=status_icon, key_ref=ping_key, btn_ref=retry_btn):
-                                        val = PING_CACHE.get(key_ref, None)
-                                        if val is not None:
-                                            if val == -1: 
-                                                icon_ref.classes(remove='text-gray-300 text-green-500', add='text-red-500')
-                                                btn_ref.set_visibility(True)
-                                            else: 
-                                                icon_ref.classes(remove='text-gray-300 text-red-500', add='text-green-500')
-                                                btn_ref.set_visibility(False)
-                                            return False # 停止定时器
-                                        return True # 继续等待
-                                    ui.timer(1.0, lambda i=status_icon, k=ping_key, b=retry_btn: check_ping_result(i, k, b))
-                                else:
-                                    # 如果不显示 Ping，就读服务器级状态
-                                    status_code = srv.get('_status', 'online')
-                                    if status_code == 'online': status_icon.classes(replace='text-green-500')
-                                    elif status_code == 'offline': status_icon.classes(replace='text-red-500')
-                                    else: status_icon.classes(replace='text-gray-400')
-
-                            else:
-                                ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-
-                            # Col 4, 5, 6
-                            ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
-                            ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
-                            ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
-
-                            # Col Status Dot (Circle)
-                            if not use_special_mode:
-                                with ui.element('div').classes('flex justify-center w-full'): 
-                                    ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                            # ✨ 状态颜色逻辑：有探针(Online) vs 无探针(Warning)
+                            status_code = srv.get('_status', 'online') # fetch_inbounds_safe 会更新这个
+                            is_probe = srv.get('probe_installed', False)
                             
-                            # Col Actions
-                            with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                                link = generate_node_link(n, raw_host)
-                                if link: ui.button(icon='content_copy', on_click=lambda l=link: safe_copy_to_clipboard(l)).props('flat dense size=sm').tooltip('复制链接')
-                                detail_conf = generate_detail_config(n, raw_host)
-                                if detail_conf: ui.button(icon='description', on_click=lambda l=detail_conf: safe_copy_to_clipboard(l)).props('flat dense size=sm text-color=orange').tooltip('复制配置')
-                                ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
-                                ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark','未命名'), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
-                    except: continue
+                            if status_code == 'online':
+                                if is_probe: status_icon.classes(replace='text-green-500')
+                                else: status_icon.classes(replace='text-orange-400') # 纯面板显示橙色
+                            elif status_code == 'offline':
+                                status_icon.classes(replace='text-red-500')
+                            
+                            ip_label = ui.label(get_real_ip_display(srv['url'])).classes('text-xs font-mono text-gray-500')
+                            bind_ip_label(srv['url'], ip_label)
+                    else:
+                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+
+                    ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
+                    ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
+                    ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
+
+                    if not use_special_mode:
+                        with ui.element('div').classes('flex justify-center w-full'): 
+                            ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                    
+                    with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                        l = generate_node_link(n, raw_host)
+                        if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm')
+                        ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
+                        ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark',''), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
 
 
 # ================= 核心：静默刷新 UI 数据 =================
@@ -5227,42 +5071,6 @@ def main_page(request: Request):
     
     logger.info("✅ UI 已就绪")
     
-
-# ================= 全局定时 Ping 任务 (仅启动一次 + 限流保护) =================
-async def run_global_ping_task():
-    # 依然需要限流！否则启动时瞬间并发几百个 Ping 还是会卡死网页
-    semaphore = asyncio.Semaphore(5)
-
-    async def protected_ping_task(nodes, host):
-        async with semaphore:
-            try:
-                await batch_ping_nodes(nodes, host)
-            except:
-                pass
-            # 测完休息 0.5 秒
-            await asyncio.sleep(0.5)
-
-    # ❌ 移除了 while True 循环，只执行一次
-    try:
-        logger.info("📡 [系统启动] 执行首次全局延迟测试...")
-        tasks = []
-        for srv in SERVERS_CACHE:
-            raw_host = srv['url']
-            try:
-                if '://' not in raw_host: raw_host = f'http://{raw_host}'
-                p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
-            except: continue
-            
-            nodes = NODES_DATA.get(srv['url'], [])
-            if nodes:
-                tasks.append(protected_ping_task(nodes, raw_host))
-        
-        if tasks:
-            await asyncio.gather(*tasks)
-        
-        logger.info("✅ 首次延迟测试完成 (后台任务已结束)")
-    except Exception as e:
-        logger.error(f"Ping 任务异常: {e}")
 
 
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
