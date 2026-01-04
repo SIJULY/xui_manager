@@ -1,58 +1,33 @@
 #!/bin/bash
 
 # =========================================================
-# X-Fusion Panel 探针安装脚本 (Unified Version)
-# 支持：手动 SSH 安装 & 面板自动推送安装
+# X-Fusion Panel 探针安装脚本 (手动安装适配版)
 # =========================================================
 
-# 1. 参数定义 (支持默认占位符，用于面板自动替换)
-# 如果命令行没有传参数，就使用 __TOKEN__ 这种占位符(会被Python替换)
-TOKEN="${1:-__TOKEN__}"
-REGISTER_API="${2:-__API_URL__}"
-SERVER_URL="${3:-__SERVER_URL__}"
+# 获取参数
+TOKEN="$1"
+REGISTER_API="$2"
 
-# 2. 预检与权限
-if [ "$(id -u)" -ne 0 ]; then
-    echo "❌ 错误: 请使用 root 权限运行 (sudo -i)"
+# 参数校验
+if [ -z "$TOKEN" ] || [ -z "$REGISTER_API" ]; then
+    echo "❌ 错误: 缺少参数"
+    echo "用法: bash x-install.sh \"TOKEN\" \"REGISTER_API_URL\""
     exit 1
 fi
 
-if [[ "$TOKEN" == "__TOKEN__" ]] && [ -z "$1" ]; then
-    echo "❌ 错误: 未检测到 Token，脚本无法运行。"
-    echo "用法: bash x-install.sh \"TOKEN\" \"http://面板IP:端口/api/probe/register\""
-    exit 1
-fi
-
-# 3. API 地址处理
-# 自动将 /register 替换为 /push 以获取推送地址
+# 从注册 API 提取 推送 API (将 /register 替换为 /push)
 PUSH_API="${REGISTER_API/\/register/\/push}"
 
-# 如果还是占位符(说明没替换成功也没传参)，尝试兜底(很少发生)
-if [[ "$PUSH_API" == *"__API_URL__"* ]]; then
-    echo "❌ 错误: 无效的 API 地址"
-    exit 1
-fi
-
-echo "🚀 开始安装 X-Fusion 探针..."
+echo "🚀 开始安装 X-Fusion 推送探针..."
 echo "🔑 Token: $TOKEN"
-echo "📡 推送接口: $PUSH_API"
+echo "📡 推送地址: $PUSH_API"
 
-# 4. 注册流程 (仅在手动运行时触发)
-# 如果 SERVER_URL 是空的 (或者占位符没被替换)，说明是手动运行
-if [[ -z "$SERVER_URL" ]] || [[ "$SERVER_URL" == "__SERVER_URL__" ]]; then
-    echo "📋 正在向面板注册本机..."
-    # 尝试获取本机 IP 作为 Server URL 的一部分
-    MY_IP=$(curl -s4 ifconfig.me || echo "127.0.0.1")
-    SERVER_URL="http://${MY_IP}:54322" # 生成一个虚拟地址用于标识
-    
-    # 调用注册接口
-    REG_RES=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"token\":\"$TOKEN\"}" "$REGISTER_API")
-    echo "   └─ 面板响应: $REG_RES"
-else
-    echo "✅ 面板自动部署模式，跳过注册。"
-fi
+# 1. 向面板注册 (这一步让面板知道这台机器上线了)
+echo "📋 正在注册..."
+curl -s -X POST -H "Content-Type: application/json" -d "{\"token\":\"$TOKEN\"}" "$REGISTER_API"
+echo ""
 
-# 5. 环境准备
+# 2. 环境检测与安装 Python3
 if ! command -v python3 >/dev/null 2>&1; then
     echo "📦 安装 Python3..."
     if [ -f /etc/debian_version ]; then apt-get update -y && apt-get install -y python3;
@@ -60,15 +35,23 @@ if ! command -v python3 >/dev/null 2>&1; then
     elif [ -f /etc/alpine-release ]; then apk add python3; fi
 fi
 
-# 6. 写入探针逻辑 (这是你 main.py 里经过测试最正确的版本)
+# 3. 写入 Python 探针脚本
+# (这里的内容已同步为你 main.py 中最正确的逻辑)
 cat > /root/x_fusion_agent.py << EOF
 import time, json, os, socket, sys
 import urllib.request, urllib.error
 
-# 配置参数 (由 Shell 脚本注入)
+# 配置参数 (由 Shell 传入)
 MANAGER_URL = "$PUSH_API"
 TOKEN = "$TOKEN"
-SERVER_URL = "$SERVER_URL"
+
+# 尝试获取本机 IP 用于生成 server_url 标识 (与面板逻辑保持一致)
+try:
+    with urllib.request.urlopen("http://ifconfig.me", timeout=5) as r:
+        my_ip = r.read().decode().strip()
+        SERVER_URL = "http://" + my_ip + ":54322"
+except:
+    SERVER_URL = "http://127.0.0.1:54322"
 
 def get_network_stats():
     # 读取 /proc/net/dev 获取总流量
@@ -84,7 +67,6 @@ def get_network_stats():
                 if interface == "lo": continue # 跳过本地回环
                 
                 data = parts[1].split()
-                # data[0] 是接收字节(RX), data[8] 是发送字节(TX)
                 rx_bytes += int(data[0])
                 tx_bytes += int(data[8])
     except: pass
@@ -96,7 +78,7 @@ def get_sys_info():
         # --- 1. 获取初始网络计数 ---
         net_rx1, net_tx1 = get_network_stats()
 
-        # --- 2. CPU 计算 (利用 sleep 1秒的时间差) ---
+        # --- 2. CPU 计算 (利用 sleep 1秒的时间差，精确计算) ---
         with open("/proc/stat") as f: fields = [float(x) for x in f.readline().split()[1:5]]
         t1, i1 = sum(fields), fields[3]
         
@@ -108,19 +90,20 @@ def get_sys_info():
         # --- 3. 获取结束网络计数 & 计算网速 ---
         net_rx2, net_tx2 = get_network_stats()
         
+        # CPU 使用率
         data["cpu_usage"] = round((1 - (i2-i1)/(t2-t1)) * 100, 1)
         data["cpu_cores"] = os.cpu_count() or 1
         
-        # 写入网络数据 (单位：字节)
+        # 写入网络数据 (累计值 + 瞬时速度)
         data["net_total_in"] = net_rx2
         data["net_total_out"] = net_tx2
-        data["net_speed_in"] = net_rx2 - net_rx1 # 1秒内的差值即为速度 B/s
+        data["net_speed_in"] = net_rx2 - net_rx1 
         data["net_speed_out"] = net_tx2 - net_tx1
 
-        # Load
+        # Load Average
         with open("/proc/loadavg") as f: data["load_1"] = float(f.read().split()[0])
 
-        # Memory
+        # Memory (使用 MemAvailable 获取真实可用内存)
         with open("/proc/meminfo") as f: lines = f.readlines()
         m = {}
         for line in lines[:5]:
@@ -153,14 +136,14 @@ def push_data():
             req = urllib.request.Request(MANAGER_URL, data=payload, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=5) as r: pass
         except Exception as e:
-            pass 
-        time.sleep(2) # 循环间隔
+            pass # 忽略网络错误，等待下一次循环
+        time.sleep(2) # 这里的间隔可以根据需要调整
 
 if __name__ == "__main__":
     push_data()
 EOF
 
-# 7. 创建 Systemd 服务
+# 4. 创建 Systemd 服务 (开机自启)
 cat > /etc/systemd/system/x-fusion-agent.service << SERVICE_EOF
 [Unit]
 Description=X-Fusion Probe Agent
@@ -177,13 +160,13 @@ RestartSec=5
 WantedBy=multi-user.target
 SERVICE_EOF
 
-# 8. 启动服务
+# 5. 启动服务
 systemctl daemon-reload
 systemctl enable x-fusion-agent
 systemctl restart x-fusion-agent
 
-# 清理旧进程
+# 清理可能存在的旧进程
 pkill -f mini_probe.py || true
 
-echo "✅ 探针 Agent 已启动！正在向 $PUSH_API 推送数据..."
+echo "✅ 探针安装完成！数据已开始推送。"
 exit 0
