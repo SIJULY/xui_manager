@@ -4823,7 +4823,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# ================= ✨✨✨ 高性能渲染函数 (优化版) ✨✨✨ =================
+# ================= ✨✨✨ 高性能渲染函数 (已移除编辑按钮) ✨✨✨ =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     # 如果强制刷新，后台触发一下数据更新，但不阻塞当前 UI 渲染
     if force_refresh:
@@ -4887,45 +4887,60 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                     with ui.element('div').classes('flex justify-center w-full'): 
                         icon_dot = ui.icon('circle', color='grey').props('size=xs')
                 
-                # 6. 操作按钮 (静态，不常变)
-                mgr = get_manager(srv)
+                # 6. 操作按钮 (已移除编辑按钮)
                 with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                    # 这里的按钮逻辑需要闭包里的数据，我们暂时动态获取
-                    # 为了简化，我们只渲染操作按钮容器，具体的 Link 复制逻辑比较复杂，
-                    # 这里为了性能，我们假设操作针对的是"第一个节点"。
-                    # 如果需要更精细的操作，可以把按钮也放入 update_row 重绘，或者保持静态
                     
-                    # 优化策略：按钮保持静态，点击时动态去 NODES_DATA 查
-                    async def copy_link_click(s=srv):
-                        ns = NODES_DATA.get(s['url'], [])
-                        if ns: safe_copy_to_clipboard(generate_node_link(ns[0], s['url']))
-                        else: safe_notify('暂无节点', 'warning')
-
-                    async def edit_click(s=srv):
-                        ns = NODES_DATA.get(s['url'], [])
-                        if ns: open_inbound_dialog(get_manager(s), ns[0], lambda: refresh_content('SINGLE', s, force_refresh=True))
-                        else: safe_notify('暂无节点可编辑', 'warning')
+                    # ✨✨✨ 闭包工厂：确保点击事件能锁定当前的 srv 对象 ✨✨✨
+                    def make_handlers(current_s):
+                        # A. 复制链接
+                        async def on_copy_link():
+                            nodes = NODES_DATA.get(current_s['url'], [])
+                            if nodes:
+                                await safe_copy_to_clipboard(generate_node_link(nodes[0], current_s['url']))
+                            else:
+                                safe_notify('暂无节点数据', 'warning')
                         
-                    ui.button(icon='content_copy', on_click=copy_link_click).props('flat dense size=sm')
-                    ui.button(icon='edit', on_click=edit_click).props('flat dense size=sm')
-                    ui.button(icon='delete', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=red').tooltip('管理/删除')
+                        # B. 复制明文 (新增)
+                        async def on_copy_text():
+                            nodes = NODES_DATA.get(current_s['url'], [])
+                            if nodes:
+                                # 提取 Host
+                                raw_host = current_s['url'].split('://')[-1].split(':')[0]
+                                text = generate_detail_config(nodes[0], raw_host)
+                                if text:
+                                    await safe_copy_to_clipboard(text)
+                                    safe_notify('明文配置已复制', 'positive')
+                                else:
+                                    safe_notify('生成配置失败', 'warning')
+                            else:
+                                safe_notify('暂无节点数据', 'warning')
+                        
+                        return on_copy_link, on_copy_text
 
-            # ================= ✨✨✨ 核心优化：内部闭包更新函数 ✨✨✨ =================
-            # 这个函数每 2 秒运行一次，只更新当前这一行的文字，不重画 DOM
+                    # 获取绑定好的处理函数
+                    h_copy, h_text = make_handlers(srv)
+
+                    # 1. 复制 Base64 链接
+                    ui.button(icon='content_copy', on_click=h_copy).props('flat dense size=sm').tooltip('复制链接 (Base64)')
+                    
+                    # 2. 复制明文配置 (Surge/Loon)
+                    ui.button(icon='description', on_click=h_text).props('flat dense size=sm text-color=purple').tooltip('复制明文配置 (Surge/Loon)')
+                    
+                    # 3. 详情/删除
+                    ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=blue-grey').tooltip('服务器详情/删除')
+
+            # ================= 内部闭包更新函数 (保持不变) =================
             def update_row(_srv=srv, _lbl_rem=lbl_remark, _lbl_tra=lbl_traffic, 
                           _lbl_pro=lbl_proto, _lbl_prt=lbl_port, _icon_dot=icon_dot, 
                           _icon_stat=icon_status if use_special_mode else None):
                 
-                # 从全局缓存取数据 (不请求网络)
                 nodes = NODES_DATA.get(_srv['url'], [])
                 
                 if not nodes:
-                    # 无数据状态
                     is_probe = _srv.get('probe_installed', False)
                     msg = '同步中...' if not is_probe else '离线/无节点'
                     _lbl_rem.set_text(msg)
                     _lbl_rem.classes(replace='text-gray-400' if not is_probe else 'text-red-500', remove='text-black')
-                    
                     _lbl_tra.set_text('--')
                     _lbl_pro.set_text('--')
                     _lbl_prt.set_text('--')
@@ -4933,7 +4948,6 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                     if _icon_dot: _icon_dot.props('color=grey')
                     return
 
-                # 有数据状态 (取第一个节点展示)
                 n = nodes[0]
                 total_traffic = sum(x.get('up',0) + x.get('down',0) for x in nodes)
                 
@@ -4944,23 +4958,18 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 _lbl_pro.set_text(n.get('protocol', 'unk'))
                 _lbl_prt.set_text(str(n.get('port', 0)))
 
-                # 更新状态颜色
                 is_online = _srv.get('_status') == 'online'
                 is_enable = n.get('enable', True)
                 
                 if use_special_mode and _icon_stat:
                     color = 'text-green-500' if is_online else 'text-red-500'
-                    if not _srv.get('probe_installed'): color = 'text-orange-400' # 纯面板
+                    if not _srv.get('probe_installed'): color = 'text-orange-400'
                     _icon_stat.classes(replace=color, remove='text-gray-300')
                 
                 if not use_special_mode and _icon_dot:
                     _icon_dot.props(f'color={"green" if is_enable else "red"}')
 
-            # 3. 挂载独立定时器 (每 2 秒自我刷新一次)
-            # 注意：使用了 row_card 作为生命周期绑定，如果行被删了，定时器自动销毁
             ui.timer(2.0, update_row)
-            
-            # 立即执行一次以填充数据
             update_row()
 
 
