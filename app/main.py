@@ -4348,7 +4348,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
                 if sub_text: ui.label(sub_text).classes('text-[10px] text-gray-400')
 
     
-# =================单个服务器视图 (微调版：仅移除顶部按钮，保持原布局) =========================
+# =================单个服务器视图 (完整修改版) =========================
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf)
     ui_refs = {}
@@ -4389,11 +4389,9 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui_refs[f'{key_prefix}_main'] = ui.label('--').classes('text-sm font-bold text-slate-700')
                     ui_refs[f'{key_prefix}_sub'] = ui.label('--').classes('text-[10px] text-gray-400')
 
-    # ✨✨✨ [已修改] 删除了原先在这里的“顶部按钮”行，内容将自动顶上去 ✨✨✨
-
     list_container = ui.column().classes('w-full mb-6') 
     status_container = ui.column().classes('w-full mb-6') 
-    ssh_container_outer = ui.column().classes('w-full') # ✨ 新增 SSH 容器
+    ssh_container_outer = ui.column().classes('w-full') 
 
     # 1. 节点列表渲染
     with list_container:
@@ -4405,6 +4403,11 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui.label('当前仅作为服务器探针运行。如需管理节点，请在编辑页面填写面板 URL 和账号密码。').classes('text-xs text-orange-600')
         else:
             res = await fetch_inbounds_safe(server_conf, force_refresh=force_refresh)
+            
+            # ✨✨✨ 关键步骤：提取纯净的主机名 (去掉 http:// 和 :端口) ✨✨✨
+            # 这样生成的配置才是 vmess=1.2.3.4:端口，而不是 vmess=http://1.2.3.4:54321:端口
+            raw_host = server_conf['url'].split('://')[-1].split(':')[0]
+
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS_NO_PING):
                 ui.label('备注名称').classes('text-left pl-2')
                 for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
@@ -4428,8 +4431,16 @@ async def render_single_server_view(server_conf, force_refresh=False):
                             ui.label("运行中" if is_enable else "已停止").classes(f'text-xs font-bold text-{"green" if is_enable else "red"}-600')
 
                         with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                            # 1. 复制通用链接 (vmess://)
                             l = generate_node_link(n, server_conf['url'])
-                            if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm')
+                            if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm').tooltip('复制链接 (Base64)')
+                            
+                            # 2. ✨✨✨ 新增：复制明文配置 (Surge格式) ✨✨✨
+                            detail_conf = generate_detail_config(n, raw_host)
+                            if detail_conf:
+                                ui.button(icon='description', on_click=lambda t=detail_conf: safe_copy_to_clipboard(t)).props('flat dense size=sm text-color=purple').tooltip('复制明文配置 (Surge/Loon)')
+
+                            # 3. 编辑和删除
                             ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
                             ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
 
@@ -4455,49 +4466,35 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 _create_live_stat_card('运行时间', 'schedule', 'text-cyan-600', 'uptime')
                 _create_live_stat_card('系统负载', 'analytics', 'text-pink-600', 'load')
 
-    # 3. ✨✨✨ 下半部分：嵌入式 SSH 终端 ✨✨✨
+    # 3. 嵌入式 SSH 终端
     with ssh_container_outer:
         ui.separator().classes('my-4')
-        
-        # 容器：类似 VSCode 的终端样式
         ssh_card = ui.card().classes('w-full p-0 border border-gray-300 rounded-xl overflow-hidden shadow-sm flex flex-col')
-        
-        # SSH 状态管理 (闭包变量)
         ssh_state = {'active': False, 'instance': None}
 
         def render_ssh_area():
             ssh_card.clear()
             with ssh_card:
-                # 顶部黑色工具栏
                 with ui.row().classes('w-full h-10 bg-slate-800 items-center justify-between px-4 flex-shrink-0'):
                     with ui.row().classes('items-center gap-2'):
                         ui.icon('terminal').classes('text-white text-sm')
                         ui.label(f"SSH Console: {server_conf['name']}").classes('text-white text-xs font-mono font-bold')
-                    
-                    # 如果已连接，显示断开按钮
                     if ssh_state['active']:
                         ui.button(icon='close', on_click=stop_ssh).props('flat dense round color=red size=sm').tooltip('断开连接')
 
-                # 终端内容区域 (固定高度)
                 terminal_box = ui.column().classes('w-full h-[700px] bg-black relative justify-center items-center p-0 overflow-hidden')
                 
                 if not ssh_state['active']:
-                    # --- 未连接状态：显示大按钮 ---
                     with terminal_box:
                         with ui.column().classes('items-center gap-4'):
                             ui.icon('dns', size='4rem').classes('text-gray-800')
                             ui.label('安全终端已就绪').classes('text-gray-600 text-sm font-bold')
-                            
                             host_name = server_conf.get('url', '').replace('http://', '').split(':')[0]
                             ui.label(f"{server_conf.get('ssh_user','root')} @ {host_name}").classes('text-gray-700 font-mono text-xs mb-2 bg-gray-100 px-2 py-1 rounded')
-                            
                             ui.button('立即连接 SSH', icon='login', on_click=start_ssh).classes('bg-blue-600 text-white shadow-lg px-6')
                 else:
-                    # --- 已连接状态：实例化 WebSSH ---
-                    # 注意：这里我们复用全局的 WebSSH 类，传入 terminal_box 作为容器
                     ssh = WebSSH(terminal_box, server_conf)
                     ssh_state['instance'] = ssh
-                    # 延时启动连接，等待 DOM 渲染
                     ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
 
         async def start_ssh():
@@ -4511,29 +4508,21 @@ async def render_single_server_view(server_conf, force_refresh=False):
             ssh_state['active'] = False
             render_ssh_area()
 
-        # 初始渲染
         render_ssh_area()
-
 
     # 4. 数据更新任务
     async def update_data_task():
         try:
             if 'heartbeat' in ui_refs: ui_refs['heartbeat'].classes(remove='opacity-0')
-            
             status = await get_server_status(server_conf)
-            
             if status:
                 is_lite = status.get('_is_lite', False)
                 def smart_fmt(used_pct, total_val):
                     try:
                         total = float(total_val)
                         if total == 0: return "-- / --"
-                        if total > 10000: # Bytes
-                            used = total * (used_pct / 100)
-                            return f"{format_bytes(used)} / {format_bytes(total)}"
-                        else: # GB
-                            used = total * (used_pct / 100)
-                            return f"{round(used, 1)} / {round(total, 1)} GB"
+                        if total > 10000: used = total * (used_pct / 100); return f"{format_bytes(used)} / {format_bytes(total)}"
+                        else: used = total * (used_pct / 100); return f"{round(used, 1)} / {round(total, 1)} GB"
                     except: return "-- / --"
 
                 cpu = float(status.get('cpu_usage', 0))
@@ -4541,16 +4530,12 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui_refs['cpu_ring'].set_value(cpu / 100)
                     ui_refs['cpu_ring'].props(f'color={"orange" if is_lite else "blue"}')
                 if 'cpu_pct' in ui_refs: ui_refs['cpu_pct'].set_text(f"{round(cpu, 1)}%")
-                
                 if 'cpu_detail' in ui_refs:
                     cores = status.get('cpu_cores', 0)
-                    detail_text = f"{cores} Cores" if cores and cores > 0 else f"{int(cpu)}% Used"
-                    ui_refs['cpu_detail'].set_text(detail_text)
+                    ui_refs['cpu_detail'].set_text(f"{cores} Cores" if cores and cores > 0 else f"{int(cpu)}% Used")
                 
-                # ✨✨✨ 【修复核心】直接读取百分比，不再进行重复计算 ✨✨✨
                 mem_pct = float(status.get('mem_usage', 0))
                 mem_total = float(status.get('mem_total', 1))
-                
                 if 'mem_ring' in ui_refs: ui_refs['mem_ring'].set_value(mem_pct / 100)
                 if 'mem_pct' in ui_refs: ui_refs['mem_pct'].set_text(f"{int(mem_pct)}%")
                 if 'mem_detail' in ui_refs: ui_refs['mem_detail'].set_text(smart_fmt(mem_pct, mem_total))
@@ -4562,29 +4547,19 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 if 'disk_detail' in ui_refs: ui_refs['disk_detail'].set_text(smart_fmt(disk_pct, disk_total))
 
                 def fmt_speed(b): return f"{format_bytes(b)}/s"
-                net_in = status.get('net_speed_in', 0)
-                net_out = status.get('net_speed_out', 0)
-                if 'speed_up' in ui_refs: ui_refs['speed_up'].set_text(fmt_speed(net_out))
-                if 'speed_down' in ui_refs: ui_refs['speed_down'].set_text(fmt_speed(net_in))
-
-                total_in = status.get('net_total_in', 0)
-                total_out = status.get('net_total_out', 0)
-                if 'total_up' in ui_refs: ui_refs['total_up'].set_text(format_bytes(total_out))
-                if 'total_down' in ui_refs: ui_refs['total_down'].set_text(format_bytes(total_in))
-                
+                if 'speed_up' in ui_refs: ui_refs['speed_up'].set_text(fmt_speed(status.get('net_speed_out', 0)))
+                if 'speed_down' in ui_refs: ui_refs['speed_down'].set_text(fmt_speed(status.get('net_speed_in', 0)))
+                if 'total_up' in ui_refs: ui_refs['total_up'].set_text(format_bytes(status.get('net_total_out', 0)))
+                if 'total_down' in ui_refs: ui_refs['total_down'].set_text(format_bytes(status.get('net_total_in', 0)))
                 if 'uptime_main' in ui_refs: ui_refs['uptime_main'].set_text(status.get('uptime', '-'))
                 if 'load_main' in ui_refs: ui_refs['load_main'].set_text(str(status.get('load_1', '--')))
                 
                 if 'xray_main' in ui_refs: 
                     if not has_xui_config: ui_refs['xray_main'].set_text("Probe Only")
                     else: ui_refs['xray_main'].set_text("Lite Mode" if is_lite else "RUNNING")
-                
-                if 'xray_icon' in ui_refs:
-                    ui_refs['xray_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
-                
+                if 'xray_icon' in ui_refs: ui_refs['xray_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
             else:
-                if 'xray_icon' in ui_refs:
-                    ui_refs['xray_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
+                if 'xray_icon' in ui_refs: ui_refs['xray_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
 
             if 'heartbeat' in ui_refs: ui_refs['heartbeat'].classes(add='opacity-0')
         except: pass
