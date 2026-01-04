@@ -2694,18 +2694,14 @@ async def delete_inbound_with_confirm(mgr, inbound_id, inbound_remark, callback)
                 
             ui.button('确定删除', color='red', on_click=do_delete)
     d.open()
-
-# =================订阅编辑器 (包含 Token 编辑) =================
+# ================= 订阅编辑器 (修复版：解决并发列表变更导致的 IndexError) =================
 class SubEditor:
     def __init__(self, data=None):
         self.data = data
         if data:
             self.d = data.copy()
-            # 🛡️ 安全修复：如果旧数据里没有 token，自动补全一个，防止报错
-            if 'token' not in self.d:
-                self.d['token'] = str(uuid.uuid4())
-            if 'nodes' not in self.d:
-                self.d['nodes'] = []
+            if 'token' not in self.d: self.d['token'] = str(uuid.uuid4())
+            if 'nodes' not in self.d: self.d['nodes'] = []
         else:
             self.d = {'name': '', 'token': str(uuid.uuid4()), 'nodes': []}
             
@@ -2716,69 +2712,44 @@ class SubEditor:
         self.token_input = None 
 
     def ui(self, dlg):
-        # 外层卡片
         with ui.card().classes('w-[90vw] max-w-4xl p-0 bg-white').style('display: flex; flex-direction: column; height: 85vh;'):
-            
-            # 1. 标题栏
             with ui.row().classes('w-full justify-between items-center p-4 border-b bg-gray-50'):
                 ui.label('订阅编辑器').classes('text-xl font-bold')
                 ui.button(icon='close', on_click=dlg.close).props('flat round dense')
             
-            # 2. 滚动区域
             with ui.element('div').classes('w-full flex-grow overflow-y-auto p-4').style('display: flex; flex-direction: column; gap: 1rem;'):
-                
-                # 订阅名称
                 self.name_input = ui.input('订阅名称', value=self.d.get('name', '')).classes('w-full').props('outlined')
                 self.name_input.on_value_change(lambda e: self.d.update({'name': e.value}))
                 
-                # 订阅路径 (Token)
                 with ui.row().classes('w-full items-center gap-2'):
                     self.token_input = ui.input('订阅路径 (Token)', value=self.d.get('token', ''), placeholder='例如: my-phone').classes('flex-grow').props('outlined')
                     self.token_input.on_value_change(lambda e: self.d.update({'token': e.value.strip()}))
-                    
-                    # 随机生成按钮
                     ui.button(icon='refresh', on_click=lambda: self.token_input.set_value(str(uuid.uuid4()))).props('flat dense').tooltip('生成随机 UUID')
 
-                # 全选工具栏
                 with ui.row().classes('w-full items-center justify-between bg-gray-100 p-2 rounded'):
                     ui.label('节点列表').classes('font-bold ml-2')
                     with ui.row().classes('gap-2'):
                         ui.button('全选', on_click=lambda: self.toggle_all(True)).props('flat dense size=sm color=primary')
                         ui.button('清空', on_click=lambda: self.toggle_all(False)).props('flat dense size=sm color=red')
 
-                # 列表容器
                 self.cont = ui.column().classes('w-full').style('display: flex; flex-direction: column; gap: 10px;')
             
-            # 3. 底部保存
             with ui.row().classes('w-full p-4 border-t'):
                 async def save():
                     if self.name_input: self.d['name'] = self.name_input.value
-                    
                     if self.token_input: 
                         new_token = self.token_input.value.strip()
-                        if not new_token:
-                            safe_notify("订阅路径不能为空", "negative")
-                            return
-                        # 查重逻辑
+                        if not new_token: return safe_notify("订阅路径不能为空", "negative")
                         if (not self.data) or (self.data.get('token') != new_token):
                             for s in SUBS_CACHE:
-                                if s.get('token') == new_token:
-                                    safe_notify(f"路径 '{new_token}' 已被占用", "negative")
-                                    return
+                                if s.get('token') == new_token: return safe_notify(f"路径 '{new_token}' 已被占用", "negative")
                         self.d['token'] = new_token
                         
                     self.d['nodes'] = list(self.sel)
-                    
                     if self.data: 
-                        # 更新现有
-                        try:
-                            idx = SUBS_CACHE.index(self.data)
-                            SUBS_CACHE[idx] = self.d
-                        except:
-                            SUBS_CACHE.append(self.d)
-                    else: 
-                        # 新建
-                        SUBS_CACHE.append(self.d)
+                        try: idx = SUBS_CACHE.index(self.data); SUBS_CACHE[idx] = self.d
+                        except: SUBS_CACHE.append(self.d)
+                    else: SUBS_CACHE.append(self.d)
                     
                     await save_subs()
                     await load_subs_view()
@@ -2793,13 +2764,17 @@ class SubEditor:
         with self.cont: 
             ui.spinner('dots').classes('self-center mt-10')
 
-        tasks = [fetch_inbounds_safe(s, force_refresh=False) for s in SERVERS_CACHE]
+        # ✨✨✨ 修复核心：先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
+        current_servers_snapshot = list(SERVERS_CACHE)
+        
+        tasks = [fetch_inbounds_safe(s, force_refresh=False) for s in current_servers_snapshot]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         self.groups_data = {}
         self.all_node_keys = set()
         
-        for i, srv in enumerate(SERVERS_CACHE):
+        # 使用快照进行遍历，确保索引一一对应
+        for i, srv in enumerate(current_servers_snapshot):
             nodes = results[i]
             if not nodes or isinstance(nodes, Exception): nodes = NODES_DATA.get(srv['url'], [])
             if nodes:
@@ -2838,7 +2813,7 @@ class SubEditor:
                                             key = f"{srv['url']}|{n['id']}"
                                             cb = ui.checkbox(n['remark'], value=(key in self.sel))
                                             cb.classes('w-full text-sm dense').style('display: flex; width: 100%;')
-                                            cb.on('update:model-value', lambda e, k=key: self.on_check(k, e.args))
+                                            cb.on_value_change(lambda e, k=key: self.on_check(k, e.value))
 
     def on_check(self, key, value):
         if value: self.sel.add(key)
@@ -2848,7 +2823,6 @@ class SubEditor:
         if select_state: self.sel.update(self.all_node_keys)
         else: self.sel.clear()
         self.render_list()
-
 
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
@@ -3656,23 +3630,15 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-# ================= 订阅策略编辑器  =================
+# ================= 订阅策略编辑器 (修复 Switch 报错) =================
 class SubscriptionProcessEditor:
     def __init__(self, sub_data):
         self.sub_data = sub_data
-        # 初始化默认 options
         if 'options' not in self.sub_data:
             self.sub_data['options'] = {
-                'emoji': True,
-                'udp': True,
-                'sort': False,
-                'tfo': False,
-                'skip_cert': True,
-                'include_regex': '',
-                'exclude_regex': '',
-                'rename_pattern': '',       
-                'rename_replacement': '', 
-                'regions': []
+                'emoji': True, 'udp': True, 'sort': False, 'tfo': False,
+                'skip_cert': True, 'include_regex': '', 'exclude_regex': '',
+                'rename_pattern': '', 'rename_replacement': '', 'regions': []
             }
         self.opt = self.sub_data['options']
         
@@ -3689,16 +3655,10 @@ class SubscriptionProcessEditor:
             for n in nodes:
                 key = f"{srv['url']}|{n['id']}"
                 if key in sub_nodes_set:
-                    self.raw_nodes.append({
-                        'name': n['remark'],
-                        'original_name': n['remark'],
-                        'server_name': srv['name']
-                    })
+                    self.raw_nodes.append({'name': n['remark'], 'original_name': n['remark'], 'server_name': srv['name']})
 
     def update_preview(self):
-        """核心：模拟 SubConverter 逻辑生成预览"""
         import re
-        
         result = []
         selected_regions = set(self.opt.get('regions', []))
         
@@ -3706,56 +3666,42 @@ class SubscriptionProcessEditor:
             current_node = node.copy()
             name = current_node['name']
             
-            # 1. 区域过滤
             node_region = detect_country_group(name)
             if selected_regions and node_region not in selected_regions: continue
             
-            # 2. 正则保留 (Include)
             inc_reg = self.opt.get('include_regex', '').strip()
             if inc_reg:
                 try: 
                     if not re.search(inc_reg, name, re.IGNORECASE): continue
                 except: pass
             
-            # 3. 正则排除 (Exclude)
             exc_reg = self.opt.get('exclude_regex', '').strip()
             if exc_reg:
                 try:
                     if re.search(exc_reg, name, re.IGNORECASE): continue
                 except: pass
 
-            # ✨✨✨ 4. 正则重命名 (Rename) ✨✨✨
             ren_pat = self.opt.get('rename_pattern', '').strip()
             ren_rep = self.opt.get('rename_replacement', '').strip()
             if ren_pat:
                 try:
-                    # 兼容性处理：用户习惯用 $1, $2 表示分组，但 Python re 使用 \1, \2
-                    # 我们简单做一个替换，把 $ 换成 \ (仅在 \ 未被转义时)
                     py_rep = ren_rep.replace('$', '\\')
                     name = re.sub(ren_pat, py_rep, name)
-                    current_node['name'] = name # 更新名字供后续使用
+                    current_node['name'] = name
                 except: pass
 
-            # 5. 自动国旗
             if self.opt.get('emoji', True):
-                # 重新检测区域（因为名字可能变了，或者利用旧名字检测）
-                # 这里还是用原始名字检测区域比较稳妥
                 flag = node_region.split(' ')[0] 
-                if flag and flag not in name: # 保持“有了就不加”的逻辑
-                     current_node['name'] = f"{flag} {name}"
+                if flag and flag not in name: current_node['name'] = f"{flag} {name}"
             
             result.append(current_node)
         
-        # 6. 排序
-        if self.opt.get('sort', False):
-            result.sort(key=lambda x: x['name'])
-            
+        if self.opt.get('sort', False): result.sort(key=lambda x: x['name'])
         self.preview_nodes = result
         if hasattr(self, 'preview_container'): self.render_preview_ui()
 
     def ui(self, dlg):
         with ui.card().classes('w-full max-w-6xl h-[90vh] flex flex-col p-0 overflow-hidden bg-white'):
-            # --- 标题栏 ---
             with ui.row().classes('w-full justify-between items-center p-4 bg-white border-b shadow-sm z-20'):
                 with ui.row().classes('items-center gap-2'):
                     ui.icon('tune', color='primary').classes('text-xl')
@@ -3764,9 +3710,7 @@ class SubscriptionProcessEditor:
                     ui.button('取消', on_click=dlg.close).props('flat color=grey')
                     ui.button('保存配置', icon='save', on_click=lambda: [self.save(), dlg.close(), safe_notify('策略已更新', 'positive')]).classes('bg-slate-900 text-white shadow-lg')
 
-            # --- 内容区 ---
             with ui.row().classes('w-full flex-grow overflow-hidden gap-0'):
-                # 左侧预览
                 with ui.column().classes('w-[350px] flex-shrink-0 h-full border-r bg-gray-50 flex flex-col'):
                     with ui.row().classes('w-full p-3 bg-white border-b justify-between items-center'):
                         ui.label('效果预览').classes('text-xs font-bold text-gray-500')
@@ -3775,11 +3719,8 @@ class SubscriptionProcessEditor:
                         self.preview_container = ui.column().classes('w-full gap-1')
                         self.render_preview_ui()
 
-                # 右侧配置
                 with ui.column().classes('flex-grow h-full overflow-y-auto bg-white'):
                     with ui.column().classes('w-full max-w-3xl mx-auto p-8 gap-6'):
-                        
-                        # 1. 基础开关
                         ui.label('基础处理').classes('text-sm font-bold text-gray-900')
                         with ui.grid().classes('w-full grid-cols-1 sm:grid-cols-2 gap-4'):
                             self._render_switch('自动添加国旗 (Emoji)', 'emoji', 'flag')
@@ -3789,7 +3730,6 @@ class SubscriptionProcessEditor:
                             self._render_switch('TCP Fast Open', 'tfo', 'speed')
                         ui.separator()
 
-                        # ✨✨✨ 2. 正则重命名 (新增) ✨✨✨
                         ui.label('正则重命名 (Rename)').classes('text-sm font-bold text-gray-900')
                         with ui.card().classes('w-full p-4 border border-gray-200 shadow-none bg-blue-50'):
                             with ui.row().classes('w-full items-center gap-2 mb-2'):
@@ -3806,7 +3746,6 @@ class SubscriptionProcessEditor:
                                     i_rep.on_value_change(lambda e: [self.opt.update({'rename_replacement': e.value}), self.update_preview()])
                         ui.separator()
 
-                        # 3. 正则过滤
                         ui.label('正则过滤').classes('text-sm font-bold text-gray-900')
                         with ui.column().classes('w-full gap-3'):
                             with ui.input('保留匹配 (Include)', placeholder='例如: 香港|SG', value=self.opt.get('include_regex', '')) \
@@ -3817,7 +3756,6 @@ class SubscriptionProcessEditor:
                                 i2.on_value_change(lambda e: [self.opt.update({'exclude_regex': e.value}), self.update_preview()])
                         ui.separator()
 
-                        # 4. 区域过滤
                         with ui.row().classes('w-full justify-between items-end'):
                             ui.label('区域过滤').classes('text-sm font-bold text-gray-900')
                             with ui.row().classes('gap-1'):
@@ -3854,13 +3792,17 @@ class SubscriptionProcessEditor:
 
     def _render_switch(self, label, key, icon):
         val = self.opt.get(key, False)
-        with ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer'):
+        # ✨✨✨ 修复核心：正确捕获卡片对象并绑定点击事件 ✨✨✨
+        card = ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer')
+        with card:
             with ui.row().classes('items-center gap-3'):
                 ui.icon(icon).classes('text-lg text-blue-500')
                 ui.label(label).classes('text-sm font-medium text-gray-700 select-none')
             sw = ui.switch(value=val).props('dense color=primary')
-            ui.context.client.layout.on('click', lambda: sw.c.set_value(not c.value)) 
             sw.on_value_change(lambda e: [self.opt.update({key: e.value}), self.update_preview()])
+            
+        # 点击卡片反转开关
+        card.on('click', lambda: sw.set_value(not sw.value))
 
     def sync_regions_opt(self):
         self.opt['regions'] = [r for r, chk in self.region_checks.items() if chk.value]
