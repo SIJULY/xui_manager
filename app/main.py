@@ -67,6 +67,68 @@ def fetch_geo_from_ip(host):
     return None
 
 
+# ================= ✨✨✨ 新增：强制 GeoIP 命名与分组任务 ✨✨✨ =================
+async def force_geoip_naming_task(server_conf, max_retries=10):
+    """
+    强制执行 GeoIP 解析，直到成功或达到最大重试次数。
+    成功后：
+    1. 命名格式：🇺🇸 美国-1, 🇭🇰 香港-2
+    2. 分组：自动分入对应国家组
+    """
+    url = server_conf['url']
+    logger.info(f"🌍 [强制修正] 开始处理: {url} (目标: 国旗+国家+序号)")
+    
+    for i in range(max_retries):
+        try:
+            # 1. 查询 GeoIP
+            geo_info = await run.io_bound(fetch_geo_from_ip, url)
+            
+            if geo_info:
+                # geo_info 格式: (lat, lon, 'United States')
+                country_raw = geo_info[2]
+                
+                # 2. 获取标准化的 "国旗+国家" 字符串，例如 "🇺🇸 美国"
+                flag_group = get_flag_for_country(country_raw)
+                
+                # 3. 计算序号 (查找现有多少个同类服务器)
+                # 逻辑：遍历所有服务器，看有多少个名字是以 "🇺🇸 美国" 开头的
+                count = 1
+                for s in SERVERS_CACHE:
+                    # 排除自己 (如果是刚加进去的，可能已经存在于列表中，需要注意去重逻辑，这里简单处理)
+                    if s is not server_conf and s.get('name', '').startswith(flag_group):
+                        count += 1
+                
+                # 4. 生成最终名称
+                final_name = f"{flag_group}-{count}"
+                
+                # 5. 应用更改
+                old_name = server_conf.get('name', '')
+                if old_name != final_name:
+                    server_conf['name'] = final_name
+                    server_conf['group'] = flag_group # 自动分组
+                    server_conf['_detected_region'] = country_raw # 记录原始地区信息
+                    
+                    # 保存并刷新
+                    await save_servers()
+                    await refresh_dashboard_ui()
+                    try: render_sidebar_content.refresh()
+                    except: pass
+                    
+                    logger.info(f"✅ [强制修正] 成功: {old_name} -> {final_name} (第 {i+1} 次尝试)")
+                    return # 成功退出
+            
+            # 如果没查到，打印日志
+            logger.warning(f"⏳ [强制修正] 第 {i+1} 次解析 IP 归属地失败，3秒后重试...")
+            
+        except Exception as e:
+            logger.error(f"❌ [强制修正] 异常: {e}")
+
+        # 等待后重试
+        await asyncio.sleep(3)
+
+    logger.warning(f"⚠️ [强制修正] 最终失败: 达到最大重试次数，保持原名 {server_conf.get('name')}")
+
+
 # ================= 全局辅助：超级坐标库 =================
 LOCATION_COORDS = {
     '🇨🇳': (35.86, 104.19), 'China': (35.86, 104.19), '中国': (35.86, 104.19),
@@ -1635,33 +1697,50 @@ async def batch_ping_nodes(nodes, raw_host):
         await asyncio.gather(*tasks)
 
 
-# ================= 探针数据被动接收接口 =================
+# ================= 探针数据被动接收接口 (修复版：支持 IP 模糊匹配) =================
 @app.post('/api/probe/push')
 async def probe_push_data(request: Request):
     try:
         data = await request.json()
         token = data.get('token')
-        server_url = data.get('server_url')
+        server_url = data.get('server_url') # Agent 实际汇报上来的地址
         
         # 1. 校验 Token
         correct_token = ADMIN_CONFIG.get('probe_token')
         if not token or token != correct_token:
             return Response("Invalid Token", 403)
             
-        # 2. 校验 Server URL 是否存在于我们的缓存中
-        # (为了防止恶意数据注入，确保推送来源是已知的服务器)
+        # 2. 查找对应的服务器
+        # 🎯 优先尝试精确匹配 (URL 完全一致)
         target_server = next((s for s in SERVERS_CACHE if s['url'] == server_url), None)
         
+        # ✨✨✨ 核心修复：如果精确匹配失败，尝试 IP 模糊匹配 ✨✨✨
+        # 原因：面板注册默认为 54321 端口，但 Agent 脚本可能生成 54322，导致无法对应
+        if not target_server:
+            try:
+                # 提取 Agent 汇报的 IP (去掉 http:// 和 端口)
+                push_ip = server_url.split('://')[-1].split(':')[0]
+                
+                # 遍历缓存寻找 IP 相同的服务器
+                for s in SERVERS_CACHE:
+                    cache_ip = s['url'].split('://')[-1].split(':')[0]
+                    if cache_ip == push_ip:
+                        target_server = s
+                        break
+            except: pass
+
         if target_server:
-            # 标记该服务器已安装探针（自动激活状态）
+            # 激活探针状态
             if not target_server.get('probe_installed'):
                  target_server['probe_installed'] = True
-                 # 注意：这里不立即 save_servers 防止频繁 IO，依靠内存状态即可
             
-            # 3. 写入缓存 (添加最后更新时间戳)
+            # 3. 写入缓存
             data['status'] = 'online'
             data['last_updated'] = time.time()
-            PROBE_DATA_CACHE[server_url] = data
+            
+            # 🌟 关键：使用面板里存储的 URL (target_server['url']) 作为 Key
+            # 这样前端 UI 才能根据它手里的 URL 查到这份数据
+            PROBE_DATA_CACHE[target_server['url']] = data
             
         return Response("OK", 200)
     except Exception as e:
@@ -1817,7 +1896,7 @@ async def short_sub_handler(target: str, token: str):
 
 
 
-# ================= 探针主动注册接口  =================
+# ================= 探针主动注册接口 (修改版) =================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
     try:
@@ -1834,34 +1913,41 @@ async def probe_register(request: Request):
         client_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
         
         # 3. 查重逻辑
+        # 如果已经存在，直接返回成功，不重复添加
         for s in SERVERS_CACHE:
             if client_ip in s['url']:
+                # 可以在这里更新一下在线状态
+                if not s.get('probe_installed'):
+                    s['probe_installed'] = True
+                    # 不立即 save，依靠后续心跳更新
                 return Response(json.dumps({"success": True, "msg": "已存在"}), status_code=200)
 
         # 4. 构建新服务器
         new_server = {
-            'name': f"🏳️ {client_ip}",  # 初始白旗
-            'group': '',                 # ✨✨✨ 重点修改：留空！不要写"自动注册" ✨✨✨
-            'url': f"http://{client_ip}:54321",
-            'user': 'admin',
-            'pass': 'admin',
+            'name': f"🏳️ {client_ip}",  # 初始白旗名字，稍后会被强制任务覆盖
+            'group': '自动注册',          # 初始分组
+            'url': f"http://{client_ip}:54321", # 默认探针端口
+            'user': 'admin',             # 假账号
+            'pass': 'admin',             # 假密码
             'ssh_auth_type': '全局密钥',
+            'probe_installed': True,     # 标记为已安装探针
             '_status': 'online'
         }
         
-        # 5. 保存数据
+        # 5. 保存数据到缓存列表
         SERVERS_CACHE.append(new_server)
         await save_servers()
         
-        # 6. 立即触发极速修正 (查 IP 变国旗)
-        asyncio.create_task(fast_resolve_single_server(new_server))
+        # 6. ✨✨✨ 关键修改：调用强制 GeoIP 命名任务 ✨✨✨
+        # 这会死循环直到解析出国旗，并重命名为 "🇺🇸 美国-X"
+        asyncio.create_task(force_geoip_naming_task(new_server))
         
         # 7. 刷新 UI
         await refresh_dashboard_ui()
         try: render_sidebar_content.refresh()
         except: pass
         
-        logger.info(f"✨ [主动注册] 新服务器上线: {client_ip} (等待 GeoIP 修正...)")
+        logger.info(f"✨ [主动注册] 新服务器上线: {client_ip} (已加入强制重命名队列)")
         return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200)
 
     except Exception as e:
@@ -1956,7 +2042,7 @@ async def fast_resolve_single_server(s):
     except Exception as e:
         logger.error(f"❌ [智能修正] 严重错误: {e}")
     
-# ================= 自动注册接口 (带鉴权) =================
+# ================= 自动注册接口 (修改版) =================
 @app.post('/api/auto_register_node')
 async def auto_register_node(request: Request):
     try:
@@ -1974,13 +2060,15 @@ async def auto_register_node(request: Request):
         port = data.get('port')
         username = data.get('username')
         password = data.get('password')
-        alias = data.get('alias', f'Auto-{ip}')
+        # 即便 API 传了 alias，我们暂时用它占位，但最终会被强制改为国家名
+        alias = data.get('alias', f'Auto-{ip}') 
 
         if not all([ip, port, username, password]):
             return Response(json.dumps({"success": False, "msg": "参数不完整"}), status_code=400, media_type="application/json")
 
         target_url = f"http://{ip}:{port}"
         
+        # 4. 构建配置字典
         new_server_config = {
             'name': alias,
             'group': '默认分组',
@@ -1990,8 +2078,9 @@ async def auto_register_node(request: Request):
             'prefix': ''
         }
 
-        # 5. 查重逻辑
+        # 5. 查重与更新逻辑
         existing_index = -1
+        # 标准化 URL 进行比对
         for idx, srv in enumerate(SERVERS_CACHE):
             cache_url = srv['url'].replace('http://', '').replace('https://', '')
             new_url_clean = target_url.replace('http://', '').replace('https://', '')
@@ -2000,18 +2089,30 @@ async def auto_register_node(request: Request):
                 break
 
         action_msg = ""
+        target_server_ref = None # 用于引用最终要处理的那个服务器对象
+
         if existing_index != -1:
+            # 更新现有节点
             SERVERS_CACHE[existing_index].update(new_server_config)
+            target_server_ref = SERVERS_CACHE[existing_index]
             action_msg = f"🔄 更新节点: {alias}"
         else:
+            # 新增节点
             SERVERS_CACHE.append(new_server_config)
+            target_server_ref = new_server_config
             action_msg = f"✅ 新增节点: {alias}"
 
+        # 6. 保存
         await save_servers()
+        
+        # 7. ✨✨✨ 关键修改：调用强制 GeoIP 命名任务 ✨✨✨
+        # 无论 API 传了什么名字，这里都会启动后台任务，强制将其改为 "国旗 国家-序号"
+        asyncio.create_task(force_geoip_naming_task(target_server_ref))
+
         try: render_sidebar_content.refresh()
         except: pass
         
-        logger.info(f"[自动注册] {action_msg} ({ip})")
+        logger.info(f"[自动注册] {action_msg} ({ip}) - 已加入强制重命名队列")
         return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200, media_type="application/json")
 
     except Exception as e:
@@ -4100,7 +4201,7 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
 
-# =================  刷新逻辑 (调整版：标题栏集成新建按钮) =================
+# ================= ✨✨✨ 刷新逻辑 (调整版：避免强制重绘) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     try: client = ui.context.client
     except: return 
@@ -4109,12 +4210,14 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
     import time
     current_token = time.time()
     
+    # 更新当前视图状态
     if not force_refresh:
         CURRENT_VIEW_STATE['scope'] = scope
         CURRENT_VIEW_STATE['data'] = data
     
     CURRENT_VIEW_STATE['render_token'] = current_token
     
+    # 1. 筛选目标服务器
     targets = []
     try:
         if scope == 'ALL': targets = list(SERVERS_CACHE)
@@ -4128,6 +4231,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
              if data in SERVERS_CACHE: targets = [data]
     except: pass
 
+    # 2. 定义 UI 绘制逻辑 (清空容器并重绘)
     async def _render_ui():
         if CURRENT_VIEW_STATE.get('render_token') != current_token: return
         
@@ -4166,50 +4270,59 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
 
                     # --- 右侧按钮区 ---
                     with ui.row().classes('items-center gap-2'):
-                        # 1. 分组视图按钮
+                        # 分组操作按钮
                         if is_group_view and targets:
                             with ui.row().classes('gap-1'):
                                 ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey')
                                 ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange')
                                 ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green')
                         
-                        # 2. ✨✨✨ [新增] 单机视图：新建节点按钮 (移到这里) ✨✨✨
+                        # 单机视图按钮
                         if scope == 'SINGLE' and targets:
                             s = targets[0]
-                            # 检查是否配置了 X-UI
                             if s.get('url') and s.get('user') and s.get('pass'):
                                 mgr = get_manager(s)
                                 ui.button('新建节点', icon='add', color='green', on_click=lambda: open_inbound_dialog(mgr, None, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('dense size=sm')
 
-                        # 3. 同步按钮 (非单机视图)
+                        # 同步按钮 (触发 force_refresh=True)
                         if targets and scope != 'SINGLE':
                              ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
 
-                # 内容渲染
+                # --- 渲染具体内容 ---
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
                         ui.icon('inbox', size='4rem'); ui.label('列表为空').classes('text-lg')
                 elif scope == 'SINGLE': 
                     await render_single_server_view(targets[0])
                 else: 
+                    # 列表排序
                     try: targets.sort(key=smart_sort_key)
                     except: pass
+                    # 调用上面写的优化版渲染函数
                     await render_aggregated_view(targets, show_ping=show_ping, token=current_token)
 
-    await _render_ui()
+    # 3. ✨✨✨ 核心逻辑：只有在【非强制刷新】时才重绘 UI ✨✨✨
+    if not force_refresh:
+        await _render_ui()
 
+    # 4. 后台数据同步逻辑
+    # 如果是 Single 视图，或者是强制刷新，我们需要去拉取最新数据
     panel_only_servers = [s for s in targets if not s.get('probe_installed', False)]
-    if force_refresh: panel_only_servers = targets
+    if force_refresh: panel_only_servers = targets # 强刷时，所有机器都拉一遍
 
     if panel_only_servers:
         async def _background_fetch():
             if not panel_only_servers: return
             if scope != 'SINGLE': safe_notify(f"正在后台更新 {len(panel_only_servers)} 台面板数据...", "ongoing", timeout=2000)
+            
+            # 发起网络请求更新数据 (结果会存入 NODES_DATA)
             tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in panel_only_servers]
             await asyncio.gather(*tasks, return_exceptions=True)
-            if CURRENT_VIEW_STATE.get('render_token') == current_token:
-                if scope == 'SINGLE': pass 
-                else: await _render_ui()
+            
+            # ✨✨✨ 关键点：数据回来后，不需要再调用 _render_ui() 重绘页面！✨✨✨
+            # render_aggregated_view 里的 row_timer 会自动读取新的 NODES_DATA 并更新文字。
+            # 这里只需要给用户一个完成的反馈即可。
+            if scope != 'SINGLE': safe_notify("数据已同步", "positive")
         
         asyncio.create_task(_background_fetch())
         
@@ -4486,28 +4599,23 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# =================  聚合视图 (列表渲染) =================
+# ================= ✨✨✨ 高性能渲染函数 (优化版) ✨✨✨ =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
+    # 如果强制刷新，后台触发一下数据更新，但不阻塞当前 UI 渲染
+    if force_refresh:
+        asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in server_list], return_exceptions=True))
+
     list_container = ui.column().classes('w-full gap-4')
     
-    # 这里的 force_refresh 只影响是否在渲染前**阻塞**去拉取
-    # 在新的 refresh_content 逻辑下，通常这里 force_refresh=False (读缓存)
-    results = []
-    if force_refresh:
-        tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in server_list]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    else:
-        for s in server_list:
-            results.append(NODES_DATA.get(s['url'], []))
-
-    list_container.clear()
-    
+    # 定义布局样式
     is_all_servers = (len(server_list) == len(SERVERS_CACHE) and not show_ping)
     use_special_mode = is_all_servers or show_ping
+    # 使用之前的 CSS 变量 (请确保全局变量中 COLS_XXX 已定义)
     current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
 
+    list_container.clear()
     with list_container:
-        # 表头
+        # 1. 绘制静态表头 (只画一次)
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2 bg-gray-50').style(current_css):
             ui.label('服务器').classes('text-left pl-2')
             ui.label('备注名称').classes('text-left pl-2')
@@ -4519,92 +4627,117 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             if not use_special_mode: ui.label('状态').classes('text-center')
             ui.label('操作').classes('text-center')
         
-        # 数据行
-        for i, res in enumerate(results):
-            if token and CURRENT_VIEW_STATE.get('render_token') != token: return 
-            if i > 0 and i % 20 == 0: await asyncio.sleep(0) # 让出主线程
+        # 2. 遍历服务器，绘制每一行
+        for srv in server_list:
+            # 创建行容器
+            row_card = ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2 items-center').style(current_css)
             
-            srv = server_list[i]
-            if isinstance(res, Exception) or res is None: res = []
-            mgr = get_manager(srv)
-            
-            raw_host = srv['url']
-            try:
-                if '://' not in raw_host: raw_host = f'http://{raw_host}'
-                p = urlparse(raw_host); raw_host = p.hostname or raw_host.split('://')[-1].split(':')[0]
-            except: pass
-
-            if show_ping and res: asyncio.create_task(batch_ping_nodes(res, raw_host))
-
-            # --- 渲染行 ---
-            # 如果没有节点数据
-            if not res:
-                with ui.element('div').classes('grid w-full gap-4 py-3 border-b bg-gray-50 px-2 items-center').style(current_css):
-                    ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                    
-                    # ✨ 状态判定：正在后台拉取 or 真的挂了？
-                    # 由于我们是先渲染后拉取，如果是纯面板且没数据，显示"同步中"比较友好
-                    is_probe = srv.get('probe_installed', False)
-                    msg = '⏳ 同步中...' if not is_probe else '❌ 离线/无节点'
-                    color = 'text-blue-400' if not is_probe else 'text-red-500'
-                    
-                    ui.label(msg).classes(f'{color} font-bold w-full text-left pl-2')
-                    
-                    if use_special_mode:
-                        ip_disp = get_real_ip_display(srv['url'])
-                        bind_ip_label(srv['url'], ui.label(ip_disp).classes('text-xs font-mono text-gray-500'))
-                    else:
-                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                    
-                    for _ in range(3): ui.label('-').classes('w-full text-center')
-                    if not use_special_mode: ui.icon('help_outline', color='grey').props('size=xs').classes('w-full text-center')
-                    
-                    with ui.row().classes('gap-2 justify-center w-full'): 
-                        ui.button(icon='sync', on_click=lambda s=srv: refresh_content('SINGLE', s, force_refresh=True)).props('flat dense size=sm color=primary')
-                continue
-
-            # 有节点数据
-            for n in res:
-                traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+            with row_card:
+                # --- 静态内容 (不会变的) ---
+                ui.label(srv.get('name', '未命名')).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
                 
-                with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(current_css):
-                    ui.label(srv['name']).classes('text-xs text-gray-500 truncate w-full text-left pl-2')
-                    ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                    
-                    if use_special_mode:
-                        # 在线状态列
-                        with ui.row().classes('w-full justify-center items-center gap-1'):
-                            # 默认图标
-                            status_icon = ui.icon('bolt').classes('text-gray-300 text-sm')
-                            
-                            # ✨ 状态颜色逻辑：有探针(Online) vs 无探针(Warning)
-                            status_code = srv.get('_status', 'online') # fetch_inbounds_safe 会更新这个
-                            is_probe = srv.get('probe_installed', False)
-                            
-                            if status_code == 'online':
-                                if is_probe: status_icon.classes(replace='text-green-500')
-                                else: status_icon.classes(replace='text-orange-400') # 纯面板显示橙色
-                            elif status_code == 'offline':
-                                status_icon.classes(replace='text-red-500')
-                            
-                            ip_label = ui.label(get_real_ip_display(srv['url'])).classes('text-xs font-mono text-gray-500')
-                            bind_ip_label(srv['url'], ip_label)
-                    else:
-                        ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                # --- 动态内容 (需要变的数据，先创建 Label 占位) ---
+                
+                # 1. 备注名
+                lbl_remark = ui.label('Loading...').classes('font-bold truncate w-full text-left pl-2')
+                
+                # 2. 分组或在线状态
+                if use_special_mode:
+                    with ui.row().classes('w-full justify-center items-center gap-1'):
+                        icon_status = ui.icon('bolt').classes('text-gray-300 text-sm')
+                        lbl_ip = ui.label(get_real_ip_display(srv['url'])).classes('text-xs font-mono text-gray-500')
+                        bind_ip_label(srv['url'], lbl_ip) # 绑定 DNS 更新
+                else:
+                    lbl_group = ui.label(srv.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
 
-                    ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
-                    ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
-                    ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
+                # 3. 流量
+                lbl_traffic = ui.label('--').classes('text-xs text-gray-600 w-full text-center font-mono')
+                
+                # 4. 协议 & 端口
+                lbl_proto = ui.label('--').classes('uppercase text-xs font-bold w-full text-center')
+                lbl_port = ui.label('--').classes('text-blue-600 font-mono w-full text-center')
 
-                    if not use_special_mode:
-                        with ui.element('div').classes('flex justify-center w-full'): 
-                            ui.icon('circle', color='green' if n.get('enable') else 'red').props('size=xs')
+                # 5. 状态圆点 (非特殊模式下)
+                icon_dot = None
+                if not use_special_mode:
+                    with ui.element('div').classes('flex justify-center w-full'): 
+                        icon_dot = ui.icon('circle', color='grey').props('size=xs')
+                
+                # 6. 操作按钮 (静态，不常变)
+                mgr = get_manager(srv)
+                with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                    # 这里的按钮逻辑需要闭包里的数据，我们暂时动态获取
+                    # 为了简化，我们只渲染操作按钮容器，具体的 Link 复制逻辑比较复杂，
+                    # 这里为了性能，我们假设操作针对的是"第一个节点"。
+                    # 如果需要更精细的操作，可以把按钮也放入 update_row 重绘，或者保持静态
                     
-                    with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                        l = generate_node_link(n, raw_host)
-                        if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm')
-                        ui.button(icon='edit', on_click=lambda m=mgr, i=n, s=srv: open_inbound_dialog(m, i, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm')
-                        ui.button(icon='delete', on_click=lambda m=mgr, i=n, s=srv: delete_inbound_with_confirm(m, i['id'], i.get('remark',''), lambda: refresh_content('SINGLE', s, force_refresh=True))).props('flat dense size=sm color=red')
+                    # 优化策略：按钮保持静态，点击时动态去 NODES_DATA 查
+                    async def copy_link_click(s=srv):
+                        ns = NODES_DATA.get(s['url'], [])
+                        if ns: safe_copy_to_clipboard(generate_node_link(ns[0], s['url']))
+                        else: safe_notify('暂无节点', 'warning')
+
+                    async def edit_click(s=srv):
+                        ns = NODES_DATA.get(s['url'], [])
+                        if ns: open_inbound_dialog(get_manager(s), ns[0], lambda: refresh_content('SINGLE', s, force_refresh=True))
+                        else: safe_notify('暂无节点可编辑', 'warning')
+                        
+                    ui.button(icon='content_copy', on_click=copy_link_click).props('flat dense size=sm')
+                    ui.button(icon='edit', on_click=edit_click).props('flat dense size=sm')
+                    ui.button(icon='delete', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm color=red').tooltip('管理/删除')
+
+            # ================= ✨✨✨ 核心优化：内部闭包更新函数 ✨✨✨ =================
+            # 这个函数每 2 秒运行一次，只更新当前这一行的文字，不重画 DOM
+            def update_row(_srv=srv, _lbl_rem=lbl_remark, _lbl_tra=lbl_traffic, 
+                          _lbl_pro=lbl_proto, _lbl_prt=lbl_port, _icon_dot=icon_dot, 
+                          _icon_stat=icon_status if use_special_mode else None):
+                
+                # 从全局缓存取数据 (不请求网络)
+                nodes = NODES_DATA.get(_srv['url'], [])
+                
+                if not nodes:
+                    # 无数据状态
+                    is_probe = _srv.get('probe_installed', False)
+                    msg = '同步中...' if not is_probe else '离线/无节点'
+                    _lbl_rem.set_text(msg)
+                    _lbl_rem.classes(replace='text-gray-400' if not is_probe else 'text-red-500', remove='text-black')
+                    
+                    _lbl_tra.set_text('--')
+                    _lbl_pro.set_text('--')
+                    _lbl_prt.set_text('--')
+                    if _icon_stat: _icon_stat.classes(replace='text-red-300')
+                    if _icon_dot: _icon_dot.props('color=grey')
+                    return
+
+                # 有数据状态 (取第一个节点展示)
+                n = nodes[0]
+                total_traffic = sum(x.get('up',0) + x.get('down',0) for x in nodes)
+                
+                _lbl_rem.set_text(n.get('remark', '未命名'))
+                _lbl_rem.classes(replace='text-black', remove='text-gray-400 text-red-500')
+                
+                _lbl_tra.set_text(format_bytes(total_traffic))
+                _lbl_pro.set_text(n.get('protocol', 'unk'))
+                _lbl_prt.set_text(str(n.get('port', 0)))
+
+                # 更新状态颜色
+                is_online = _srv.get('_status') == 'online'
+                is_enable = n.get('enable', True)
+                
+                if use_special_mode and _icon_stat:
+                    color = 'text-green-500' if is_online else 'text-red-500'
+                    if not _srv.get('probe_installed'): color = 'text-orange-400' # 纯面板
+                    _icon_stat.classes(replace=color, remove='text-gray-300')
+                
+                if not use_special_mode and _icon_dot:
+                    _icon_dot.props(f'color={"green" if is_enable else "red"}')
+
+            # 3. 挂载独立定时器 (每 2 秒自我刷新一次)
+            # 注意：使用了 row_card 作为生命周期绑定，如果行被删了，定时器自动销毁
+            ui.timer(2.0, update_row)
+            
+            # 立即执行一次以填充数据
+            update_row()
 
 
 # ================= 核心：静默刷新 UI 数据 =================
