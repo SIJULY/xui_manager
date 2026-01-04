@@ -1842,9 +1842,9 @@ async def probe_register(request: Request):
         new_server = {
             'name': f"🏳️ {client_ip}",  # 初始白旗
             'group': '',                 # ✨✨✨ 重点修改：留空！不要写"自动注册" ✨✨✨
-            'url': f"http://{client_ip}:54322",
-            'user': 'probe',
-            'pass': 'probe',
+            'url': f"http://{client_ip}:54321",
+            'user': 'admin',
+            'pass': 'admin',
             'ssh_auth_type': '全局密钥',
             '_status': 'online'
         }
@@ -2547,7 +2547,7 @@ def open_quick_group_create_dialog(callback=None):
                             chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                             
                             # 点击行也可以触发勾选
-                            ui.context.client.layout.on('click', lambda _, c=chk: c.toggle())
+                            ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
 
                             # 显示名称
                             ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
@@ -2761,7 +2761,7 @@ def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
                             checkbox_refs[s['url']] = chk
                             
                             def on_row_click(c=chk, r=row):
-                                c.toggle()
+                                c.set_value(not c.value)
                                 if c.value: r.classes(add='bg-blue-50 border-blue-200', remove='hover:bg-gray-50 border-transparent')
                                 else: r.classes(remove='bg-blue-50 border-blue-200', add='hover:bg-gray-50 border-transparent')
 
@@ -3509,7 +3509,7 @@ class SubscriptionProcessEditor:
                 ui.icon(icon).classes('text-lg text-blue-500')
                 ui.label(label).classes('text-sm font-medium text-gray-700 select-none')
             sw = ui.switch(value=val).props('dense color=primary')
-            ui.context.client.layout.on('click', lambda: sw.toggle()) 
+            ui.context.client.layout.on('click', lambda: sw.c.set_value(not c.value)) 
             sw.on_value_change(lambda e: [self.opt.update({key: e.value}), self.update_preview()])
 
     def sync_regions_opt(self):
@@ -5775,7 +5775,7 @@ def main_page(request: Request):
             
             # 左侧
             with ui.row().classes('items-center gap-2'):
-                ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round dense color=white')
+                ui.button(icon='menu', on_click=lambda: drawer.c.set_value(not c.value)).props('flat round dense color=white')
                 ui.label('X-Fusion Panel').classes('text-lg font-bold ml-2 tracking-wide')
                 ui.label(f"[{display_ip}]").classes('text-xs text-gray-400 font-mono pt-1 hidden sm:block')
 
