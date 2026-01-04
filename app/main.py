@@ -4185,7 +4185,7 @@ COLS_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 90px 50
 
 # 2. 无延迟 (用于：所有服务器、自定义分组) - 移除了延迟列
 # 格式: 服务器(150) 备注(200) 分组(1fr) 流量(100) 协议(80) 端口(80) 状态(50) 操作(150)
-COLS_NO_PING   = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
+COLS_NO_PING   = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
 
 # 单个服务器视图直接复用带延迟的样式
 SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
@@ -4195,7 +4195,7 @@ COLS_ALL_SERVERS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 150px
 
 # ✨✨✨区域分组专用布局  ✨✨✨
 # 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 操作(150)
-COLS_SPECIAL_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 150px; align-items: center;'
+COLS_SPECIAL_WITH_PING = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px 150px; align-items: center;'
 
 # ✨✨✨ 新增：单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
