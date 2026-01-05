@@ -2145,7 +2145,7 @@ async def short_sub_handler(target: str, token: str):
 
 
 
-# ================= 探针主动注册接口 (修改版) =================
+# ================= 探针主动注册接口 (防重复增强版) =================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
     try:
@@ -2158,46 +2158,73 @@ async def probe_register(request: Request):
         if not submitted_token or submitted_token != correct_token:
             return Response(json.dumps({"success": False, "msg": "Token 错误"}), status_code=403)
 
-        # 2. 获取客户端 IP
+        # 2. 获取客户端真实 IP
         client_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
         
-        # 3. 查重逻辑
-        # 如果已经存在，直接返回成功，不重复添加
+        # 3. ✨✨✨ 智能查重逻辑 (核心修改) ✨✨✨
+        target_server = None
+        
+        # 策略 A: 直接字符串匹配 (命中纯 IP 注册的情况)
         for s in SERVERS_CACHE:
             if client_ip in s['url']:
-                # 可以在这里更新一下在线状态
-                if not s.get('probe_installed'):
-                    s['probe_installed'] = True
-                    # 不立即 save，依靠后续心跳更新
-                return Response(json.dumps({"success": True, "msg": "已存在"}), status_code=200)
+                target_server = s
+                break
+        
+        # 策略 B: 如果没找到，尝试 DNS 反向解析 (命中域名注册的情况)
+        if not target_server:
+            logger.info(f"🔍 [探针注册] IP {client_ip} 未直接匹配，尝试解析现有域名...")
+            for s in SERVERS_CACHE:
+                try:
+                    # 提取缓存中的 Host (可能是域名)
+                    cached_host = s['url'].split('://')[-1].split(':')[0]
+                    
+                    # 跳过已经是 IP 的
+                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", cached_host): continue
+                    
+                    # 解析域名为 IP (使用 run.io_bound 防止阻塞)
+                    resolved_ip = await run.io_bound(socket.gethostbyname, cached_host)
+                    
+                    if resolved_ip == client_ip:
+                        target_server = s
+                        logger.info(f"✅ [探针注册] 域名 {cached_host} 解析为 {client_ip}，匹配成功！")
+                        break
+                except: pass
 
-        # 4. 构建新服务器
-        new_server = {
-            'name': f"🏳️ {client_ip}",  # 初始白旗名字，稍后会被强制任务覆盖
-            'group': '自动注册',          # 初始分组
-            'url': f"http://{client_ip}:54321", # 默认探针端口
-            'user': 'admin',             # 假账号
-            'pass': 'admin',             # 假密码
-            'ssh_auth_type': '全局密钥',
-            'probe_installed': True,     # 标记为已安装探针
-            '_status': 'online'
-        }
-        
-        # 5. 保存数据到缓存列表
-        SERVERS_CACHE.append(new_server)
-        await save_servers()
-        
-        # 6. ✨✨✨ 关键修改：调用强制 GeoIP 命名任务 ✨✨✨
-        # 这会死循环直到解析出国旗，并重命名为 "🇺🇸 美国-X"
-        asyncio.create_task(force_geoip_naming_task(new_server))
-        
-        # 7. 刷新 UI
-        await refresh_dashboard_ui()
-        try: render_sidebar_content.refresh()
-        except: pass
-        
-        logger.info(f"✨ [主动注册] 新服务器上线: {client_ip} (已加入强制重命名队列)")
-        return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200)
+        # 4. 逻辑分支
+        if target_server:
+            # === 情况 1: 已存在，仅激活探针 ===
+            if not target_server.get('probe_installed'):
+                target_server['probe_installed'] = True
+                await save_servers() # 保存状态
+                await refresh_dashboard_ui() # 刷新UI
+            
+            return Response(json.dumps({"success": True, "msg": "已合并现有服务器"}), status_code=200)
+
+        else:
+            # === 情况 2: 完全陌生的机器，新建 ===
+            # (之前的创建逻辑保持不变)
+            new_server = {
+                'name': f"🏳️ {client_ip}", 
+                'group': '自动注册',
+                'url': f"http://{client_ip}:54321",
+                'user': 'admin',
+                'pass': 'admin',
+                'ssh_auth_type': '全局密钥',
+                'probe_installed': True,
+                '_status': 'online'
+            }
+            SERVERS_CACHE.append(new_server)
+            await save_servers()
+            
+            # 触发强制重命名
+            asyncio.create_task(force_geoip_naming_task(new_server))
+            
+            await refresh_dashboard_ui()
+            try: render_sidebar_content.refresh()
+            except: pass
+            
+            logger.info(f"✨ [主动注册] 新服务器上线: {client_ip}")
+            return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200)
 
     except Exception as e:
         logger.error(f"❌ 注册接口异常: {e}")
@@ -2290,8 +2317,67 @@ async def fast_resolve_single_server(s):
             
     except Exception as e:
         logger.error(f"❌ [智能修正] 严重错误: {e}")
+
+# ================= ✨✨✨ 新增：后台智能探测 SSH 用户名 ✨✨✨ =================
+async def smart_detect_ssh_user_task(server_conf):
+    """
+    后台任务：尝试使用不同的用户名 (ubuntu -> root) 连接 SSH。
+    连接成功后：
+    1. 更新配置并保存。
+    2. 自动触发探针安装。
+    """
+    # 待测试的用户名列表 (优先尝试 ubuntu，失败则尝试 root)
+    # 你可以在这里添加更多，比如 'ec2-user', 'debian', 'opc'
+    candidates = ['ubuntu', 'root'] 
     
-# ================= 自动注册接口 (修改版) =================
+    ip = server_conf['url'].split('://')[-1].split(':')[0]
+    original_user = server_conf.get('ssh_user', '')
+    
+    logger.info(f"🕵️‍♂️ [智能探测] 开始探测 {server_conf['name']} ({ip}) 的 SSH 用户名...")
+
+    found_user = None
+
+    for user in candidates:
+        # 1. 临时修改配置中的用户名
+        server_conf['ssh_user'] = user
+        
+        # 2. 尝试连接 (复用现有的连接函数，自带全局密钥逻辑)
+        # 注意：get_ssh_client_sync 内部有 5秒 超时，适合做探测
+        client, msg = await run.io_bound(get_ssh_client_sync, server_conf)
+        
+        if client:
+            # ✅ 连接成功！
+            client.close()
+            found_user = user
+            logger.info(f"✅ [智能探测] 成功匹配用户名: {user}")
+            break
+        else:
+            logger.warning(f"⚠️ [智能探测] 用户名 '{user}' 连接失败，尝试下一个...")
+
+    # 3. 处理探测结果
+    if found_user:
+        # 保存正确的用户名
+        server_conf['ssh_user'] = found_user
+        # 标记探测成功，防止后续逻辑误判
+        server_conf['_ssh_verified'] = True 
+        await save_servers()
+        
+        # 🎉 探测成功后，立即触发探针安装 (如果开启了探针功能)
+        if ADMIN_CONFIG.get('probe_enabled', False):
+            logger.info(f"🚀 [自动部署] SSH 验证通过，开始安装探针...")
+            # 稍作延迟，等待 SSH 服务稳定
+            await asyncio.sleep(2) 
+            await install_probe_on_server(server_conf)
+            
+    else:
+        # ❌ 全部失败，恢复回默认 (或者保留最后一个尝试失败的)
+        logger.error(f"❌ [智能探测] {server_conf['name']} 所有用户名均尝试失败 (请检查安全组或密钥)")
+        # 可选：恢复为 root 或者保持原状
+        if original_user: server_conf['ssh_user'] = original_user
+        await save_servers()
+
+    
+# ================= 自动注册接口 (最终版：集成智能探测) =================
 @app.post('/api/auto_register_node')
 async def auto_register_node(request: Request):
     try:
@@ -2309,8 +2395,10 @@ async def auto_register_node(request: Request):
         port = data.get('port')
         username = data.get('username')
         password = data.get('password')
-        # 即便 API 传了 alias，我们暂时用它占位，但最终会被强制改为国家名
         alias = data.get('alias', f'Auto-{ip}') 
+        
+        # 可选参数
+        ssh_port = data.get('ssh_port', 22)
 
         if not all([ip, port, username, password]):
             return Response(json.dumps({"success": False, "msg": "参数不完整"}), status_code=400, media_type="application/json")
@@ -2324,7 +2412,13 @@ async def auto_register_node(request: Request):
             'url': target_url,
             'user': username,
             'pass': password,
-            'prefix': ''
+            'prefix': '',
+            
+            # SSH 配置
+            'ssh_port': ssh_port,
+            'ssh_auth_type': '全局密钥',
+            'ssh_user': 'detecting...', # 初始占位符，稍后会被后台任务覆盖
+            'probe_installed': False
         }
 
         # 5. 查重与更新逻辑
@@ -2338,7 +2432,7 @@ async def auto_register_node(request: Request):
                 break
 
         action_msg = ""
-        target_server_ref = None # 用于引用最终要处理的那个服务器对象
+        target_server_ref = None 
 
         if existing_index != -1:
             # 更新现有节点
@@ -2351,18 +2445,24 @@ async def auto_register_node(request: Request):
             target_server_ref = new_server_config
             action_msg = f"✅ 新增节点: {alias}"
 
-        # 6. 保存
+        # 6. 保存到硬盘
         await save_servers()
         
-        # 7. ✨✨✨ 关键修改：调用强制 GeoIP 命名任务 ✨✨✨
-        # 无论 API 传了什么名字，这里都会启动后台任务，强制将其改为 "国旗 国家-序号"
+        # ================= ✨✨✨ 后台任务启动区 ✨✨✨ =================
+        
+        # 任务A: 启动 GeoIP 命名任务 (自动变国旗)
         asyncio.create_task(force_geoip_naming_task(target_server_ref))
+        
+        # 任务B: 启动智能 SSH 用户探测任务 (先试ubuntu，再试root，成功后装探针)
+        asyncio.create_task(smart_detect_ssh_user_task(target_server_ref))
+        
+        # =============================================================
 
         try: render_sidebar_content.refresh()
         except: pass
         
-        logger.info(f"[自动注册] {action_msg} ({ip}) - 已加入强制重命名队列")
-        return Response(json.dumps({"success": True, "msg": "注册成功"}), status_code=200, media_type="application/json")
+        logger.info(f"[自动注册] {action_msg} ({ip}) - 已加入 SSH 探测与命名队列")
+        return Response(json.dumps({"success": True, "msg": "注册成功，后台正在探测连接..."}), status_code=200, media_type="application/json")
 
     except Exception as e:
         logger.error(f"❌ [自动注册] 处理异常: {e}")
