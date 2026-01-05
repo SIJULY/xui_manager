@@ -390,33 +390,23 @@ def open_global_settings_dialog():
 # ================= 全局变量区 (新增缓存) =================
 PROBE_DATA_CACHE = {} # ✨全局探针数据缓存 {url: data_dict}
 
-# ================= 探针安装脚本 (修复版 v3.3：解决缩进与兼容性问题) =================
+# ================= 探针安装脚本 (v3.5 极简兼容版) =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
-# 提升权限
-if [ "$(id -u)" -ne 0 ]; then
-  if command -v sudo >/dev/null 2>&1; then
-    exec sudo bash "$0" "$@"
-  else
-    echo "Root required"; exit 1
-  fi
-fi
+# 1. 提升权限
+[ "$(id -u)" -eq 0 ] || { command -v sudo >/dev/null && exec sudo bash "$0" "$@"; echo "Root required"; exit 1; }
 
-# 1. 安装依赖
-echo "📦 Installing dependencies..."
+# 2. 安装基础依赖 (能装就装，装不上拉倒，不报错退出)
 if [ -f /etc/debian_version ]; then
-    apt-get update -y
-    command -v python3 >/dev/null 2>&1 || apt-get install -y python3
-    command -v ping >/dev/null 2>&1 || apt-get install -y iputils-ping
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y python3 iputils-ping util-linux >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
-    command -v python3 >/dev/null 2>&1 || yum install -y python3
-    command -v ping >/dev/null 2>&1 || yum install -y iputils
+    yum install -y python3 iputils util-linux >/dev/null 2>&1
 elif [ -f /etc/alpine-release ]; then
-    command -v python3 >/dev/null 2>&1 || apk add python3
-    command -v ping >/dev/null 2>&1 || apk add iputils
+    apk add python3 iputils util-linux >/dev/null 2>&1
 fi
 
-# 2. 写入 Python 脚本 (注意：EOF 不缩进，防止 Python 缩进错误)
+# 3. 写入 Python 脚本 (去除所有缩进，防止 EOF 解析错误)
 cat > /root/x_fusion_agent.py << 'PYTHON_EOF'
 import time, json, os, socket, sys, subprocess, re, platform
 import urllib.request, urllib.error
@@ -427,70 +417,56 @@ TOKEN = "__TOKEN__"
 SERVER_URL = "__SERVER_URL__"
 
 PING_TARGETS = {
-    "电信": "__PING_CT__",
-    "联通": "__PING_CU__",
-    "移动": "__PING_CM__"
+"电信": "__PING_CT__",
+"联通": "__PING_CU__",
+"移动": "__PING_CM__"
 }
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-def get_cmd_output(cmd):
+def get_cpu_model():
+    model = "Unknown"
     try:
-        return subprocess.check_output(cmd, shell=True).decode().strip()
-    except:
-        return "Unknown"
-
-def get_static_info():
-    info = {"cpu_model": "Unknown", "virt": "Unknown", "arch": "Unknown", "os": "Unknown"}
-    try:
-        info["arch"] = platform.machine()
-        info["os"] = platform.platform()
+        # 优先读取 lscpu (Shell命令最准)
+        try:
+            out = subprocess.check_output("lscpu", shell=True).decode()
+            for line in out.split("\n"):
+                if "Model name:" in line:
+                    return line.split(":")[1].strip()
+        except: pass
         
-        if os.path.exists("/proc/cpuinfo"):
-            with open("/proc/cpuinfo", "r") as f:
-                for line in f:
-                    if "model name" in line or "Hardware" in line:
-                        parts = line.split(":")
-                        if len(parts) > 1:
-                            info["cpu_model"] = parts[1].strip()
-                            break
-        
-        # 尝试获取虚拟化
-        virt = get_cmd_output("systemd-detect-virt")
-        if virt and virt != "none": info["virt"] = virt
+        # 其次读取文件
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if "model name" in line: return line.split(":")[1].strip()
+                if "Hardware" in line: return line.split(":")[1].strip()
     except: pass
-    return info
+    return model
 
-STATIC_CACHE = get_static_info()
+# 缓存静态信息
+STATIC_CACHE = {
+    "cpu_model": get_cpu_model(),
+    "arch": platform.machine(),
+    "os": platform.platform(),
+    "virt": "Unknown"
+}
+try:
+    v = subprocess.check_output("systemd-detect-virt", shell=True).decode().strip()
+    if v and v != "none": STATIC_CACHE["virt"] = v
+except: pass
 
 def get_ping(target):
     try:
-        target = target.split("://")[-1].split(":")[0]
-        cmd = "ping -c 1 -W 1 " + target
+        ip = target.split("://")[-1].split(":")[0]
+        cmd = "ping -c 1 -W 1 " + ip
         res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if res.returncode == 0:
-            out = res.stdout.decode()
-            match = re.search(r"time=([\d.]+)", out)
+            match = re.search(r"time=([\d.]+)", res.stdout.decode())
             if match: return int(float(match.group(1)))
     except: pass
     return -1
-
-def get_net():
-    r, t = 0, 0
-    try:
-        with open("/proc/net/dev") as f:
-            for line in f.readlines()[2:]:
-                cols = line.split(":")
-                if len(cols)<2: continue
-                if cols[0].strip() == "lo": continue
-                parts = cols[1].split()
-                if len(parts) >= 9:
-                    r += int(parts[0])
-                    t += int(parts[8])
-    except: pass
-    return r, t
 
 def get_info():
     global SERVER_URL
@@ -505,24 +481,33 @@ def get_info():
     data["server_url"] = SERVER_URL
 
     try:
-        r1, t1 = get_net()
-        with open("/proc/stat") as f: 
+        # 读取流量和负载
+        with open("/proc/net/dev") as f:
+            lines = f.readlines()[2:]
+            r, t = 0, 0
+            for l in lines:
+                cols = l.split(":")
+                if len(cols)<2: continue
+                parts = cols[1].split()
+                if len(parts)>=9 and cols[0].strip() != "lo":
+                    r += int(parts[0])
+                    t += int(parts[8])
+        
+        with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot1, idle1 = sum(fs), fs[3]
         
         time.sleep(1)
         
-        r2, t2 = get_net()
-        with open("/proc/stat") as f: 
+        with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot2, idle2 = sum(fs), fs[3]
-
+            
         data["cpu_usage"] = round((1 - (idle2-idle1)/(tot2-tot1)) * 100, 1)
         data["cpu_cores"] = os.cpu_count() or 1
-        data["net_total_in"] = r2
-        data["net_total_out"] = t2
-        data["net_speed_in"] = r2 - r1
-        data["net_speed_out"] = t2 - t1
+        data["net_speed_in"] = 0 # 暂不计算瞬时速度以简化
+        data["net_total_in"] = r
+        data["net_total_out"] = t
 
         with open("/proc/loadavg") as f: data["load_1"] = float(f.read().split()[0])
         
@@ -530,23 +515,20 @@ def get_info():
             m = {}
             for l in f:
                 p = l.split()
-                if len(p) >= 2: m[p[0].rstrip(":")] = int(p[1])
+                if len(p)>=2: m[p[0].rstrip(":")] = int(p[1])
         
         tot = m.get("MemTotal", 1)
         avail = m.get("MemAvailable", m.get("MemFree", 0))
-        data["mem_total"] = round(tot / 1024 / 1024, 2)
-        data["mem_usage"] = round(((tot - avail) / tot) * 100, 1)
-        
-        sw_tot = m.get("SwapTotal", 0)
-        sw_free = m.get("SwapFree", 0)
-        data["swap_total"] = round(sw_tot / 1024 / 1024, 2)
-        data["swap_free"] = round(sw_free / 1024 / 1024, 2)
+        data["mem_total"] = round(tot/1024/1024, 2)
+        data["mem_usage"] = round(((tot-avail)/tot)*100, 1)
+        data["swap_total"] = round(m.get("SwapTotal", 0)/1024/1024, 2)
+        data["swap_free"] = round(m.get("SwapFree", 0)/1024/1024, 2)
 
         st = os.statvfs("/")
-        dt = st.f_blocks * st.f_frsize
-        df = st.f_bavail * st.f_frsize
-        data["disk_total"] = round(dt / 1024 / 1024 / 1024, 2)
-        data["disk_usage"] = round(((dt - df) / dt) * 100, 1)
+        data["disk_total"] = round((st.f_blocks * st.f_frsize)/1024/1024/1024, 2)
+        free = st.f_bavail * st.f_frsize
+        total = st.f_blocks * st.f_frsize
+        data["disk_usage"] = round(((total-free)/total)*100, 1)
 
         with open("/proc/uptime") as f: u = float(f.read().split()[0])
         d = int(u // 86400)
@@ -554,9 +536,7 @@ def get_info():
         m = int((u % 3600) // 60)
         data["uptime"] = "%d天 %d时 %d分" % (d, h, m)
 
-        pings = {}
-        for k, v in PING_TARGETS.items(): pings[k] = get_ping(v)
-        data["pings"] = pings
+        data["pings"] = {k: get_ping(v) for k, v in PING_TARGETS.items()}
 
     except: pass
     return data
@@ -574,7 +554,7 @@ if __name__ == "__main__":
     push()
 PYTHON_EOF
 
-# 3. 创建服务
+# 4. 创建服务
 cat > /etc/systemd/system/x-fusion-agent.service << SERVICE_EOF
 [Unit]
 Description=X-Fusion Probe Agent
@@ -591,11 +571,11 @@ RestartSec=5
 WantedBy=multi-user.target
 SERVICE_EOF
 
-# 4. 启动
+# 5. 启动
 systemctl daemon-reload
 systemctl enable x-fusion-agent
 systemctl restart x-fusion-agent
-echo "Install sequence completed"
+exit 0
 '
 """
 # ================= 强制日志实时输出 =================
@@ -3355,9 +3335,9 @@ def open_server_detail_dialog(server_conf):
                             ui.label(name).classes(f'text-{color}-700 font-bold text-xs mb-1')
                             refs[key] = ui.label('-- ms').classes(f'text-{color}-900 font-bold text-lg')
 
-                    ping_box('安徽电信', 'blue', 'ping_ct')
-                    ping_box('安徽联通', 'orange', 'ping_cu')
-                    ping_box('安徽移动', 'green', 'ping_cm')
+                    ping_box('电信', 'blue', 'ping_ct')
+                    ping_box('联通', 'orange', 'ping_cu')
+                    ping_box('移动', 'green', 'ping_cm')
 
             # --- 第三部分：实时图表 (ECharts) ---
             with ui.card().classes('w-full p-5 shadow-sm border border-gray-200 bg-white'):
