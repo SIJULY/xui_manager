@@ -14,7 +14,7 @@ fi
 # 从注册 API 提取 推送 API (将 /register 替换为 /push)
 PUSH_API="${REGISTER_API/\/register/\/push}"
 
-echo "🚀 开始安装 X-Fusion 全能探针 (v3.3 详情增强版)..."
+echo "🚀 开始安装 X-Fusion 全能探针 (v3.4 ARM修复版)..."
 echo "🔑 Token: $TOKEN"
 echo "📡 推送地址: $PUSH_API"
 
@@ -28,21 +28,24 @@ if [ -f /etc/debian_version ]; then
     apt-get update -y
     command -v python3 >/dev/null 2>&1 || apt-get install -y python3
     command -v ping >/dev/null 2>&1 || apt-get install -y iputils-ping
+    # ✨ 确保安装 util-linux 以获得 lscpu 命令
+    command -v lscpu >/dev/null 2>&1 || apt-get install -y util-linux
 elif [ -f /etc/redhat-release ]; then
     command -v python3 >/dev/null 2>&1 || yum install -y python3
     command -v ping >/dev/null 2>&1 || yum install -y iputils
+    command -v lscpu >/dev/null 2>&1 || yum install -y util-linux
 elif [ -f /etc/alpine-release ]; then
     command -v python3 >/dev/null 2>&1 || apk add python3
     command -v ping >/dev/null 2>&1 || apk add iputils
+    command -v lscpu >/dev/null 2>&1 || apk add util-linux
 fi
 
-# 3. 写入 Python 推送脚本 (包含静态信息采集逻辑)
+# 3. 写入 Python 推送脚本
 cat > /root/x_fusion_agent.py << 'PYTHON_EOF'
 import time, json, os, socket, sys, subprocess, re, platform
 import urllib.request, urllib.error
 import ssl
 
-# 这些变量会在下面被 sed 替换
 MANAGER_URL = "placeholder_url"
 TOKEN = "placeholder_token"
 SERVER_URL = "" 
@@ -64,34 +67,49 @@ def get_cmd_output(cmd):
     except:
         return "Unknown"
 
-# --- 核心新增：获取静态硬件信息 ---
+# --- 核心修复：ARM 架构 CPU 识别 ---
 def get_static_info():
     info = {"cpu_model": "Unknown", "virt": "Unknown", "arch": "Unknown", "os": "Unknown"}
     try:
         info["arch"] = platform.machine()
         info["os"] = platform.platform()
         
+        # 1. 优先尝试读取文件 (x86/AMD 常用)
+        found_model = False
         if os.path.exists("/proc/cpuinfo"):
             with open("/proc/cpuinfo", "r") as f:
                 for line in f:
-                    if "model name" in line or "Hardware" in line:
-                        parts = line.split(":")
-                        if len(parts) > 1:
-                            info["cpu_model"] = parts[1].strip()
-                            break
+                    if "model name" in line:
+                        info["cpu_model"] = line.split(":")[1].strip()
+                        found_model = True
+                        break
+                    if "Hardware" in line: # 部分旧款 ARM
+                         info["cpu_model"] = line.split(":")[1].strip()
+                         found_model = True
+                         break
         
+        # 2. ✨✨✨ 重点：如果没找到或者是 Unknown (常见于 ARM/Oracle)，尝试 lscpu 命令
+        if not found_model or info["cpu_model"] == "Unknown":
+            try:
+                lscpu_out = get_cmd_output("lscpu")
+                for line in lscpu_out.split('\n'):
+                    if "Model name:" in line:
+                        info["cpu_model"] = line.split(":")[1].strip()
+                        break
+            except: pass
+
+        # 3. 获取虚拟化类型
         virt = get_cmd_output("systemd-detect-virt")
         if virt and virt != "none": info["virt"] = virt
+        
     except: pass
     return info
 
-# 缓存静态信息，避免每次循环都读取文件
 STATIC_CACHE = get_static_info()
 
 def get_ping(target):
     try:
         target = target.split("://")[-1].split(":")[0]
-        # Linux ping: -c 1 (一次), -W 1 (1秒超时)
         cmd = "ping -c 1 -W 1 " + target
         res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if res.returncode == 0:
@@ -118,10 +136,8 @@ def get_net():
 
 def get_info():
     global SERVER_URL
-    # 发送数据时带上静态缓存
     data = {"token": TOKEN, "static": STATIC_CACHE}
     
-    # 强制获取 IPv4
     if not SERVER_URL:
         try:
             with urllib.request.urlopen("http://checkip.amazonaws.com", timeout=5, context=ssl_ctx) as r:
@@ -152,7 +168,6 @@ def get_info():
 
         with open("/proc/loadavg") as f: data["load_1"] = float(f.read().split()[0])
         
-        # 内存 + Swap
         with open("/proc/meminfo") as f:
             m = {}
             for l in f:
@@ -201,11 +216,9 @@ if __name__ == "__main__":
     push()
 PYTHON_EOF
 
-# 4. 替换脚本中的变量
 sed -i "s|placeholder_url|$PUSH_API|g" /root/x_fusion_agent.py
 sed -i "s|placeholder_token|$TOKEN|g" /root/x_fusion_agent.py
 
-# 5. 创建 Systemd 服务
 cat > /etc/systemd/system/x-fusion-agent.service << SERVICE_EOF
 [Unit]
 Description=X-Fusion Probe Agent
@@ -222,9 +235,8 @@ RestartSec=5
 WantedBy=multi-user.target
 SERVICE_EOF
 
-# 6. 启动服务
 systemctl daemon-reload
 systemctl enable x-fusion-agent
 systemctl restart x-fusion-agent
 
-echo "✅ 探针 Agent 安装完成，服务已启动！"
+echo "✅ 探针 Agent 安装完成"
