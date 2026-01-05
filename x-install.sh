@@ -1,27 +1,37 @@
 #!/bin/bash
 
+# ================= X-Fusion Agent Installer v3.9 =================
+
+# 1. 获取参数
 TOKEN="$1"
 REGISTER_API="$2"
 
+# 2. 参数校验
 if [ -z "$TOKEN" ] || [ -z "$REGISTER_API" ]; then
     echo "❌ 错误: 缺少参数"
     echo "用法: bash x-install.sh \"TOKEN\" \"REGISTER_API_URL\""
     exit 1
 fi
 
+# 3. 计算推送地址
 PUSH_API="${REGISTER_API/\/register/\/push}"
 
-echo "🚀 开始安装 X-Fusion 全能探针 (v3.6 网速修复版)..."
+echo "🚀 开始安装 X-Fusion 全能探针 (v3.9 验证通过版)..."
 echo "🔑 Token: $TOKEN"
 echo "📡 推送地址: $PUSH_API"
 
+# 4. 检查 Root 权限
 if [ "$(id -u)" -ne 0 ]; then
-  command -v sudo >/dev/null && exec sudo bash "$0" "$@" || { echo "Root required"; exit 1; }
+  command -v sudo >/dev/null && exec sudo bash "$0" "$@" || { echo "❌ 错误: 必须使用 Root 权限"; exit 1; }
 fi
 
+# 5. 向面板注册
+echo "🔗 注册节点..."
 curl -s -X POST -H "Content-Type: application/json" -d "{\"token\":\"$TOKEN\"}" "$REGISTER_API"
 echo ""
 
+# 6. 安装依赖
+echo "📦 安装依赖..."
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
     apt-get install -y python3 iputils-ping util-linux >/dev/null 2>&1
@@ -31,7 +41,8 @@ elif [ -f /etc/alpine-release ]; then
     apk add python3 iputils util-linux >/dev/null 2>&1
 fi
 
-echo "📝 正在写入 Agent 脚本..."
+# 7. 写入 Python 采集脚本
+echo "📝 生成采集脚本..."
 cat > /root/x_fusion_agent.py << 'PYTHON_EOF'
 import time, json, os, socket, sys, subprocess, re, platform
 import urllib.request, urllib.error
@@ -42,9 +53,9 @@ TOKEN = "placeholder_token"
 SERVER_URL = ""
 
 PING_TARGETS = {
-"电信": "202.102.192.68",
-"联通": "112.122.10.26",
-"移动": "211.138.180.2"
+    "电信": "202.102.192.68",
+    "联通": "112.122.10.26",
+    "移动": "211.138.180.2"
 }
 
 ssl_ctx = ssl.create_default_context()
@@ -57,8 +68,10 @@ def get_cpu_model():
         try:
             out = subprocess.check_output("lscpu", shell=True).decode()
             for line in out.split("\n"):
-                if "Model name:" in line: return line.split(":")[1].strip()
+                if "Model name:" in line:
+                    return line.split(":")[1].strip()
         except: pass
+        
         with open("/proc/cpuinfo", "r") as f:
             for line in f:
                 if "model name" in line: return line.split(":")[1].strip()
@@ -187,9 +200,12 @@ if __name__ == "__main__":
     push()
 PYTHON_EOF
 
+# 8. 注入真实参数
 sed -i "s|placeholder_url|$PUSH_API|g" /root/x_fusion_agent.py
 sed -i "s|placeholder_token|$TOKEN|g" /root/x_fusion_agent.py
 
+# 9. 创建服务
+echo "🔧 配置服务..."
 cat > /etc/systemd/system/x-fusion-agent.service << SERVICE_EOF
 [Unit]
 Description=X-Fusion Probe Agent
@@ -206,8 +222,9 @@ RestartSec=5
 WantedBy=multi-user.target
 SERVICE_EOF
 
+# 10. 启动
 systemctl daemon-reload
 systemctl enable x-fusion-agent
 systemctl restart x-fusion-agent
 
-echo "✅ 探针 Agent 安装完成"
+echo "✅ 探针 Agent 安装完成，服务已启动！"
