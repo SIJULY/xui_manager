@@ -22,6 +22,7 @@ from urllib.parse import urlparse, quote
 from nicegui import ui, run, app, Client
 from fastapi import Response, Request
 from fastapi.responses import RedirectResponse
+from collections import Counter
 
 IP_GEO_CACHE = {}
 
@@ -5340,6 +5341,7 @@ async def refresh_dashboard_ui():
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
 
+# ================= 核心：仪表盘主视图渲染 =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
@@ -5352,7 +5354,7 @@ async def load_dashboard_stats():
     with content_container:
         ui.label('系统概览').classes('text-3xl font-bold mb-6 text-slate-800 tracking-tight')
         
-        # === A. 顶部统计卡片 ===
+        # === A. 顶部统计卡片 (保持不变) ===
         with ui.row().classes('w-full gap-6 mb-8 items-stretch'):
             def create_stat_card(key, title, sub_text, icon, gradient):
                 with ui.card().classes(f'flex-1 p-6 shadow-lg border-none text-white {gradient} rounded-xl transform hover:scale-105 transition duration-300 relative overflow-hidden'):
@@ -5371,6 +5373,8 @@ async def load_dashboard_stats():
 
         # === B. 图表区域 ===
         with ui.row().classes('w-full gap-6 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
+            
+            # --- 第三张卡片：流量排行 (保持不变) ---
             with ui.card().classes('w-full xl:w-2/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-lg font-bold text-slate-700')
@@ -5383,18 +5387,90 @@ async def load_dashboard_stats():
                     'series': [{'type': 'bar', 'data': [], 'barWidth': '40%', 'itemStyle': {'borderRadius': [4, 4, 0, 0], 'color': '#6366f1'}}]
                 }).classes('w-full h-64')
 
+            # --- ✨✨✨ 第四张卡片：服务器区域分布 (Top 5 + 其他) ✨✨✨ ---
             with ui.card().classes('w-full xl:w-1/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
-                ui.label('🍩 协议分布').classes('text-lg font-bold text-slate-700 mb-2')
-                DASHBOARD_REFS['pie_chart'] = ui.echart({
-                    'color': ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'],
-                    'tooltip': {'trigger': 'item'}, 
-                    'legend': {'bottom': '0%', 'icon': 'circle'},
-                    'series': [{'name': '协议', 'type': 'pie', 'radius': ['50%', '70%'], 'center': ['50%', '45%'], 
-                                'itemStyle': {'borderRadius': 5, 'borderColor': '#fff', 'borderWidth': 2},
-                                'label': {'show': False}, 'emphasis': {'label': {'show': True, 'fontSize': '20', 'fontWeight': 'bold'}}, 'data': []}]
-                }).classes('w-full h-64')
+                ui.label('🌏 服务器分布').classes('text-lg font-bold text-slate-700 mb-2')
+                
+                # --- 1. 数据统计逻辑 ---
+                from collections import Counter
+                country_counter = Counter()
+                
+                if SERVERS_CACHE:
+                    for s in SERVERS_CACHE:
+                        try:
+                            region_str = detect_country_group(s.get('name', ''), s)
+                            if not region_str or region_str.strip() == "🏳️":
+                                region_str = "🏳️ 未知区域"
+                        except:
+                            region_str = "🏳️ 未知区域"
+                        country_counter[region_str] += 1
+                else:
+                    country_counter["暂无数据"] = 1
 
-        # === C. 底部地图区域 ===
+                # --- 2. Top 5 + "其他" 分组逻辑 ---
+                sorted_counts = country_counter.most_common()
+                chart_data = []
+                
+                top_5 = sorted_counts[:5]
+                for region, count in top_5:
+                    chart_data.append({'name': f"{region} ({count})", 'value': count})
+                
+                others_count = sum(count for _, count in sorted_counts[5:])
+                if others_count > 0:
+                    chart_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
+
+                # --- 3. ECharts 图表配置 (尺寸已调整) ---
+                color_palette = [
+                    '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
+                    '#6366f1', '#ec4899', '#14b8a6', '#f97316'
+                ]
+                
+                ui.echart({
+                    'tooltip': {
+                        'trigger': 'item',
+                        'formatter': '{b}: <br/><b>{c} 台</b> ({d}%)'
+                    },
+                    'legend': {
+                        'bottom': '0%',
+                        'left': 'center',
+                        'icon': 'circle',
+                        'itemGap': 15,
+                        # ✨ 修改 1：字体变大到 13
+                        'textStyle': {'color': '#64748b', 'fontSize': 13}
+                    },
+                    'color': color_palette,
+                    'series': [
+                        {
+                            'name': '服务器分布',
+                            'type': 'pie',
+                            # ✨ 修改 2：圆环变大变粗 (55% -> 85%)
+                            'radius': ['35%', '75%'],
+                            'center': ['50%', '45%'],
+                            'avoidLabelOverlap': False,
+                            'itemStyle': {
+                                'borderRadius': 5,
+                                'borderColor': '#fff',
+                                'borderWidth': 2
+                            },
+                            'label': { 'show': False, 'position': 'center' },
+                            'emphasis': {
+                                'label': {
+                                    'show': True,
+                                    'fontSize': 18, # 中间高亮文字也稍微加大
+                                    'fontWeight': 'bold',
+                                    'color': '#334155'
+                                },
+                                'scale': True,
+                                'scaleSize': 5
+                            },
+                            'labelLine': { 'show': False },
+                            'data': chart_data
+                        }
+                    ]
+                # ✨ 修改 3：容器高度增加到 h-80 (约320px)
+                }).classes('w-full h-80')
+
+        # === C. 底部地图区域 (保持不变) ===
         with ui.row().classes('w-full gap-6 mb-6'):
             with ui.card().classes('w-full p-0 shadow-md border-none rounded-xl bg-slate-900 overflow-hidden relative'):
                 with ui.row().classes('w-full px-6 py-4 bg-slate-800/50 border-b border-gray-700 justify-between items-center z-10 relative'):
@@ -5403,14 +5479,10 @@ async def load_dashboard_stats():
                         ui.label('全球节点实景 (Global View)').classes('text-lg font-bold text-white')
                     DASHBOARD_REFS['map_info'] = ui.label('渲染中...').classes('text-xs text-gray-400')
 
-                # ================= ✨✨✨ 数据准备 ✨✨✨ =================
                 globe_data_list = []
                 seen_locations = set()
-                
-                # ✨✨✨ 获取真实的总数 (不管是否有坐标) ✨✨✨
                 total_server_count = len(SERVERS_CACHE)
 
-                # 简单的国旗反推表 (用于后端兜底)
                 flag_map_py = {
                     'CN':'China', 'HK':'Hong Kong', 'TW':'Taiwan', 'US':'United States', 'JP':'Japan', 
                     'KR':'South Korea', 'SG':'Singapore', 'RU':'Russia', 'DE':'Germany', 'GB':'United Kingdom'
@@ -5434,23 +5506,19 @@ async def load_dashboard_stats():
                             try:
                                 full_group = detect_country_group(s.get('name', ''), s)
                                 flag_only = full_group.split(' ')[0]
-                                if not country_name and flag_only in flag_map_py: # 简单兜底
+                                if not country_name and flag_only in flag_map_py:
                                     country_name = flag_map_py[flag_only]
                             except: pass
                             
                             globe_data_list.append({
                                 'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name
                             })
-                # =========================================================
 
                 import json
                 json_data = json.dumps(globe_data_list, ensure_ascii=False)
                 
                 ui.html(GLOBE_STRUCTURE, sanitize=False).classes('w-full h-[850px] overflow-hidden')
-                
-                # ✨✨✨ 关键修改：将 SERVER_TOTAL 传给 JS ✨✨✨
                 ui.run_javascript(f'window.GLOBE_DATA = {json_data}; window.SERVER_TOTAL = {total_server_count};')
-                
                 ui.run_javascript(GLOBE_JS_LOGIC)
                 DASHBOARD_REFS['map'] = None
 
