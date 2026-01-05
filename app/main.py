@@ -3125,73 +3125,70 @@ def open_quick_group_create_dialog(callback=None):
             ui.button('创建', on_click=save).classes('bg-blue-600 text-white')
     d.open()
 
-# ================= 1. 探针排序弹窗  =================
-def open_probe_sort_dialog(on_close_callback):
-    # 准备数据
-    saved_order = ADMIN_CONFIG.get('probe_sort_order', [])
-    current_servers = list(SERVERS_CACHE)
-    sorted_list = [] 
-    
-    for url in saved_order:
-        srv = next((s for s in current_servers if s['url'] == url), None)
-        if srv: 
-            sorted_list.append({'name': srv['name'], 'url': srv['url']})
-            current_servers.remove(srv)
-    for srv in current_servers:
-        sorted_list.append({'name': srv['name'], 'url': srv['url']})
+# ================= 1.探针视图(分组)排序弹窗 =================
+def open_group_sort_dialog():
+    # 读取当前分组
+    current_groups = ADMIN_CONFIG.get('probe_custom_groups', [])
+    if not current_groups:
+        safe_notify("暂无自定义视图", "warning")
+        return
 
-    # ✨ 核心修复：使用 style 强制规定 宽度400px 和 垂直排列 ✨
-    with ui.dialog() as d, ui.card().style('width: 400px; max-width: 95vw; height: 80vh; display: flex; flex-direction: column; padding: 0; gap: 0;'):
+    # 临时列表用于编辑
+    temp_list = list(current_groups)
+
+    with ui.dialog() as d, ui.card().style('width: 400px; max-width: 95vw; height: 60vh; display: flex; flex-direction: column; padding: 0; gap: 0;'):
         
-        # 1. 顶部标题 (固定高度)
+        # 顶部
         with ui.row().classes('w-full p-4 border-b justify-between items-center bg-gray-50'):
             ui.label('自定义排序 (点击箭头移动)').classes('font-bold text-gray-700')
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
         
-        # 2. 列表容器 (自动伸缩 + 滚动)
-        # 使用 style 确保它占满剩余空间
+        # 列表容器
         list_container = ui.element('div').classes('w-full bg-slate-50 p-2 gap-2').style('flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column;')
 
         def render_list():
             list_container.clear()
             with list_container:
-                for i, item in enumerate(sorted_list):
-                    # 单行卡片
-                    with ui.card().classes('w-full p-2 flex-row items-center gap-2 border border-gray-200 shadow-sm'):
-                        ui.label(str(i+1)).classes('text-xs text-gray-400 w-6 text-center')
-                        ui.label(item['name']).classes('font-bold text-gray-700 flex-grow text-sm truncate')
+                for i, name in enumerate(temp_list):
+                    with ui.card().classes('w-full p-3 flex-row items-center gap-3 border border-gray-200 shadow-sm'):
+                        # 序号
+                        ui.label(str(i+1)).classes('text-xs text-gray-400 w-4')
+                        # 组名
+                        ui.label(name).classes('font-bold text-gray-700 flex-grow text-sm')
                         
-                        # 按钮组
-                        with ui.row().classes('gap-1 flex-shrink-0'):
-                            if i > 0: # 上移
+                        # 移动按钮
+                        with ui.row().classes('gap-1'):
+                            # 上移
+                            if i > 0:
                                 ui.button(icon='arrow_upward', on_click=lambda _, idx=i: move_item(idx, -1)).props('flat dense round size=sm color=blue')
-                            else: ui.element('div').classes('w-8')
+                            else:
+                                ui.element('div').classes('w-8') # 占位
                             
-                            if i < len(sorted_list) - 1: # 下移
+                            # 下移
+                            if i < len(temp_list) - 1:
                                 ui.button(icon='arrow_downward', on_click=lambda _, idx=i: move_item(idx, 1)).props('flat dense round size=sm color=blue')
-                            else: ui.element('div').classes('w-8')
+                            else:
+                                ui.element('div').classes('w-8')
 
         def move_item(index, direction):
-            target_index = index + direction
-            if 0 <= target_index < len(sorted_list):
-                sorted_list[index], sorted_list[target_index] = sorted_list[target_index], sorted_list[index]
-                render_list() 
+            target = index + direction
+            if 0 <= target < len(temp_list):
+                temp_list[index], temp_list[target] = temp_list[target], temp_list[index]
+                render_list()
 
         render_list()
 
-        # 3. 底部保存 (固定高度)
-        async def save_order():
-            new_order_urls = [item['url'] for item in sorted_list]
-            ADMIN_CONFIG['probe_sort_order'] = new_order_urls
+        # 底部保存
+        async def save():
+            ADMIN_CONFIG['probe_custom_groups'] = temp_list
             await save_admin_config()
-            safe_notify('✅ 排序已保存', 'positive')
+            safe_notify("✅ 视图顺序已更新", "positive")
             d.close()
-            if on_close_callback: on_close_callback()
 
         with ui.row().classes('w-full p-4 border-t bg-white'):
-            ui.button('保存排序', icon='save', on_click=save_order).classes('w-full bg-slate-900 text-white shadow-lg')
+            ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-slate-900 text-white shadow-lg')
+    
     d.open()
-
 # ================= 2. 探针专用分组弹窗 (新建/编辑视图) =================
 # is_edit_mode: 是否为编辑模式
 # group_name: 编辑时的原组名
@@ -3532,15 +3529,14 @@ def open_server_detail_dialog(server_conf):
         
     d.open()
 
-# ================= 探针设置页  =========================
+# ================= 探针设置页 (V28：集成视图管理 + 完美布局) =================
 async def render_probe_page():
     # 1. 标记当前视图状态
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'PROBE'
     
-    # 2. 清理并初始化容器
+    # 2. 清理并初始化容器 (垂直居中)
     content_container.clear()
-    # ✨ 核心布局修改：flex flex-col justify-center items-center 让内容垂直居中
     content_container.classes(replace='w-full h-full overflow-y-auto p-6 bg-slate-50 relative flex flex-col justify-center items-center')
     
     # 3. 开启引导逻辑
@@ -3559,9 +3555,8 @@ async def render_probe_page():
                 ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
         return
 
-    # 4. 渲染布局 (限制最大宽度，保持精致感)
+    # 4. 渲染布局 (限制最大宽度)
     with content_container:
-        # 外层容器：包裹标题和网格
         with ui.column().classes('w-full max-w-7xl gap-6'):
             
             # --- 标题栏 ---
@@ -3572,8 +3567,7 @@ async def render_probe_page():
                     ui.label('探针管理与设置').classes('text-2xl font-extrabold text-slate-800 tracking-tight')
                     ui.label('Probe Configuration & Management').classes('text-xs font-bold text-gray-400 uppercase tracking-widest')
 
-            # --- 核心网格布局 ---
-            # ✨ items-stretch: 强制左右两列高度一致
+            # --- 核心网格布局 (左右等高) ---
             with ui.grid().classes('w-full grid-cols-1 lg:grid-cols-3 gap-6 items-stretch'):
                 
                 # ======================= 左侧：参数设置区 (占 2/3) =======================
@@ -3591,7 +3585,6 @@ async def render_probe_page():
                             url_input = ui.input(value=default_url, placeholder='http://1.2.3.4:8080').props('outlined dense').classes('w-full')
                             ui.label('Agent 将向此地址推送数据。请填写 http://公网IP:端口 或 https://域名').classes('text-xs text-gray-400')
 
-                        # 独立保存按钮 1
                         async def save_url():
                             val = url_input.value.strip().rstrip('/')
                             if val:
@@ -3626,7 +3619,6 @@ async def render_probe_page():
                             ui.icon('info', size='xs').classes('text-gray-400')
                             ui.label('修改测速目标后，请点击右侧的“更新所有探针”按钮以生效。').classes('text-xs text-gray-400')
 
-                        # 独立保存按钮 2
                         async def save_ping():
                             ADMIN_CONFIG['ping_target_ct'] = ping_ct.value.strip()
                             ADMIN_CONFIG['ping_target_cu'] = ping_cu.value.strip()
@@ -3654,7 +3646,6 @@ async def render_probe_page():
                         
                         ui.label('用于接收服务器离线/恢复的实时通知。').classes('text-xs text-gray-400 mt-2')
 
-                        # 独立保存按钮 3
                         async def save_notify_conf():
                             ADMIN_CONFIG['tg_bot_token'] = tg_token.value.strip()
                             ADMIN_CONFIG['tg_chat_id'] = tg_id.value.strip()
@@ -3665,10 +3656,9 @@ async def render_probe_page():
                             ui.button('保存通知设置', icon='save', on_click=save_notify_conf).props('unelevated color=purple-7').classes('font-bold')
 
                 # ======================= 右侧：快捷操作区 (占 1/3) =======================
-                # ✨ h-full: 让右侧列高度占满，配合 Grid 的 items-stretch 实现等高
                 with ui.column().classes('lg:col-span-1 w-full gap-6 h-full'):
                     
-                    # --- 卡片 A: 快捷操作 (固定高度) ---
+                    # --- 卡片 A: 快捷操作 (已替换排序按钮) ---
                     with ui.card().classes('w-full p-6 bg-white border border-gray-200 shadow-sm rounded-xl flex-shrink-0'):
                         ui.label('快捷操作').classes('text-lg font-bold text-slate-700 mb-4 border-l-4 border-blue-500 pl-2')
                         
@@ -3691,9 +3681,15 @@ async def render_probe_page():
                             ui.button('复制安装命令', icon='content_copy', on_click=copy_install_cmd) \
                                 .classes('w-full bg-blue-50 text-blue-700 border border-blue-200 shadow-sm hover:bg-blue-100 font-bold align-left')
                             
-                            # 2. 新建视图 (原排序设置)
-                            ui.button('新建探针视图', icon='add_circle', on_click=lambda: open_quick_group_dialog(None)) \
-                                .classes('w-full bg-green-50 text-green-700 border border-green-200 shadow-sm hover:bg-green-100 font-bold align-left')
+                            # 2. 视图管理按钮组 (横向排列)
+                            with ui.row().classes('w-full gap-2'):
+                                # 自定义分组排序 (新功能)
+                                ui.button('分组排序', icon='toc', on_click=open_group_sort_dialog) \
+                                    .classes('flex-1 bg-gray-50 text-gray-700 border border-gray-200 shadow-sm hover:bg-gray-100 font-bold align-left')
+                                
+                                # 新建视图 (新功能)
+                                ui.button('新建分组', icon='add_circle', on_click=lambda: open_quick_group_dialog(None)) \
+                                    .classes('flex-1 bg-green-50 text-green-700 border border-green-200 shadow-sm hover:bg-green-100 font-bold align-left')
                             
                             # 3. 更新所有探针
                             async def reinstall_all():
@@ -3703,13 +3699,10 @@ async def render_probe_page():
                             ui.button('更新所有探针', icon='system_update_alt', on_click=reinstall_all) \
                                 .classes('w-full bg-orange-50 text-orange-700 border border-orange-200 shadow-sm hover:bg-orange-100 font-bold align-left')
 
-                    # --- 卡片 B: 公开监控页入口 (自动填充高度) ---
-                    # ✨ flex-grow: 自动拉伸填满剩余空间，实现左右高度对齐
-                    # ✨ justify-center: 让内部文字图标垂直居中
+                    # --- 卡片 B: 公开监控页入口 (自动拉伸填满高度) ---
                     with ui.card().classes('w-full p-6 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl shadow-lg relative overflow-hidden group cursor-pointer flex-grow flex flex-col justify-center') \
                         .on('click', lambda: ui.navigate.to('/status', new_tab=True)):
                         
-                        # 背景装饰
                         ui.icon('public', size='10rem').classes('absolute -right-8 -bottom-8 text-white opacity-10 group-hover:rotate-12 transition transform duration-500')
                         
                         ui.label('公开监控墙').classes('text-2xl font-bold mb-2')
@@ -6883,11 +6876,12 @@ def open_dark_server_detail(server_conf):
 # 用于记录当前探针页面选中的标签，防止刷新重置
 CURRENT_PROBE_TAB = 'ALL' 
 
-# ================= 公开状态页面入口 (V29.1 修复版) =================
+# ================= 公开状态页面入口  =================
 @ui.page('/status')
 def public_status_page():
-    # ✨✨✨ [修复点] 声明全局变量，解决 UnboundLocalError ✨✨✨
-    global CURRENT_PROBE_TAB
+    # 声明全局变量
+    global CURRENT_PROBE_TAB 
+    
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     ui.add_head_html('''
         <style>
@@ -6904,17 +6898,13 @@ def public_status_page():
                 background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important;
                 box-shadow: 0 0 15px rgba(239, 68, 68, 0.15) !important;
             }
-            /* 隐藏滚动条但保留功能 */
             .scrollbar-hide::-webkit-scrollbar { display: none; }
             .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
             .prog-bar { transition: width 0.5s ease-out; }
         </style>
     ''')
 
-    # --- 准备地图数据 ---
-    # (这部分地图数据准备代码保持不变，为节省篇幅略过，请保留原来的地图代码...)
-    # ... 请保留原有的 mapData, server_points, chart_data 计算代码 ...
-    # 🌟 这里为了完整性，我简写了，请确保你保留了原来的 fetch 逻辑
+    # --- 准备地图数据 (简写以节省篇幅，逻辑与之前一致) ---
     server_points = []; active_regions = set(); seen_flags = set(); online_count = 0
     CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
     from collections import Counter; country_counter = Counter()
@@ -6945,20 +6935,19 @@ def public_status_page():
     for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
     others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
     if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
-    # --- 地图数据准备结束 ---
 
     # --- 辅助：获取探针专用分组 ---
     def get_probe_groups():
         groups_list = ['ALL']
         customs = ADMIN_CONFIG.get('probe_custom_groups', [])
-        groups_list.extend(sorted(customs))
+        groups_list.extend(customs) # 直接使用保存的顺序
         return groups_list
 
     header_refs = {}
 
-    # --- 3. 布局 ---
+    # --- 上半部分：地图 ---
     with ui.column().classes('w-full h-[35vh] relative p-0 gap-0 bg-[#0B1121]'):
-        # 头部
+        # 头部统计
         with ui.column().classes('absolute top-6 left-8 z-50 gap-1'):
             with ui.row().classes('items-center gap-3'):
                 ui.icon('public', color='blue').classes('text-3xl drop-shadow-[0_0_10px_rgba(59,130,246,0.8)]')
@@ -6971,12 +6960,12 @@ def public_status_page():
                     ui.icon('language').classes('text-blue-400 text-xs')
                     header_refs['region_count'] = ui.label(f'分布区域: {len(active_regions)}').classes('text-slate-300')
 
-        # 登录按钮
+        # 右上角登录按钮
         with ui.row().classes('absolute top-6 right-8 z-50'):
             ui.button('后台管理', icon='login', on_click=lambda: ui.navigate.to('/login')) \
                 .props('flat dense color=grey-4').classes('font-bold text-xs hover:text-white transition-colors')
 
-        # 悬浮饼图
+        # 左下角饼图
         with ui.element('div').classes('absolute left-4 bottom-4 z-40'):
             ui.echart({
                 'backgroundColor': 'transparent', 'tooltip': {'trigger': 'item'},
@@ -6989,14 +6978,12 @@ def public_status_page():
     # --- 下半部分：固定标签栏 + 监控网格 ---
     with ui.column().classes('w-full h-[65vh] bg-[#0f172a] relative gap-0'):
         
-        # ✨✨✨ 固定标签栏 (Sticky Tab Bar) ✨✨✨
-        with ui.row().classes('w-full px-6 py-2 bg-[#0f172a]/95 backdrop-blur z-40 border-b border-gray-800 items-center justify-between'):
-            with ui.element('div').classes('flex-grow overflow-x-auto whitespace-nowrap scrollbar-hide'):
+        # ✨✨✨ 固定标签栏 (已移除右侧管理按钮) ✨✨✨
+        with ui.row().classes('w-full px-6 py-2 bg-[#0f172a]/95 backdrop-blur z-40 border-b border-gray-800 items-center'):
+            with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide'):
                 groups = get_probe_groups()
-                # 确保当前选中的标签存在
                 if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
 
-                # 使用 NiceGUI Tabs
                 with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-gray-500 bg-transparent') as tabs:
                     ui.tab('ALL', label='全部').on('click', lambda: update_tab('ALL'))
                     for g in groups:
@@ -7005,38 +6992,20 @@ def public_status_page():
                     
                     tabs.set_value(CURRENT_PROBE_TAB)
 
-            # 右侧：编辑/新增按钮 (仅在有登录状态下显示，或者对所有人开放？这里假设开放方便操作，或者你可以加 check_auth)
-            # 如果是公开页，通常不需要编辑按钮，但你要求了。
-            # 为了安全，这里可以加一个简单的 verify 或者直接放着
-            with ui.row().classes('gap-1'):
-                 # 只有当选中了自定义分组时，才显示编辑按钮
-                 edit_btn = ui.button(icon='edit', on_click=lambda: open_quick_group_dialog(lambda n: update_tab(n or 'ALL'), is_edit_mode=True, group_name=CURRENT_PROBE_TAB)) \
-                    .props('flat round dense size=sm color=grey-6').tooltip('编辑当前视图')
-                 
-                 # 绑定显示逻辑
-                 def update_edit_btn_visibility():
-                     edit_btn.set_visibility(CURRENT_PROBE_TAB != 'ALL')
-                 update_edit_btn_visibility()
-
-                 ui.button(icon='add', on_click=lambda: open_quick_group_dialog(lambda n: update_tab(n))).props('flat round dense size=sm color=blue').tooltip('新建视图')
-
         # 网格滚动区
         with ui.scroll_area().classes('w-full flex-grow p-6'):
             grid_container = ui.grid().classes('w-full gap-5 pb-20').style('grid-template-columns: repeat(auto-fill, minmax(360px, 1fr))')
             public_refs = {} 
 
-            # --- 渲染卡片网格的核心函数 ---
             def render_card_grid(target_group):
                 grid_container.clear()
                 public_refs.clear()
                 
-                # 筛选服务器
                 if target_group == 'ALL':
-                    filtered_servers = [s for s in SERVERS_CACHE] # 显示所有，或者只显示 probe_installed? 这里显示所有
+                    filtered_servers = [s for s in SERVERS_CACHE] 
                 else:
                     filtered_servers = [s for s in SERVERS_CACHE if target_group in s.get('tags', [])]
                 
-                # 排序 (优先在线 > 名字)
                 filtered_servers.sort(key=lambda x: (0 if x.get('_status')=='online' else 1, x.get('name', '')))
 
                 with grid_container:
@@ -7049,7 +7018,6 @@ def public_status_page():
                         refs = {}
                         with ui.card().classes('status-card w-full p-5 rounded-xl flex flex-col gap-3 relative overflow-hidden group') as card:
                             refs['card'] = card
-                            # ... (卡片内部结构保持不变) ...
                             with ui.row().classes('w-full justify-between items-center mb-1'):
                                 with ui.row().classes('items-center gap-3 overflow-hidden'):
                                     flag = "🏳️"
@@ -7101,18 +7069,15 @@ def public_status_page():
                         
                         public_refs[url] = refs
 
-            # 切换标签时的回调
+            # 切换标签
             def update_tab(new_val):
                 global CURRENT_PROBE_TAB
                 if CURRENT_PROBE_TAB != new_val:
                     CURRENT_PROBE_TAB = new_val
-                    update_edit_btn_visibility()
                     render_card_grid(new_val)
 
-            # 初始渲染
             render_card_grid(CURRENT_PROBE_TAB)
 
-    # 地图 JS (保持不变)
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data};
@@ -7147,33 +7112,28 @@ def public_status_page():
 
     async def loop_update():
         try:
-            # 自动刷新页面逻辑
             current_urls = set(s['url'] for s in SERVERS_CACHE)
-            # 注意：这里的检测要排除筛选的影响，只检测总数
-            # 如果是 ALL 标签，可以通过卡片数判断；如果是分组标签，比较难判断。
-            # 为了简单，我们只在 ALL 标签下检测新增。
-            if CURRENT_PROBE_TAB == 'ALL' and len(current_urls) > len(public_refs):
+            displayed_urls = list(public_refs.keys())
+            
+            if CURRENT_PROBE_TAB == 'ALL' and len(current_urls) > len(displayed_urls):
                 ui.run_javascript('location.reload()')
                 return
             
-            # 移除已删除卡片
-            for url in list(public_refs.keys()):
+            for url in displayed_urls:
                 if url not in current_urls:
                     try: public_refs[url]['card'].delete(); del public_refs[url]
                     except: pass
                     if url in PROBE_DATA_CACHE: del PROBE_DATA_CACHE[url]
 
             real_online_count = 0
-            # 只更新当前显示的卡片
             for s in SERVERS_CACHE:
                 url = s['url']
                 refs = public_refs.get(url)
-                if not refs or refs['badge'].is_deleted: continue # 只更新存在的卡片
-                
+                if not refs or refs['badge'].is_deleted: continue
                 res = await get_server_status(s)
+                
                 if res and res.get('status') == 'online': real_online_count += 1
                 
-                # ... (数据更新逻辑与之前一致，保持不变) ...
                 def get_ping_color(val):
                     if val == -1 or val == 0: return 'text-red-500', '超时'
                     if val < 80: return 'text-green-400', f'{val}ms'
@@ -7230,7 +7190,7 @@ def public_status_page():
                         cached_info = PROBE_DATA_CACHE[url]
                         if 'uptime' in cached_info: last_time_str = f"停于: {cached_info['uptime']}"
                     refs['uptime'].set_text(last_time_str)
-
+            
             if header_refs.get('online_count'):
                 header_refs['online_count'].set_text(f'在线: {real_online_count}')
 
