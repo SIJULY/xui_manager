@@ -389,14 +389,15 @@ def open_global_settings_dialog():
     
 # ================= 全局变量区 (新增缓存) =================
 PROBE_DATA_CACHE = {} # ✨全局探针数据缓存 {url: data_dict}
+PING_TREND_CACHE = {} # 结构: {url: [{'ts': timestamp, 'ct': 10, 'cu': 20, 'cm': 30}, ...]}
 
-# ================= 探针安装脚本 (v3.5 极简兼容版) =================
+# ================= 探针安装脚本 (v3.8 完美版：修复实时网速 + 精准系统识别) =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
 # 1. 提升权限
 [ "$(id -u)" -eq 0 ] || { command -v sudo >/dev/null && exec sudo bash "$0" "$@"; echo "Root required"; exit 1; }
 
-# 2. 安装基础依赖 (能装就装，装不上拉倒，不报错退出)
+# 2. 安装基础依赖
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
     apt-get install -y python3 iputils-ping util-linux >/dev/null 2>&1
@@ -406,8 +407,8 @@ elif [ -f /etc/alpine-release ]; then
     apk add python3 iputils util-linux >/dev/null 2>&1
 fi
 
-# 3. 写入 Python 脚本 (去除所有缩进，防止 EOF 解析错误)
-cat > /root/x_fusion_agent.py << 'PYTHON_EOF'
+# 3. 写入 Python 脚本
+cat > /root/x_fusion_agent.py << "PYTHON_EOF"
 import time, json, os, socket, sys, subprocess, re, platform
 import urllib.request, urllib.error
 import ssl
@@ -429,15 +430,11 @@ ssl_ctx.verify_mode = ssl.CERT_NONE
 def get_cpu_model():
     model = "Unknown"
     try:
-        # 优先读取 lscpu (Shell命令最准)
         try:
             out = subprocess.check_output("lscpu", shell=True).decode()
             for line in out.split("\n"):
-                if "Model name:" in line:
-                    return line.split(":")[1].strip()
+                if "Model name:" in line: return line.split(":")[1].strip()
         except: pass
-        
-        # 其次读取文件
         with open("/proc/cpuinfo", "r") as f:
             for line in f:
                 if "model name" in line: return line.split(":")[1].strip()
@@ -445,11 +442,21 @@ def get_cpu_model():
     except: pass
     return model
 
-# 缓存静态信息
+def get_os_distro():
+    try:
+        if os.path.exists("/etc/os-release"):
+            with open("/etc/os-release") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=")[1].strip().strip("\"")
+    except: pass
+    try: return platform.platform()
+    except: return "Linux (Unknown)"
+
 STATIC_CACHE = {
     "cpu_model": get_cpu_model(),
     "arch": platform.machine(),
-    "os": platform.platform(),
+    "os": get_os_distro(),
     "virt": "Unknown"
 }
 try:
@@ -468,6 +475,22 @@ def get_ping(target):
     except: pass
     return -1
 
+# ✨✨✨ 新增：读取网卡流量辅助函数 ✨✨✨
+def get_network_bytes():
+    r, t = 0, 0
+    try:
+        with open("/proc/net/dev") as f:
+            lines = f.readlines()[2:]
+            for l in lines:
+                cols = l.split(":")
+                if len(cols)<2: continue
+                parts = cols[1].split()
+                if len(parts)>=9 and cols[0].strip() != "lo":
+                    r += int(parts[0])
+                    t += int(parts[8])
+    except: pass
+    return r, t
+
 def get_info():
     global SERVER_URL
     data = {"token": TOKEN, "static": STATIC_CACHE}
@@ -481,33 +504,30 @@ def get_info():
     data["server_url"] = SERVER_URL
 
     try:
-        # 读取流量和负载
-        with open("/proc/net/dev") as f:
-            lines = f.readlines()[2:]
-            r, t = 0, 0
-            for l in lines:
-                cols = l.split(":")
-                if len(cols)<2: continue
-                parts = cols[1].split()
-                if len(parts)>=9 and cols[0].strip() != "lo":
-                    r += int(parts[0])
-                    t += int(parts[8])
-        
+        # ✨ 第一次采样 (网络 + CPU)
+        net_in_1, net_out_1 = get_network_bytes()
         with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot1, idle1 = sum(fs), fs[3]
         
+        # 等待 1 秒
         time.sleep(1)
         
+        # ✨ 第二次采样 (网络 + CPU)
+        net_in_2, net_out_2 = get_network_bytes()
         with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot2, idle2 = sum(fs), fs[3]
             
+        # 计算差值
         data["cpu_usage"] = round((1 - (idle2-idle1)/(tot2-tot1)) * 100, 1)
         data["cpu_cores"] = os.cpu_count() or 1
-        data["net_speed_in"] = 0 # 暂不计算瞬时速度以简化
-        data["net_total_in"] = r
-        data["net_total_out"] = t
+        
+        # ✨ 计算实时网速 (差值)
+        data["net_speed_in"] = net_in_2 - net_in_1
+        data["net_speed_out"] = net_out_2 - net_out_1
+        data["net_total_in"] = net_in_2
+        data["net_total_out"] = net_out_2
 
         with open("/proc/loadavg") as f: data["load_1"] = float(f.read().split()[0])
         
@@ -531,9 +551,7 @@ def get_info():
         data["disk_usage"] = round(((total-free)/total)*100, 1)
 
         with open("/proc/uptime") as f: u = float(f.read().split()[0])
-        d = int(u // 86400)
-        h = int((u % 86400) // 3600)
-        m = int((u % 3600) // 60)
+        d = int(u // 86400); h = int((u % 86400) // 3600); m = int((u % 3600) // 60)
         data["uptime"] = "%d天 %d时 %d分" % (d, h, m)
 
         data["pings"] = {k: get_ping(v) for k, v in PING_TARGETS.items()}
@@ -548,7 +566,7 @@ def push():
             req = urllib.request.Request(MANAGER_URL, data=js, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r: pass
         except: pass
-        time.sleep(2)
+        time.sleep(1) # 稍微加快推送频率，因为采集本身耗时1秒
 
 if __name__ == "__main__":
     push()
@@ -3274,47 +3292,50 @@ def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
 # ================= ✨✨✨ 详情弹窗逻辑 ✨✨✨ =================
 def open_server_detail_dialog(server_conf):
     """
-    打开服务器详情弹窗，包含详细参数、测速结果和实时图表
+    打开服务器详情弹窗 (UI 升级版：大圆角 + 磨砂玻璃风格)
     """
     # 样式定义
-    LABEL_STYLE = 'text-gray-500 font-bold text-xs'
-    VALUE_STYLE = 'text-gray-800 font-mono text-sm truncate'
+    LABEL_STYLE = 'text-gray-600 font-bold text-xs' # 字体颜色稍微加深一点，防止在半透明背景上看不清
+    VALUE_STYLE = 'text-gray-900 font-mono text-sm truncate'
     
-    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-4xl p-0 overflow-hidden flex flex-col bg-slate-50'):
-        d.props('persistent') # 点击背景不关闭，防止误触
+    # ✨✨✨ UI 核心升级 ✨✨✨
+    # 1. rounded-3xl: 超大圆角
+    # 2. bg-slate-100/85: 背景改为 85% 不透明度的淡灰色
+    # 3. backdrop-blur-xl: 强力背景模糊 (磨砂质感)
+    # 4. border-white/50: 半透明白色边框，增加玻璃边缘感
+    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-4xl p-0 overflow-hidden flex flex-col rounded-3xl bg-slate-100/85 backdrop-blur-xl border border-white/50 shadow-2xl'):
+        # 弹窗背后的遮罩层也加一点模糊
+        d.props('backdrop-filter="blur(4px)"') 
         
-        # 1. 顶部标题栏
-        with ui.row().classes('w-full items-center justify-between p-4 bg-white border-b flex-shrink-0'):
+        # 1. 顶部标题栏 (半透明白色)
+        with ui.row().classes('w-full items-center justify-between p-4 bg-white/50 border-b border-white/50 flex-shrink-0'):
             with ui.row().classes('items-center gap-2'):
                 flag = "🏳️"
                 try: flag = detect_country_group(server_conf['name'], server_conf).split(' ')[0]
                 except: pass
-                ui.label(flag).classes('text-2xl')
-                # 标题
-                ui.label(f"{server_conf['name']} 详情").classes('text-xl font-bold text-slate-800')
+                ui.label(flag).classes('text-2xl filter drop-shadow-sm') # 国旗加一点投影
+                ui.label(f"{server_conf['name']} 详情").classes('text-xl font-bold text-slate-800 tracking-tight')
             
-            ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
+            # 关闭按钮：半透明风格
+            ui.button(icon='close', on_click=d.close).props('flat round dense color=grey').classes('hover:bg-white/50')
 
         # 2. 内容滚动区
         with ui.scroll_area().classes('w-full h-[70vh] p-6'):
-            refs = {} # 存储 UI 引用以便更新
+            refs = {} 
             
-            # --- 第一部分：详细信息网格 (Grid) ---
-            with ui.card().classes('w-full p-5 shadow-sm border border-gray-200 bg-white mb-4'):
+            # --- 第一部分：详细信息网格 (卡片半透明化) ---
+            # bg-white/60: 卡片背景 60% 不透明度
+            with ui.card().classes('w-full p-5 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md mb-4 rounded-2xl'):
                 ui.label('详细信息').classes('text-sm font-bold text-slate-800 mb-3 border-l-4 border-blue-500 pl-2')
-                
-                # 使用 2 列布局，小屏幕 1 列
                 with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 gap-y-3 gap-x-8'):
-                    
                     def info_row(label, key):
-                        with ui.row().classes('w-full justify-between items-center border-b border-gray-50 pb-1'):
+                        with ui.row().classes('w-full justify-between items-center border-b border-gray-400/20 pb-1'):
                             ui.label(label).classes(LABEL_STYLE)
                             refs[key] = ui.label('--').classes(VALUE_STYLE)
 
                     info_row('CPU 型号', 'cpu_model')
                     info_row('系统架构', 'arch')
                     info_row('虚拟化', 'virt')
-                    info_row('GPU', 'gpu') # 暂无数据
                     info_row('操作系统', 'os')
                     info_row('内存使用', 'mem_detail')
                     info_row('交换分区', 'swap_detail')
@@ -3325,13 +3346,13 @@ def open_server_detail_dialog(server_conf):
                     info_row('在线时间', 'uptime')
                     info_row('最后上报', 'last_seen')
 
-            # --- 第二部分：三网测速 (Visual Buttons) ---
-            with ui.card().classes('w-full p-5 shadow-sm border border-gray-200 bg-white mb-4'):
+            # --- 第二部分：三网测速 (卡片半透明化) ---
+            with ui.card().classes('w-full p-5 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md mb-4 rounded-2xl'):
                 ui.label('三网延迟检测 (ICMP Ping)').classes('text-sm font-bold text-slate-800 mb-3 border-l-4 border-purple-500 pl-2')
-                
                 with ui.row().classes('w-full gap-4 justify-around'):
                     def ping_box(name, color, key):
-                        with ui.column().classes(f'flex-1 bg-{color}-50 border border-{color}-100 rounded-lg p-3 items-center min-w-[100px]'):
+                        # 内部的小色块也做微调，让颜色更通透
+                        with ui.column().classes(f'flex-1 bg-{color}-50/80 border border-{color}-100 rounded-xl p-3 items-center min-w-[100px]'):
                             ui.label(name).classes(f'text-{color}-700 font-bold text-xs mb-1')
                             refs[key] = ui.label('-- ms').classes(f'text-{color}-900 font-bold text-lg')
 
@@ -3339,68 +3360,82 @@ def open_server_detail_dialog(server_conf):
                     ping_box('联通', 'orange', 'ping_cu')
                     ping_box('移动', 'green', 'ping_cm')
 
-            # --- 第三部分：实时图表 (ECharts) ---
-            with ui.card().classes('w-full p-5 shadow-sm border border-gray-200 bg-white'):
-                with ui.row().classes('w-full justify-between items-center mb-2'):
-                     ui.label('网络质量监控 (最近60秒)').classes('text-sm font-bold text-slate-800 border-l-4 border-teal-500 pl-2')
-                     # 简单的图例说明
-                     with ui.row().classes('gap-2 text-[10px] text-gray-500'):
-                         ui.icon('circle', size='xs', color='blue'); ui.label('电信')
-                         ui.icon('circle', size='xs', color='orange'); ui.label('联通')
-                         ui.icon('circle', size='xs', color='green'); ui.label('移动')
+            # --- 第三部分：延迟趋势图 (卡片半透明化) ---
+            with ui.card().classes('w-full p-0 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md overflow-hidden rounded-2xl'):
+                # 图表顶栏也做半透明处理
+                with ui.row().classes('w-full justify-between items-center p-4 border-b border-white/50 bg-white/40'):
+                     ui.label('网络质量监控').classes('text-sm font-bold text-slate-800 border-l-4 border-teal-500 pl-2')
+                     
+                     with ui.tabs().props('dense no-caps active-color=primary indicator-color=primary').classes('bg-slate-200/50 rounded-lg p-1') as chart_tabs:
+                         t_real = ui.tab('real', label='实时(60s)').classes('rounded h-8 min-h-0 px-3 text-xs')
+                         t_1h = ui.tab('1h', label='1小时').classes('rounded h-8 min-h-0 px-3 text-xs')
+                         t_3h = ui.tab('3h', label='3小时').classes('rounded h-8 min-h-0 px-3 text-xs')
+                     
+                     chart_tabs.set_value('real') 
 
-                # ECharts 初始化
                 chart = ui.echart({
-                    'grid': {'left': '3%', 'right': '4%', 'bottom': '3%', 'top': '10%', 'containLabel': True},
-                    'xAxis': {'type': 'category', 'boundaryGap': False, 'data': [''] * 30, 'show': False}, # 隐藏 X 轴标签保持简洁
-                    'yAxis': {'type': 'value', 'splitLine': {'lineStyle': {'type': 'dashed', 'color': '#eee'}}},
+                    'tooltip': {
+                        'trigger': 'axis',
+                        'backgroundColor': 'rgba(255, 255, 255, 0.8)', # 提示框也半透明
+                        'backdropFilter': 'blur(4px)',               # 提示框磨砂
+                        'borderColor': '#fff',
+                        'borderWidth': 1,
+                        'textStyle': {'color': '#333', 'fontSize': 12},
+                        'axisPointer': {'type': 'cross', 'label': {'backgroundColor': '#6a7985'}}
+                    },
+                    'legend': {'data': ['电信', '联通', '移动'], 'bottom': 0, 'icon': 'circle', 'itemGap': 20},
+                    'grid': {'left': '3%', 'right': '4%', 'bottom': '10%', 'top': '5%', 'containLabel': True},
+                    'xAxis': {
+                        'type': 'category', 
+                        'boundaryGap': False,
+                        'axisLine': {'lineStyle': {'color': '#9ca3af'}}, # 轴线颜色淡一点
+                        'axisLabel': {'color': '#4b5563'},
+                        'data': [] 
+                    },
+                    'yAxis': {
+                        'type': 'value', 
+                        'splitLine': {'lineStyle': {'type': 'dashed', 'color': 'rgba(200,200,200,0.5)'}}, # 网格线半透明
+                        'minInterval': 1
+                    },
                     'series': [
-                        {'name': '电信', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [0]*30, 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#3b82f6'}},
-                        {'name': '联通', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [0]*30, 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#f97316'}},
-                        {'name': '移动', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [0]*30, 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#22c55e'}}
+                        {'name': '电信', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#3b82f6'}, 'areaStyle': {'opacity': 0.1, 'color': '#3b82f6'}},
+                        {'name': '联通', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#f97316'}, 'areaStyle': {'opacity': 0.1, 'color': '#f97316'}},
+                        {'name': '移动', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'lineStyle': {'width': 2}, 'itemStyle': {'color': '#22c55e'}, 'areaStyle': {'opacity': 0.1, 'color': '#22c55e'}}
                     ]
-                }).classes('w-full h-48')
+                }).classes('w-full h-64 p-2')
 
-        # 3. 实时更新逻辑
-        # 缓存图表数据
-        chart_history = {'ct': [0]*30, 'cu': [0]*30, 'cm': [0]*30}
+        # 3. 实时更新逻辑 (保持不变)
+        realtime_cache = {'ct': [0]*30, 'cu': [0]*30, 'cm': [0]*30, 'time': ['']*30}
         
         async def update_detail_loop():
             if not d.value: return
-            
             try:
-                # 尝试从 PROBE_DATA_CACHE 获取最原始数据 (包含静态信息)
                 raw_data = PROBE_DATA_CACHE.get(server_conf['url'], {})
-                # 获取通用混合状态 (用于格式化好的 uptime 等)
                 status = await get_server_status(server_conf)
-                
-                # --- 更新文本信息 ---
                 static = raw_data.get('static', {})
+                
                 refs['cpu_model'].set_text(static.get('cpu_model', status.get('cpu_model', 'Generic CPU')))
-                refs['arch'].set_text(static.get('arch', 'unknown'))
+                raw_arch = static.get('arch', 'unknown')
+                fmt_arch = raw_arch
+                if 'x86_64' in raw_arch.lower(): fmt_arch = 'AMD64'
+                elif 'aarch64' in raw_arch.lower() or 'arm64' in raw_arch.lower(): fmt_arch = 'ARM64'
+                refs['arch'].set_text(fmt_arch)
                 refs['os'].set_text(static.get('os', 'Linux'))
-                refs['virt'].set_text(static.get('virt', 'kvm')) # 默认kvm或从探针获取
-                refs['gpu'].set_text('None') # 探针暂未采集
+                refs['virt'].set_text(static.get('virt', 'kvm')) 
 
-                # 格式化内存/硬盘
                 def fmt_usage(used_pct, total_gb):
                     if not total_gb: return "--"
                     used_gb = float(total_gb) * (float(used_pct)/100)
                     return f"{round(used_gb, 2)} GB / {total_gb} GB"
                 
                 refs['mem_detail'].set_text(fmt_usage(status.get('mem_usage', 0), status.get('mem_total', 0)))
-                
-                # Swap (如果有)
                 sw_total = raw_data.get('swap_total', 0)
                 sw_free = raw_data.get('swap_free', 0)
-                if sw_total:
-                    refs['swap_detail'].set_text(f"{round(sw_total - sw_free, 2)} GB / {sw_total} GB")
-                else:
-                    refs['swap_detail'].set_text("未启用")
+                if sw_total: refs['swap_detail'].set_text(f"{round(sw_total - sw_free, 2)} GB / {sw_total} GB")
+                else: refs['swap_detail'].set_text("未启用")
 
                 refs['disk_detail'].set_text(fmt_usage(status.get('disk_usage', 0), status.get('disk_total', 0)))
                 
-                # 流量 & 网速
                 t_in = format_bytes(status.get('net_total_in', 0))
                 t_out = format_bytes(status.get('net_total_out', 0))
                 refs['traffic_detail'].set_text(f"↑ {t_out}  ↓ {t_in}")
@@ -3417,43 +3452,71 @@ def open_server_detail_dialog(server_conf):
                     import datetime
                     dt = datetime.datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S')
                     refs['last_seen'].set_text(dt)
-                else:
-                    refs['last_seen'].set_text('Never')
+                else: refs['last_seen'].set_text('Never')
 
-                # --- 更新 Ping 值 ---
                 pings = status.get('pings', {})
-                ct = pings.get('电信', -1)
-                cu = pings.get('联通', -1)
-                cm = pings.get('移动', -1)
+                ct = pings.get('电信', 0); ct = ct if ct > 0 else 0
+                cu = pings.get('联通', 0); cu = cu if cu > 0 else 0
+                cm = pings.get('移动', 0); cm = cm if cm > 0 else 0
                 
                 def fmt_ping(val): return f"{val} ms" if val > 0 else "超时"
                 refs['ping_ct'].set_text(fmt_ping(ct))
                 refs['ping_cu'].set_text(fmt_ping(cu))
                 refs['ping_cm'].set_text(fmt_ping(cm))
 
-                # --- 更新图表 ---
-                # 滚动数据
-                chart_history['ct'].pop(0); chart_history['ct'].append(ct if ct > 0 else 0)
-                chart_history['cu'].pop(0); chart_history['cu'].append(cu if cu > 0 else 0)
-                chart_history['cm'].pop(0); chart_history['cm'].append(cm if cm > 0 else 0)
+                import datetime
+                current_time_str = datetime.datetime.now().strftime('%H:%M:%S')
+                now_ts = time.time()
                 
-                chart.options['series'][0]['data'] = chart_history['ct']
-                chart.options['series'][1]['data'] = chart_history['cu']
-                chart.options['series'][2]['data'] = chart_history['cm']
+                if server_conf['url'] not in PING_TREND_CACHE: PING_TREND_CACHE[server_conf['url']] = []
+                
+                PING_TREND_CACHE[server_conf['url']].append({
+                    'ts': now_ts, 'time_str': current_time_str, 'ct': ct, 'cu': cu, 'cm': cm
+                })
+                
+                cutoff_ts = now_ts - (3.5 * 3600)
+                if len(PING_TREND_CACHE[server_conf['url']]) > 0 and PING_TREND_CACHE[server_conf['url']][0]['ts'] < cutoff_ts:
+                     PING_TREND_CACHE[server_conf['url']] = [p for p in PING_TREND_CACHE[server_conf['url']] if p['ts'] > cutoff_ts]
+
+                realtime_cache['ct'].pop(0); realtime_cache['ct'].append(ct)
+                realtime_cache['cu'].pop(0); realtime_cache['cu'].append(cu)
+                realtime_cache['cm'].pop(0); realtime_cache['cm'].append(cm)
+                realtime_cache['time'].pop(0); realtime_cache['time'].append(current_time_str)
+
+                tab_mode = chart_tabs.value
+                final_ct, final_cu, final_cm, final_time = [], [], [], []
+                
+                if tab_mode == 'real':
+                    final_ct = realtime_cache['ct']
+                    final_cu = realtime_cache['cu']
+                    final_cm = realtime_cache['cm']
+                    final_time = realtime_cache['time']
+                    chart.options['xAxis']['data'] = [''] * 30 
+                    chart.options['tooltip']['trigger'] = 'none' 
+                else:
+                    duration = 3600 if tab_mode == '1h' else 10800 
+                    start_ts = now_ts - duration
+                    history_data = [p for p in PING_TREND_CACHE[server_conf['url']] if p['ts'] >= start_ts]
+                    final_time = [p['time_str'] for p in history_data]
+                    final_ct = [p['ct'] for p in history_data]
+                    final_cu = [p['cu'] for p in history_data]
+                    final_cm = [p['cm'] for p in history_data]
+                    chart.options['xAxis']['data'] = final_time
+                    chart.options['tooltip']['trigger'] = 'axis' 
+                
+                chart.options['series'][0]['data'] = final_ct
+                chart.options['series'][1]['data'] = final_cu
+                chart.options['series'][2]['data'] = final_cm
                 chart.update()
 
-            except Exception as e: 
-                # logger.error(f"详情更新失败: {e}")
-                pass
+            except Exception as e: pass
 
-        # 启动定时器
         timer = ui.timer(2.0, update_detail_loop)
-        # 弹窗关闭时停止定时器
         d.on('hide', lambda: timer.cancel())
         
     d.open()
 
-# ================= 探针页面渲染 (最终完美版：含详情弹窗点击) =================
+# ================= 探针页面渲染 (最终完美版：含详情弹窗点击 + 修复安装命令) =================
 async def render_probe_page():
     global CURRENT_VIEW_STATE, CURRENT_PROBE_TAB
     CURRENT_VIEW_STATE['scope'] = 'PROBE'
@@ -3694,7 +3757,14 @@ async def render_probe_page():
                         mgr_url_conf = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
                         base_url = mgr_url_conf if mgr_url_conf else origin
                         register_api = f"{base_url}/api/probe/register"
-                        cmd = f'curl -sL https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/x-install.sh | bash -s -- "{token}" "{register_api}"'
+                        
+                        # ✨✨✨ 修改：读取测速点配置并拼接到命令中 (v3.8) ✨✨✨
+                        ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68')
+                        ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')
+                        ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')
+                        
+                        cmd = f'curl -sL https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/x-install.sh | bash -s -- "{token}" "{register_api}" "{ping_ct}" "{ping_cu}" "{ping_cm}"'
+                        
                         await safe_copy_to_clipboard(cmd)
                         safe_notify("📋 安装命令已复制！", "positive")
                     
