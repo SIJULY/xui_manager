@@ -68,7 +68,7 @@ def fetch_geo_from_ip(host):
     return None
 
 
-# ================= ✨✨✨ 新增：强制 GeoIP 命名与分组任务 ✨✨✨ =================
+# =================强制 GeoIP 命名与分组任务  =================
 async def force_geoip_naming_task(server_conf, max_retries=10):
     """
     强制执行 GeoIP 解析，直到成功或达到最大重试次数。
@@ -198,7 +198,7 @@ DASHBOARD_REFS = {
 }
 
 
-# ================= 全局 DNS 缓存 (支持静默更新) ======================
+# ================= 全局 DNS 缓存  ======================
 DNS_CACHE = {}
 DNS_WAITING_LABELS = {} # ✨ 新增：存储等待 DNS 结果的 UI 标签引用
 
@@ -269,7 +269,7 @@ def bind_ip_label(url, label):
         DNS_WAITING_LABELS[host].append(label)
     except: pass
 
-# ================= 获取国旗 (升级版：支持中文反向匹配) =================
+# ================= 获取国旗  =================
 def get_flag_for_country(country_name):
     if not country_name: return "🏳️ 未知"
     
@@ -387,12 +387,48 @@ def open_global_settings_dialog():
 
         ui.button('保存密钥', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white shadow-lg h-12 mt-2')
     d.open()
-    
-# ================= 全局变量区 (新增缓存) =================
-PROBE_DATA_CACHE = {} # ✨全局探针数据缓存 {url: data_dict}
-PING_TREND_CACHE = {} # 结构: {url: [{'ts': timestamp, 'ct': 10, 'cu': 20, 'cm': 30}, ...]}
 
-# ================= 探针安装脚本 (v3.8 完美版：修复实时网速 + 精准系统识别) =================
+
+
+    
+# ================= 全局变量区 (缓存) =================
+PROBE_DATA_CACHE = {} 
+PING_TREND_CACHE = {} 
+
+# ✨✨✨ [新增] 全局记录历史数据的函数 ✨✨✨
+def record_ping_history(url, pings_dict):
+    """
+    不管前台是否打开，后台收到数据就调用此函数记录历史。
+    """
+    if not url or not pings_dict: return
+    
+    current_ts = time.time()
+    import datetime
+    time_str = datetime.datetime.fromtimestamp(current_ts).strftime('%H:%M:%S')
+    
+    # 提取数据
+    ct = pings_dict.get('电信', 0); ct = ct if ct > 0 else 0
+    cu = pings_dict.get('联通', 0); cu = cu if cu > 0 else 0
+    cm = pings_dict.get('移动', 0); cm = cm if cm > 0 else 0
+    
+    # 初始化
+    if url not in PING_TREND_CACHE: PING_TREND_CACHE[url] = []
+    
+    # 追加新记录
+    PING_TREND_CACHE[url].append({
+        'ts': current_ts, 
+        'time_str': time_str, 
+        'ct': ct, 
+        'cu': cu, 
+        'cm': cm
+    })
+    
+    # 限制长度：保留最近 4 小时的数据 (假设每3秒一条，约4800条)
+    # 这样既保证有数据，又不撑爆内存
+    if len(PING_TREND_CACHE[url]) > 5000:
+        PING_TREND_CACHE[url] = PING_TREND_CACHE[url][-5000:]
+        
+# ================= 探针安装脚本  =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
 # 1. 提升权限
@@ -638,7 +674,7 @@ SERVERS_CACHE = []
 SUBS_CACHE = []
 NODES_DATA = {}
 ADMIN_CONFIG = {}
-# ================= 智能分组配置 (终极完整版) =================
+# ================= 智能分组配置  =================
 AUTO_COUNTRY_MAP = {
     # --- 亚太地区 ---
     '🇨🇳': '🇨🇳 中国', 'China': '🇨🇳 中国', '中国': '🇨🇳 中国', 'CN': '🇨🇳 中国',
@@ -686,7 +722,7 @@ AUTO_COUNTRY_MAP = {
     '🇸🇦': '🇸🇦 沙特', 'SA': '🇸🇦 沙特', 'Saudi Arabia': '🇸🇦 沙特',
 }
 
-# ================= 智能分组核心 (修复版：Oracle 误判 CL 问题) =================
+# ================= 智能分组核心  =================
 def detect_country_group(name, server_config=None):
     # 1. ✨ 最高优先级：手动设置的分组 ✨
     if server_config:
@@ -733,7 +769,7 @@ def detect_country_group(name, server_config=None):
             
     return '🏳️ 其他地区'
 
-# ================= 2D 平面地图：结构与样式 (修正版) =================
+# ================= 2D 平面地图：结构与样式  =================
 GLOBE_STRUCTURE = r"""
 <style>
     /* 容器填满父级 */
@@ -773,7 +809,7 @@ GLOBE_STRUCTURE = r"""
     <div id="earth-render-area" style="width:100%; height:100%;"></div>
 </div>
 """
-# ================= 2D 平面地图：JS 逻辑 (终极国旗版 + 计数修复) =================
+# ================= 2D 平面地图：JS 逻辑  =================
 GLOBE_JS_LOGIC = r"""
 (function() {
     const serverData = window.GLOBE_DATA || [];
@@ -1113,7 +1149,7 @@ def get_ssh_client(server_data):
     except Exception as e:
         return None, f"❌ 连接失败: {str(e)}"
 
-# =================  交互式 WebSSH 类 (修复版：移除导致错误的渲染选项) =================
+# =================  交互式 WebSSH 类  =================
 def get_ssh_client_sync(server_data):
     return get_ssh_client(server_data)
 
@@ -1564,7 +1600,7 @@ async def silent_refresh_all(is_auto_trigger=False):
     except: pass
 
 
-# ================= 探针与监控设置弹窗 (新) =================
+# ================= 探针与监控设置弹窗 =================
 def open_probe_settings_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl p-6 flex flex-col gap-4'):
         with ui.row().classes('justify-between items-center w-full border-b pb-2'):
@@ -1980,8 +2016,7 @@ async def batch_ping_nodes(nodes, raw_host):
     if tasks:
         await asyncio.gather(*tasks)
 
-
-# ================= 探针数据被动接收接口 (修复版：支持 IP 模糊匹配) =================
+# ================= 探针数据被动接收接口  =================
 @app.post('/api/probe/push')
 async def probe_push_data(request: Request):
     try:
@@ -1999,7 +2034,6 @@ async def probe_push_data(request: Request):
         target_server = next((s for s in SERVERS_CACHE if s['url'] == server_url), None)
         
         # ✨✨✨ 核心修复：如果精确匹配失败，尝试 IP 模糊匹配 ✨✨✨
-        # 原因：面板注册默认为 54321 端口，但 Agent 脚本可能生成 54322，导致无法对应
         if not target_server:
             try:
                 # 提取 Agent 汇报的 IP (去掉 http:// 和 端口)
@@ -2023,8 +2057,10 @@ async def probe_push_data(request: Request):
             data['last_updated'] = time.time()
             
             # 🌟 关键：使用面板里存储的 URL (target_server['url']) 作为 Key
-            # 这样前端 UI 才能根据它手里的 URL 查到这份数据
             PROBE_DATA_CACHE[target_server['url']] = data
+            
+            # ✨✨✨ [新增] 立即记录历史数据 ✨✨✨
+            record_ping_history(target_server['url'], data.get('pings', {}))
             
         return Response("OK", 200)
     except Exception as e:
@@ -2118,7 +2154,7 @@ async def short_group_handler(target: str, group_b64: str):
             return Response(f"Backend Error: {code} (Check Docker Network)", status_code=502)
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
 
-# ================= 短链接接口：单个订阅 (支持重命名) =================
+# ================= 短链接接口：单个订阅  =================
 @app.get('/get/sub/{target}/{token}')
 async def short_sub_handler(target: str, token: str):
     try:
@@ -2180,7 +2216,7 @@ async def short_sub_handler(target: str, token: str):
 
 
 
-# ================= 探针主动注册接口 (防重复增强版) =================
+# ================= 探针主动注册接口=================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
     try:
@@ -2353,7 +2389,7 @@ async def fast_resolve_single_server(s):
     except Exception as e:
         logger.error(f"❌ [智能修正] 严重错误: {e}")
 
-# ================= ✨✨✨ 新增：后台智能探测 SSH 用户名 ✨✨✨ =================
+# ================= 后台智能探测 SSH 用户名 =================
 async def smart_detect_ssh_user_task(server_conf):
     """
     后台任务：尝试使用不同的用户名 (ubuntu -> root) 连接 SSH。
@@ -2412,7 +2448,7 @@ async def smart_detect_ssh_user_task(server_conf):
         await save_servers()
 
     
-# ================= 自动注册接口 (最终版：集成智能探测) =================
+# ================= 自动注册接口 =================
 @app.post('/api/auto_register_node')
 async def auto_register_node(request: Request):
     try:
@@ -2829,7 +2865,7 @@ async def delete_inbound_with_confirm(mgr, inbound_id, inbound_remark, callback)
                 
             ui.button('确定删除', color='red', on_click=do_delete)
     d.open()
-# ================= 订阅编辑器 (修复版：解决并发列表变更导致的 IndexError) =================
+# ================= 订阅编辑器  =================
 class SubEditor:
     def __init__(self, data=None):
         self.data = data
@@ -2962,11 +2998,11 @@ class SubEditor:
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
     
-# ================= 全局变量补充 =================
+# ================= 全局变量 =================
 # 用于记录当前探针页面选中的标签，防止刷新重置
 CURRENT_PROBE_TAB = 'ALL' 
 
-# ================= 快捷创建分组弹窗 (含服务器选择) =================
+# ================= 快捷创建分组弹窗 =================
 def open_quick_group_create_dialog(callback=None):
     # 准备选择状态字典
     selection_map = {s['url']: False for s in SERVERS_CACHE}
@@ -3055,7 +3091,7 @@ def open_quick_group_create_dialog(callback=None):
 
     d.open()
 
-# ================= 快捷创建分组弹窗 (新增) =================
+# ================= 快捷创建分组弹窗  =================
 def open_quick_group_create_dialog(callback=None):
     with ui.dialog() as d, ui.card().classes('w-80 p-6 flex flex-col gap-4'):
         ui.label('新建分组').classes('text-lg font-bold')
@@ -3088,7 +3124,7 @@ def open_quick_group_create_dialog(callback=None):
             ui.button('创建', on_click=save).classes('bg-blue-600 text-white')
     d.open()
 
-# ================= 1. 探针排序弹窗 (强制垂直布局版) =================
+# ================= 1. 探针排序弹窗  =================
 def open_probe_sort_dialog(on_close_callback):
     # 准备数据
     saved_order = ADMIN_CONFIG.get('probe_sort_order', [])
@@ -3155,7 +3191,7 @@ def open_probe_sort_dialog(on_close_callback):
             ui.button('保存排序', icon='save', on_click=save_order).classes('w-full bg-slate-900 text-white shadow-lg')
     d.open()
 
-# ================= 2. 探针专用分组弹窗 (隔离版) =================
+# ================= 2. 探针专用分组弹窗 =================
 # is_edit_mode: 是否为编辑模式
 # group_name: 编辑时的原组名
 def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
@@ -3289,43 +3325,34 @@ def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
 
     d.open()
 
-
-# ================= ✨✨✨ 详情弹窗逻辑 ✨✨✨ =================
+# ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
 def open_server_detail_dialog(server_conf):
     """
     打开服务器详情弹窗 (UI 升级版：大圆角 + 磨砂玻璃风格)
     """
     # 样式定义
-    LABEL_STYLE = 'text-gray-600 font-bold text-xs' # 字体颜色稍微加深一点，防止在半透明背景上看不清
+    LABEL_STYLE = 'text-gray-600 font-bold text-xs' 
     VALUE_STYLE = 'text-gray-900 font-mono text-sm truncate'
     
-    # ✨✨✨ UI 核心升级 ✨✨✨
-    # 1. rounded-3xl: 超大圆角
-    # 2. bg-slate-100/85: 背景改为 85% 不透明度的淡灰色
-    # 3. backdrop-blur-xl: 强力背景模糊 (磨砂质感)
-    # 4. border-white/50: 半透明白色边框，增加玻璃边缘感
     with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-4xl p-0 overflow-hidden flex flex-col rounded-3xl bg-slate-100/85 backdrop-blur-xl border border-white/50 shadow-2xl'):
-        # 弹窗背后的遮罩层也加一点模糊
         d.props('backdrop-filter="blur(4px)"') 
         
-        # 1. 顶部标题栏 (半透明白色)
+        # 1. 顶部标题栏
         with ui.row().classes('w-full items-center justify-between p-4 bg-white/50 border-b border-white/50 flex-shrink-0'):
             with ui.row().classes('items-center gap-2'):
                 flag = "🏳️"
                 try: flag = detect_country_group(server_conf['name'], server_conf).split(' ')[0]
                 except: pass
-                ui.label(flag).classes('text-2xl filter drop-shadow-sm') # 国旗加一点投影
+                ui.label(flag).classes('text-2xl filter drop-shadow-sm') 
                 ui.label(f"{server_conf['name']} 详情").classes('text-xl font-bold text-slate-800 tracking-tight')
             
-            # 关闭按钮：半透明风格
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey').classes('hover:bg-white/50')
 
         # 2. 内容滚动区
         with ui.scroll_area().classes('w-full h-[70vh] p-6'):
             refs = {} 
             
-            # --- 第一部分：详细信息网格 (卡片半透明化) ---
-            # bg-white/60: 卡片背景 60% 不透明度
+            # --- 第一部分：详细信息网格 ---
             with ui.card().classes('w-full p-5 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md mb-4 rounded-2xl'):
                 ui.label('详细信息').classes('text-sm font-bold text-slate-800 mb-3 border-l-4 border-blue-500 pl-2')
                 with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 gap-y-3 gap-x-8'):
@@ -3347,12 +3374,11 @@ def open_server_detail_dialog(server_conf):
                     info_row('在线时间', 'uptime')
                     info_row('最后上报', 'last_seen')
 
-            # --- 第二部分：三网测速 (卡片半透明化) ---
+            # --- 第二部分：三网测速 ---
             with ui.card().classes('w-full p-5 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md mb-4 rounded-2xl'):
                 ui.label('三网延迟检测 (ICMP Ping)').classes('text-sm font-bold text-slate-800 mb-3 border-l-4 border-purple-500 pl-2')
                 with ui.row().classes('w-full gap-4 justify-around'):
                     def ping_box(name, color, key):
-                        # 内部的小色块也做微调，让颜色更通透
                         with ui.column().classes(f'flex-1 bg-{color}-50/80 border border-{color}-100 rounded-xl p-3 items-center min-w-[100px]'):
                             ui.label(name).classes(f'text-{color}-700 font-bold text-xs mb-1')
                             refs[key] = ui.label('-- ms').classes(f'text-{color}-900 font-bold text-lg')
@@ -3361,9 +3387,8 @@ def open_server_detail_dialog(server_conf):
                     ping_box('联通', 'orange', 'ping_cu')
                     ping_box('移动', 'green', 'ping_cm')
 
-            # --- 第三部分：延迟趋势图 (卡片半透明化) ---
+            # --- 第三部分：延迟趋势图 ---
             with ui.card().classes('w-full p-0 shadow-sm border border-white/60 bg-white/60 backdrop-blur-md overflow-hidden rounded-2xl'):
-                # 图表顶栏也做半透明处理
                 with ui.row().classes('w-full justify-between items-center p-4 border-b border-white/50 bg-white/40'):
                      ui.label('网络质量监控').classes('text-sm font-bold text-slate-800 border-l-4 border-teal-500 pl-2')
                      
@@ -3377,8 +3402,8 @@ def open_server_detail_dialog(server_conf):
                 chart = ui.echart({
                     'tooltip': {
                         'trigger': 'axis',
-                        'backgroundColor': 'rgba(255, 255, 255, 0.8)', # 提示框也半透明
-                        'backdropFilter': 'blur(4px)',               # 提示框磨砂
+                        'backgroundColor': 'rgba(255, 255, 255, 0.8)',
+                        'backdropFilter': 'blur(4px)',
                         'borderColor': '#fff',
                         'borderWidth': 1,
                         'textStyle': {'color': '#333', 'fontSize': 12},
@@ -3389,13 +3414,13 @@ def open_server_detail_dialog(server_conf):
                     'xAxis': {
                         'type': 'category', 
                         'boundaryGap': False,
-                        'axisLine': {'lineStyle': {'color': '#9ca3af'}}, # 轴线颜色淡一点
+                        'axisLine': {'lineStyle': {'color': '#9ca3af'}}, 
                         'axisLabel': {'color': '#4b5563'},
                         'data': [] 
                     },
                     'yAxis': {
                         'type': 'value', 
-                        'splitLine': {'lineStyle': {'type': 'dashed', 'color': 'rgba(200,200,200,0.5)'}}, # 网格线半透明
+                        'splitLine': {'lineStyle': {'type': 'dashed', 'color': 'rgba(200,200,200,0.5)'}}, 
                         'minInterval': 1
                     },
                     'series': [
@@ -3405,9 +3430,7 @@ def open_server_detail_dialog(server_conf):
                     ]
                 }).classes('w-full h-64 p-2')
 
-        # 3. 实时更新逻辑 (保持不变)
-        realtime_cache = {'ct': [0]*30, 'cu': [0]*30, 'cm': [0]*30, 'time': ['']*30}
-        
+        # 3. 实时更新逻辑 (修复：改为纯读取模式)
         async def update_detail_loop():
             if not d.value: return
             try:
@@ -3415,6 +3438,7 @@ def open_server_detail_dialog(server_conf):
                 status = await get_server_status(server_conf)
                 static = raw_data.get('static', {})
                 
+                # 更新文本信息
                 refs['cpu_model'].set_text(static.get('cpu_model', status.get('cpu_model', 'Generic CPU')))
                 raw_arch = static.get('arch', 'unknown')
                 fmt_arch = raw_arch
@@ -3465,46 +3489,36 @@ def open_server_detail_dialog(server_conf):
                 refs['ping_cu'].set_text(fmt_ping(cu))
                 refs['ping_cm'].set_text(fmt_ping(cm))
 
-                import datetime
-                current_time_str = datetime.datetime.now().strftime('%H:%M:%S')
+                # --- ✨✨✨ 图表更新逻辑 (核心修改) ✨✨✨ ---
+                
+                # 1. 从全局缓存读取历史数据 (而不是在这里 append)
+                history_data = PING_TREND_CACHE.get(server_conf['url'], [])
+                
                 now_ts = time.time()
-                
-                if server_conf['url'] not in PING_TREND_CACHE: PING_TREND_CACHE[server_conf['url']] = []
-                
-                PING_TREND_CACHE[server_conf['url']].append({
-                    'ts': now_ts, 'time_str': current_time_str, 'ct': ct, 'cu': cu, 'cm': cm
-                })
-                
-                cutoff_ts = now_ts - (3.5 * 3600)
-                if len(PING_TREND_CACHE[server_conf['url']]) > 0 and PING_TREND_CACHE[server_conf['url']][0]['ts'] < cutoff_ts:
-                     PING_TREND_CACHE[server_conf['url']] = [p for p in PING_TREND_CACHE[server_conf['url']] if p['ts'] > cutoff_ts]
-
-                realtime_cache['ct'].pop(0); realtime_cache['ct'].append(ct)
-                realtime_cache['cu'].pop(0); realtime_cache['cu'].append(cu)
-                realtime_cache['cm'].pop(0); realtime_cache['cm'].append(cm)
-                realtime_cache['time'].pop(0); realtime_cache['time'].append(current_time_str)
-
                 tab_mode = chart_tabs.value
                 final_ct, final_cu, final_cm, final_time = [], [], [], []
                 
                 if tab_mode == 'real':
-                    final_ct = realtime_cache['ct']
-                    final_cu = realtime_cache['cu']
-                    final_cm = realtime_cache['cm']
-                    final_time = realtime_cache['time']
-                    chart.options['xAxis']['data'] = [''] * 30 
-                    chart.options['tooltip']['trigger'] = 'none' 
+                    # 实时: 60秒
+                    cutoff = now_ts - 60
+                    sliced = [p for p in history_data if p['ts'] > cutoff]
+                elif tab_mode == '1h':
+                    # 1小时
+                    cutoff = now_ts - 3600
+                    sliced = [p for p in history_data if p['ts'] > cutoff]
                 else:
-                    duration = 3600 if tab_mode == '1h' else 10800 
-                    start_ts = now_ts - duration
-                    history_data = [p for p in PING_TREND_CACHE[server_conf['url']] if p['ts'] >= start_ts]
-                    final_time = [p['time_str'] for p in history_data]
-                    final_ct = [p['ct'] for p in history_data]
-                    final_cu = [p['cu'] for p in history_data]
-                    final_cm = [p['cm'] for p in history_data]
-                    chart.options['xAxis']['data'] = final_time
-                    chart.options['tooltip']['trigger'] = 'axis' 
+                    # 3小时 (降采样)
+                    cutoff = now_ts - 10800
+                    sliced = [p for p in history_data if p['ts'] > cutoff]
+                    if len(sliced) > 1000: sliced = sliced[::2]
                 
+                if sliced:
+                    final_ct = [p['ct'] for p in sliced]
+                    final_cu = [p['cu'] for p in sliced]
+                    final_cm = [p['cm'] for p in sliced]
+                    final_time = [p['time_str'] for p in sliced]
+                
+                chart.options['xAxis']['data'] = final_time
                 chart.options['series'][0]['data'] = final_ct
                 chart.options['series'][1]['data'] = final_cu
                 chart.options['series'][2]['data'] = final_cm
@@ -6563,22 +6577,18 @@ async def send_telegram_message(text):
             logger.error(f"❌ TG 发送失败: {e}")
 
     await run.io_bound(_do_req)
-# ================= 优化后的监控任务 (防误报版) =================
+# ================= 优化后的监控任务 (防误报 + 历史记录版) =================
 async def job_monitor_status():
     """
     监控任务：每分钟检查一次服务器状态
-    优化策略：
-    1. 限制并发数，防止 CPU 飙升
-    2. ✨ 引入失败计数器：连续 3 次检测离线才报警 (防网络抖动)
+    1. 限制并发数
+    2. 引入失败计数器
+    3. [新增] 自动补录历史数据
     """
-    # 如果没配 TG，直接跳过
-    if not ADMIN_CONFIG.get('tg_bot_token'): return
-
     # 限制并发数为 5
     sema = asyncio.Semaphore(5)
     
     # 定义报警阈值：连续失败 3 次才报警
-    # 因为任务每 60 秒跑一次，所以大约是 3 分钟确认离线
     FAILURE_THRESHOLD = 3 
     
     current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
@@ -6591,6 +6601,14 @@ async def job_monitor_status():
             name = srv.get('name', 'Unknown')
             url = srv['url']
             
+            # ✨✨✨ [新增] 如果不是探针机器(探针已经在push接口记过了)，则在这里补录历史 ✨✨✨
+            if not srv.get('probe_installed'):
+                 if res and 'pings' in res:
+                     record_ping_history(url, res['pings'])
+
+            # 如果没配 TG，后面的报警逻辑就跳过，但上面的记录逻辑不能跳
+            if not ADMIN_CONFIG.get('tg_bot_token'): return
+
             # 清洗 IP，只显示纯 IP
             display_ip = url.split('://')[-1].split(':')[0]
             
@@ -6600,13 +6618,11 @@ async def job_monitor_status():
                 is_physically_online = True
             
             # --- 核心防抖逻辑 ---
-            
             if is_physically_online:
                 # 1. 如果当前检测在线，直接重置失败计数器
                 FAILURE_COUNTS[url] = 0
                 
                 # 2. 检查是否需要发“恢复通知”
-                # 只有当缓存记录里是 offline 时，才说明之前报过警，现在需要报恢复
                 if ALERT_CACHE.get(url) == 'offline':
                     msg = (
                         f"🟢 **恢复：服务器已上线**\n\n"
@@ -6616,16 +6632,13 @@ async def job_monitor_status():
                     )
                     logger.info(f"🔔 [恢复] {name} 已上线")
                     asyncio.create_task(send_telegram_message(msg))
-                    
-                    # 更新缓存状态为在线
                     ALERT_CACHE[url] = 'online'
-            
             else:
                 # 1. 如果当前检测离线，计数器 +1
                 current_count = FAILURE_COUNTS.get(url, 0) + 1
                 FAILURE_COUNTS[url] = current_count
                 
-                # 2. 只有计数器达到阈值 (比如 3 次)，且之前没报过警(或者之前是在线)，才报警
+                # 2. 只有计数器达到阈值，才报警
                 if current_count >= FAILURE_THRESHOLD:
                     if ALERT_CACHE.get(url) != 'offline':
                         msg = (
@@ -6637,11 +6650,7 @@ async def job_monitor_status():
                         )
                         logger.warning(f"🔔 [报警] {name} 确认离线 (重试{current_count}次)")
                         asyncio.create_task(send_telegram_message(msg))
-                        
-                        # 只有发了报警，才更新缓存状态为离线
                         ALERT_CACHE[url] = 'offline'
-                else:
-                    logger.warning(f"⚠️ [波动] {name} 检测离线 ({current_count}/{FAILURE_THRESHOLD}) - 暂不报警")
 
     # 创建所有任务并执行
     tasks = [_check_single_server(s) for s in SERVERS_CACHE]
