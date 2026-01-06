@@ -4828,7 +4828,11 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                             s = targets[0]
                             if s.get('url') and s.get('user') and s.get('pass'):
                                 mgr = get_manager(s)
-                                ui.button('新建节点', icon='add', color='green', on_click=lambda: open_inbound_dialog(mgr, None, lambda: refresh_content('SINGLE', s, force_refresh=True))).props('dense size=sm')
+                                async def on_add_success():
+                                    ui.notify('添加节点成功')
+                                    await REFRESH_CURRENT_NODES()
+                                ui.button('新建节点', icon='add', color='green', on_click=lambda: open_inbound_dialog(mgr, None, on_add_success)).props('dense size=sm')
+
 
                         # 同步按钮 (触发 force_refresh=True)
                         if targets and scope != 'SINGLE':
@@ -4893,16 +4897,102 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
                 ui.label(value_str).classes('text-sm font-bold text-slate-700')
                 if sub_text: ui.label(sub_text).classes('text-[10px] text-gray-400')
 
-    
-# =================单个服务器视图 (完整修改版) =========================
+# 用于外部调用的刷新句柄 (例如给右上角"新建节点"按钮使用)
+REFRESH_CURRENT_NODES = lambda: None
+
+# =================单个服务器视图 (V46：无闪烁静默刷新版) =========================
 async def render_single_server_view(server_conf, force_refresh=False):
+    global REFRESH_CURRENT_NODES
+    
     mgr = get_manager(server_conf)
     ui_refs = {}
-    
-    # 判断是否配置了有效的 X-UI 信息
     has_xui_config = (server_conf.get('url') and server_conf.get('user') and server_conf.get('pass'))
 
-    # --- UI 组件定义 ---
+    list_container = ui.column().classes('w-full mb-6') 
+    status_container = ui.column().classes('w-full mb-6') 
+    ssh_container_outer = ui.column().classes('w-full') 
+
+    # --- 辅助：定义一个标准的“先同步数据，后刷新UI”的流程 ---
+    async def reload_and_refresh_ui():
+        # 1. 后台静默同步数据到缓存 (耗时操作，但这期间UI保持不动)
+        await fetch_inbounds_safe(server_conf, force_refresh=True)
+        # 2. 数据到位后，瞬间刷新UI (读取内存，毫秒级，无闪烁)
+        render_node_table.refresh()
+
+    # 将这个高级刷新方法暴露给全局，给"新建节点"按钮用
+    REFRESH_CURRENT_NODES = reload_and_refresh_ui
+
+    # ================= ✨ 核心修改区域 ✨ =================
+    @ui.refreshable
+    async def render_node_table():
+        if not has_xui_config:
+            with ui.card().classes('w-full p-4 bg-orange-50 border border-orange-200 items-center flex-row gap-4'):
+                ui.icon('info', size='2rem').classes('text-orange-500')
+                with ui.column().classes('gap-1'):
+                    ui.label('未配置 X-UI 面板信息').classes('font-bold text-orange-800')
+                    ui.label('当前仅作为服务器探针运行。').classes('text-xs text-orange-600')
+            return
+
+        # ✨✨✨ 关键修改 1：这里改为 False！只读缓存，不请求网络！ ✨✨✨
+        # 这样刷新时就是毫秒级的，不会出现“空白等待期”
+        res = await fetch_inbounds_safe(server_conf, force_refresh=False)
+        
+        raw_host = server_conf['url'].split('://')[-1].split(':')[0]
+
+        with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS_NO_PING):
+            ui.label('备注名称').classes('text-left pl-2')
+            for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
+        
+        if not res: 
+            msg = '暂无节点 (或正在同步中...)'
+            ui.label(msg).classes('text-gray-400 mt-4 text-center w-full')
+        else:
+            for n in res:
+                traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
+                with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS_NO_PING):
+                    ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
+                    ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
+                    ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
+                    ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
+                    ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
+                    
+                    is_enable = n.get('enable', True)
+                    with ui.row().classes('w-full justify-center items-center gap-1'):
+                        ui.icon('bolt').classes(f'text-{"green" if is_enable else "red"}-500 text-sm')
+                        ui.label("运行中" if is_enable else "已停止").classes(f'text-xs font-bold text-{"green" if is_enable else "red"}-600')
+
+                    with ui.row().classes('gap-2 justify-center w-full no-wrap'):
+                        l = generate_node_link(n, server_conf['url'])
+                        if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm').tooltip('复制链接')
+                        
+                        detail_conf = generate_detail_config(n, raw_host)
+                        if detail_conf: ui.button(icon='description', on_click=lambda t=detail_conf: safe_copy_to_clipboard(t)).props('flat dense size=sm text-color=purple').tooltip('复制配置')
+
+                        # ✨✨✨ 关键修改 2：编辑回调改为 reload_and_refresh_ui ✨✨✨
+                        async def on_edit_success():
+                            ui.notify('修改成功')
+                            await reload_and_refresh_ui() # 先同步数据，再瞬时刷新
+                            
+                        ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props('flat dense size=sm')
+                        
+                        # ✨✨✨ 关键修改 3：删除回调改为 reload_and_refresh_ui ✨✨✨
+                        async def on_del_success():
+                            ui.notify('删除成功')
+                            await reload_and_refresh_ui() # 先同步数据，再瞬时刷新
+
+                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props('flat dense size=sm color=red')
+
+    # 初始渲染 (第一次进来时，可能需要去网络拉取一下，所以这里可以用 True)
+    # 或者用 False 依赖后台定时任务也行，为了体验好，第一次打开用 True
+    # 但为了防止进入时就闪烁，我们可以先用缓存，然后偷偷更新
+    with list_container:
+        await render_node_table() # 先渲染缓存
+        # 偷偷在后台更新一下最新数据，如果数据变了，再无感刷新
+        asyncio.create_task(reload_and_refresh_ui())
+
+    # ================= (以下 SSH / 状态监控 代码保持不变) =================
+    # ... (保持原样，不要动) ...
+    # ... [保留原有的 _create_live_ring 等辅助函数] ...
     def _create_live_ring(label, color, key_prefix):
         with ui.column().classes('items-center justify-center min-w-[100px]'):
             with ui.element('div').classes('relative flex items-center justify-center w-16 h-16 mb-2'):
@@ -4935,62 +5025,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui_refs[f'{key_prefix}_main'] = ui.label('--').classes('text-sm font-bold text-slate-700')
                     ui_refs[f'{key_prefix}_sub'] = ui.label('--').classes('text-[10px] text-gray-400')
 
-    list_container = ui.column().classes('w-full mb-6') 
-    status_container = ui.column().classes('w-full mb-6') 
-    ssh_container_outer = ui.column().classes('w-full') 
-
-    # 1. 节点列表渲染
-    with list_container:
-        if not has_xui_config:
-            with ui.card().classes('w-full p-4 bg-orange-50 border border-orange-200 items-center flex-row gap-4'):
-                ui.icon('info', size='2rem').classes('text-orange-500')
-                with ui.column().classes('gap-1'):
-                    ui.label('未配置 X-UI 面板信息').classes('font-bold text-orange-800')
-                    ui.label('当前仅作为服务器探针运行。如需管理节点，请在编辑页面填写面板 URL 和账号密码。').classes('text-xs text-orange-600')
-        else:
-            res = await fetch_inbounds_safe(server_conf, force_refresh=force_refresh)
-            
-            # ✨✨✨ 关键步骤：提取纯净的主机名 (去掉 http:// 和 :端口) ✨✨✨
-            # 这样生成的配置才是 vmess=1.2.3.4:端口，而不是 vmess=http://1.2.3.4:54321:端口
-            raw_host = server_conf['url'].split('://')[-1].split(':')[0]
-
-            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-500 border-b pb-2 px-2').style(SINGLE_COLS_NO_PING):
-                ui.label('备注名称').classes('text-left pl-2')
-                for h in ['所在组', '已用流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
-            
-            if not res: 
-                msg = '暂无节点 (后台同步中...)' if not server_conf.get('probe_installed') else '暂无节点数据'
-                ui.label(msg).classes('text-gray-400 mt-4 text-center w-full')
-            else:
-                for n in res:
-                    traffic = format_bytes(n.get('up', 0) + n.get('down', 0))
-                    with ui.element('div').classes('grid w-full gap-4 py-3 border-b hover:bg-blue-50 transition px-2').style(SINGLE_COLS_NO_PING):
-                        ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2')
-                        ui.label(server_conf.get('group', '默认分组')).classes('text-xs text-gray-500 w-full text-center truncate')
-                        ui.label(traffic).classes('text-xs text-gray-600 w-full text-center font-mono')
-                        ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center')
-                        ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center')
-                        
-                        is_enable = n.get('enable', True)
-                        with ui.row().classes('w-full justify-center items-center gap-1'):
-                            ui.icon('bolt').classes(f'text-{"green" if is_enable else "red"}-500 text-sm')
-                            ui.label("运行中" if is_enable else "已停止").classes(f'text-xs font-bold text-{"green" if is_enable else "red"}-600')
-
-                        with ui.row().classes('gap-2 justify-center w-full no-wrap'):
-                            # 1. 复制通用链接 (vmess://)
-                            l = generate_node_link(n, server_conf['url'])
-                            if l: ui.button(icon='content_copy', on_click=lambda u=l: safe_copy_to_clipboard(u)).props('flat dense size=sm').tooltip('复制链接 (Base64)')
-                            
-                            # 2. ✨✨✨ 新增：复制明文配置 (Surge格式) ✨✨✨
-                            detail_conf = generate_detail_config(n, raw_host)
-                            if detail_conf:
-                                ui.button(icon='description', on_click=lambda t=detail_conf: safe_copy_to_clipboard(t)).props('flat dense size=sm text-color=purple').tooltip('复制明文配置 (Surge/Loon)')
-
-                            # 3. 编辑和删除
-                            ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm')
-                            ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), lambda: refresh_content('SINGLE', server_conf, force_refresh=True))).props('flat dense size=sm color=red')
-
-    # 2. 状态面板
+    # 2. 状态面板 (保持不变)
     with status_container:
         ui.separator().classes('my-4') 
         with ui.card().classes('w-full p-4 bg-white rounded-xl shadow-sm border border-gray-100'):
@@ -5012,7 +5047,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 _create_live_stat_card('运行时间', 'schedule', 'text-cyan-600', 'uptime')
                 _create_live_stat_card('系统负载', 'analytics', 'text-pink-600', 'load')
 
-    # 3. 嵌入式 SSH 终端
+    # 3. SSH 终端 (保持不变)
     with ssh_container_outer:
         ui.separator().classes('my-4')
         ssh_card = ui.card().classes('w-full p-0 border border-gray-300 rounded-xl overflow-hidden shadow-sm flex flex-col')
@@ -5056,7 +5091,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 
         render_ssh_area()
 
-    # 4. 数据更新任务
+    # 4. 数据更新任务 (保持不变)
     async def update_data_task():
         try:
             if 'heartbeat' in ui_refs: ui_refs['heartbeat'].classes(remove='opacity-0')
