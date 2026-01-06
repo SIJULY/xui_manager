@@ -7141,8 +7141,8 @@ def open_pc_server_detail(server_conf):
                                 with ui.row().classes('w-full justify-end'):
                                     refs[f'{key}_val'] = ui.label('0 GB / 0 GB').classes('text-[11px] text-gray-500 font-mono mt-1')
                         progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
-                        progress_block('記憶体', 'mem', 'memory', 'green-5')
-                        progress_block('磁碟', 'disk', 'storage', 'purple-5')
+                        progress_block('RAM', 'mem', 'memory', 'green-5')
+                        progress_block('DISK', 'disk', 'storage', 'purple-5')
 
                     # 右侧：系统
                     with ui.column().classes(f'w-[400px] p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
