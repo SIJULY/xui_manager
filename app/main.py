@@ -7365,7 +7365,7 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V74：强制锁定图标大小 + 纯图标状态) =================        
+# ================= 电脑端大屏显示 (V75：离线使用断开闪电图标) =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -7564,8 +7564,7 @@ async def render_desktop_status_page():
                         'truncate flex-grow min-w-0 cursor-pointer hover:text-blue-500 transition leading-tight'
                     ).on('click', lambda _, s=s: open_pc_server_detail(s))
                     
-                    # ✨✨✨ 修改：强制使用 props 控制大小 (32px) ✨✨✨
-                    # 这样无论 class 怎么变，size 属性永远生效，不会被挤压
+                    # 初始状态：灰色实心闪电 (bolt)
                     refs['status_icon'] = ui.icon('bolt').props('size=32px').classes('text-gray-400 flex-shrink-0')
                 
                 with ui.row().classes('w-full justify-between px-1 mb-1 md:mb-2'):
@@ -7828,7 +7827,8 @@ async def render_desktop_status_page():
                 if res and res.get('status') == 'online':
                     refs['card'].classes(remove='offline-card')
                     
-                    # ✨✨✨ 状态更新逻辑：在线变绿 ✨✨✨
+                    # ✨✨✨ 在线：切换为绿色实心闪电 (bolt) ✨✨✨
+                    refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
                     
                     refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
@@ -7847,7 +7847,8 @@ async def render_desktop_status_page():
                 
                 elif res and res.get('status') == 'warning':
                     refs['card'].classes(add='offline-card')
-                    # ✨✨✨ 状态更新逻辑：警告变红 ✨✨✨
+                    # ✨✨✨ 警告：切换为红色断开闪电 (flash_off) ✨✨✨
+                    refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     
                     cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
@@ -7855,7 +7856,8 @@ async def render_desktop_status_page():
                 
                 else:
                     refs['card'].classes(add='offline-card')
-                    # ✨✨✨ 状态更新逻辑：离线变红 ✨✨✨
+                    # ✨✨✨ 离线：切换为红色断开闪电 (flash_off) ✨✨✨
+                    refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     
                     refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
