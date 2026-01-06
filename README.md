@@ -142,10 +142,7 @@ IP 归属地识别：自动识别服务器 IP，智能添加国旗 Emoji（如 �
 ***🔗 订阅策略编辑器***
 <img width="1903" height="1906" alt="image" src="https://github.com/user-attachments/assets/091c851e-1440-40a3-b28e-b462baf732a8" />
 
-
-
-
-
+---
 
 # 🚀 快速安装 
 
@@ -179,6 +176,8 @@ X-UI 优先原则：如果填写了面板 URL 和账号密码，且未勾选“�
 仅勾选 [启用 Root 探针]：后台仅尝试 SSH 连接并安装 Agent，不尝试连接面板 API。
 
 同时勾选：执行全套初始化流程。
+
+---
 
 # 🛠️ 反向代理配置指南
 ⚠️ 注意： 如果您在安装时选择了 「域名访问」 模式，脚本会自动为您配置好 Caddy，无需进行以下操作。 仅当您选择「IP + 端口」模式，且希望手动配置 Nginx 或 Caddy 将域名指向面板时，才需要参考以下内容。
@@ -260,7 +259,7 @@ your-existing-site.com {
     }
 }
 ```
-
+---
 
 # 🛠️ 管理命令
 
@@ -280,7 +279,7 @@ cd /root/x-fusion-panel
 ```bash
 cd /root/x-fusion-panel && docker compose up -d --build
 ```
-
+---
 
 # 📂 数据目录说明
 
