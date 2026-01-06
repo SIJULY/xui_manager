@@ -7166,7 +7166,7 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V41：名称排序初始版) =================        
+# ================= 电脑探针页面 =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -7333,8 +7333,6 @@ async def render_desktop_status_page():
     def apply_filter(group_name):
         global CURRENT_PROBE_TAB
         CURRENT_PROBE_TAB = group_name
-        
-        # 遍历所有卡片 (RENDERED_CARDS 的遍历顺序取决于插入顺序，而插入顺序由 init 决定)
         for url, item in RENDERED_CARDS.items():
             card = item['card']
             server_data = item['data']
@@ -7344,22 +7342,18 @@ async def render_desktop_status_page():
     def sync_cards_pool():
         current_urls = set(s['url'] for s in SERVERS_CACHE)
         rendered_urls = set(RENDERED_CARDS.keys())
-        
         new_urls = current_urls - rendered_urls
         for url in new_urls:
             s = next((srv for srv in SERVERS_CACHE if srv['url'] == url), None)
             if s: create_server_card(s)
-            
         deleted_urls = rendered_urls - current_urls
         for url in deleted_urls:
             item = RENDERED_CARDS.pop(url)
             if item and item['card']: item['card'].delete()
-                
         for s in SERVERS_CACHE:
             if s['url'] in RENDERED_CARDS: RENDERED_CARDS[s['url']]['data'] = s
 
-    # --- 初始化 (✨✨✨ 关键修改：按名称排序创建卡片 ✨✨✨) ---
-    # 这会决定卡片在网格中的初始物理顺序
+    # --- 初始化：按名称排序 ---
     sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
     for s in sorted_init_list:
         create_server_card(s)
@@ -7437,7 +7431,10 @@ async def render_desktop_status_page():
                 
                 if res and res.get('status') == 'online':
                     refs['card'].classes(remove='offline-card')
-                    refs['badge'].set_text('在线'); refs['badge'].classes(replace='text-green-400', remove='text-gray-500 text-red-500 text-orange-400')
+                    # ✨ 拆分链式调用
+                    refs['badge'].set_text('在线')
+                    refs['badge'].classes(replace='text-green-400', remove='text-gray-500 text-red-500 text-orange-400')
+                    
                     refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
                     refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
                     refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
@@ -7451,18 +7448,33 @@ async def render_desktop_status_page():
                     pings = res.get('pings', {})
                     c1, t1 = get_ping_color_safe(pings.get('电信', 0)); c2, t2 = get_ping_color_safe(pings.get('联通', 0)); c3, t3 = get_ping_color_safe(pings.get('移动', 0))
                     refs['ping_ct'].set_content(f'电信: <span class="{c1}">{t1}</span>'); refs['ping_cu'].set_content(f'联通: <span class="{c2}">{t2}</span>'); refs['ping_cm'].set_content(f'移动: <span class="{c3}">{t3}</span>')
+                
                 elif res and res.get('status') == 'warning':
-                    refs['card'].classes(remove='offline-card'); refs['badge'].set_text('简易').classes(replace='text-orange-400', remove='text-green-400 text-red-500')
+                    # ✨ 重点修改：简易/Warning 状态改为统一的“离线”红色样式
+                    refs['card'].classes(add='offline-card') # 加红色边框
+                    
+                    refs['badge'].set_text('离线') # 显示为离线
+                    refs['badge'].classes(replace='text-red-500', remove='text-green-400 text-orange-400') # 红色字
+                    
                     cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
-                    refs['uptime'].set_text('Agent Missing'); refs['online_dot'].classes(replace='bg-orange-500', remove='bg-green-500 bg-red-500')
+                    refs['uptime'].set_text('Agent Missing'); refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500') # 红点
+                
                 else:
-                    refs['card'].classes(add='offline-card'); refs['badge'].set_text('离线').classes(replace='text-red-500', remove='text-green-400 text-orange-400')
-                    refs['cpu_bar'].style('width: 0%'); refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
+                    # 离线状态
+                    refs['card'].classes(add='offline-card')
+                    
+                    refs['badge'].set_text('离线')
+                    refs['badge'].classes(replace='text-red-500', remove='text-green-400 text-orange-400')
+                    
+                    refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
+                    
                     last_time_str = "Down"
                     if url in PROBE_DATA_CACHE:
                         cached_info = PROBE_DATA_CACHE[url]
                         if 'uptime' in cached_info: last_time_str = f"停于: {cached_info['uptime']}"
                     refs['uptime'].set_text(last_time_str)
+                    # 保留数据，不清空
+            
             if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
         except Exception as e:
             print(f"Loop Update Error: {e}") 
