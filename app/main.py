@@ -26,6 +26,8 @@ from collections import Counter
 
 IP_GEO_CACHE = {}
 
+import time
+GLOBAL_UI_VERSION = time.time()
 # ================= 定义全局进程池变量  =================
 PROCESS_POOL = None 
 
@@ -1090,16 +1092,33 @@ async def safe_save(filename, data):
         try: await run.io_bound(_save_file_sync_internal, filename, data)
         except Exception as e: logger.error(f"❌ 保存 {filename} 失败: {e}")
 
-# ✨✨✨ 保存服务器后，立即通知首页刷新
+# ================= 数据保存函数 (V2：集成 UI 版本控制) =================
+
+# 1. 保存服务器列表
 async def save_servers(): 
+    global GLOBAL_UI_VERSION # ✨ 关键：引入全局版本变量
+    
+    # 执行保存
     await safe_save(CONFIG_FILE, SERVERS_CACHE)
-    # 触发静默更新 (Add/Del Server)
+    
+    # ✨ 关键：更新版本号，通知前台 /status 页面进行结构重绘
+    GLOBAL_UI_VERSION = time.time() 
+    
+    # 触发后台仪表盘数据的静默刷新
     await refresh_dashboard_ui()
 
-async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
-async def save_admin_config(): await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
+# 2. 保存管理配置 (分组/设置)
+async def save_admin_config(): 
+    global GLOBAL_UI_VERSION # ✨ 关键：引入全局版本变量
+    
+    # 执行保存
+    await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
+    
+    # ✨ 关键：更新版本号，通知前台 /status 页面进行结构重绘 (例如分组变化)
+    GLOBAL_UI_VERSION = time.time()
 
-# ✨✨✨ 保存节点缓存后，也立即通知首页刷新
+async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
+
 async def save_nodes_cache():
     try:
         # 直接保存所有内存数据，不做任何过滤
@@ -3189,138 +3208,192 @@ def open_group_sort_dialog():
             ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-slate-900 text-white shadow-lg')
     
     d.open()
-# ================= 2. 探针专用分组弹窗 (新建/编辑视图) =================
-# is_edit_mode: 是否为编辑模式
-# group_name: 编辑时的原组名
-def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
-    # 使用 tags 来判断是否属于该组
-    selection_map = {s['url']: False for s in SERVERS_CACHE}
+import traceback # 引入用于打印报错堆栈
+
+# ================= 探针视图一体化管理器  =================
+def open_unified_group_manager(mode='manage'):
+    # 1. 数据准备与状态初始化
+    if 'probe_custom_groups' not in ADMIN_CONFIG: 
+        ADMIN_CONFIG['probe_custom_groups'] = []
     
-    if is_edit_mode and group_name:
-        for s in SERVERS_CACHE:
-            if group_name in s.get('tags', []):
-                selection_map[s['url']] = True
+    state = {
+        'current_group': None,
+        'checkboxes': {},
+        'server_map': {s['url']: s for s in SERVERS_CACHE}
+    }
 
-    with ui.dialog() as d, ui.card().classes('w-full max-w-lg h-[80vh] flex flex-col p-0'):
-        # 顶部
-        title = f'编辑探针视图: {group_name}' if is_edit_mode else '新建探针视图'
-        with ui.column().classes('w-full p-4 border-b bg-gray-50 gap-3 flex-shrink-0'):
-            with ui.row().classes('w-full justify-between items-center'):
-                ui.label(title).classes('text-lg font-bold')
-                with ui.row().classes('gap-2'):
-                    # 删除按钮
-                    if is_edit_mode:
-                        async def delete_group():
-                            # 1. 从配置中移除 (使用 probe_custom_groups)
-                            if group_name in ADMIN_CONFIG.get('probe_custom_groups', []):
-                                ADMIN_CONFIG['probe_custom_groups'].remove(group_name)
-                                await save_admin_config()
-                            
-                            # 2. 从所有服务器的 tags 中移除
-                            for s in SERVERS_CACHE:
-                                if 'tags' in s and group_name in s['tags']:
-                                    s['tags'].remove(group_name)
-                            
-                            await save_servers()
-                            safe_notify(f'视图 "{group_name}" 已删除', 'positive')
-                            d.close()
-                            if callback: await callback(None) # None 表示删除了
-                        
-                        ui.button(icon='delete', color='red', on_click=delete_group).props('flat round dense').tooltip('删除此视图')
+    # UI 引用
+    view_list_container = None
+    server_list_container = None
+    title_input = None
+    action_area = None
+
+    # ================= 界面构建 (单列垂直布局，拒绝嵌套BUG) =================
+    with ui.dialog() as d, ui.card().classes('w-full max-w-4xl h-[90vh] flex flex-col p-0 gap-0'):
+        
+        # --- 1. 顶部：视图切换区 ---
+        with ui.row().classes('w-full p-3 bg-slate-100 border-b items-center gap-2 overflow-x-auto flex-shrink-0'):
+            ui.label('视图列表:').classes('font-bold text-gray-500 mr-2 text-xs')
+            
+            # 新建按钮 (绿色)
+            ui.button('➕ 新建视图', on_click=lambda: load_group_data(None)).props('unelevated color=green text-color=white size=sm')
+            
+            ui.separator().props('vertical').classes('mx-2 h-6')
+
+            # 视图列表容器 (横向排列)
+            view_list_container = ui.row().classes('gap-2 items-center flex-nowrap')
+            
+            # 关闭按钮 (最右)
+            ui.space()
+            ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
+
+        # --- 2. 编辑区头部 (名称 + 全选操作) ---
+        with ui.row().classes('w-full p-4 bg-white border-b items-center gap-4 flex-shrink-0'):
+            title_input = ui.input('视图名称', placeholder='请输入分组名称...').props('outlined dense').classes('flex-grow font-bold')
+            
+            with ui.row().classes('gap-2'):
+                ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=sm color=blue')
+                ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=sm color=grey')
+
+        # --- 3. 服务器列表 (核心内容) ---
+        with ui.scroll_area().classes('w-full flex-grow p-4 bg-gray-50'):
+            server_list_container = ui.column().classes('w-full gap-2')
+
+        # --- 4. 底部保存区 ---
+        with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0') as action_area:
+            ui.button('删除此视图', icon='delete', color='red', on_click=lambda: delete_current_group()).props('flat')
+            ui.button('保存当前配置', icon='save', on_click=lambda: save_current_group()).classes('bg-slate-900 text-white shadow-lg')
+
+    # ================= 逻辑定义 =================
+
+    def render_views():
+        view_list_container.clear()
+        groups = ADMIN_CONFIG.get('probe_custom_groups', [])
+        
+        with view_list_container:
+            for g in groups:
+                is_active = (g == state['current_group'])
+                # 激活状态用蓝色实心，未激活用灰色描边
+                btn_props = 'unelevated color=blue' if is_active else 'outline color=grey text-color=grey-8'
+                ui.button(g, on_click=lambda _, name=g: load_group_data(name)).props(f'{btn_props} size=sm')
+
+    def render_servers():
+        server_list_container.clear()
+        state['checkboxes'] = {}
+        
+        if not SERVERS_CACHE:
+            with server_list_container:
+                ui.label('⚠️ 未找到服务器数据，请先添加服务器').classes('w-full text-center text-red-500 mt-10')
+            return
+
+        with server_list_container:
+            # 按名称排序
+            try: sorted_servers = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
+            except: sorted_servers = SERVERS_CACHE
+
+            # 使用 Grid 让排列更紧凑 (每行 3 个)
+            with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2'):
+                for s in sorted_servers:
+                    url = s.get('url')
+                    if not url: continue
                     
-                    ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
-            
-            name_input = ui.input('视图名称', value=group_name if is_edit_mode else '', placeholder='例如: 重点监控').props('outlined dense').classes('w-full bg-white')
-
-        # 中间列表
-        with ui.column().classes('w-full flex-grow overflow-hidden relative'):
-            with ui.row().classes('w-full p-2 bg-gray-100 justify-between items-center border-b flex-shrink-0'):
-                ui.label('包含的服务器:').classes('text-xs font-bold text-gray-500 ml-2')
-                with ui.row().classes('gap-1'):
-                    ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=xs color=primary')
-                    ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=xs color=grey')
-
-            scroll_area = ui.scroll_area().classes('w-full flex-grow p-2')
-            with scroll_area:
-                checkbox_refs = {}
-                with ui.column().classes('w-full gap-1'):
-                    sorted_srv = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
-                    for s in sorted_srv:
-                        is_checked = selection_map[s['url']]
-                        bg_cls = 'bg-blue-50 border-blue-200' if is_checked else 'hover:bg-gray-50 border-transparent'
+                    # 渲染卡片
+                    bg_cls = 'bg-white'
+                    with ui.row().classes(f'items-center p-2 border rounded cursor-pointer hover:border-blue-400 transition {bg_cls}') as row:
+                        chk = ui.checkbox(text=None).props('dense')
+                        state['checkboxes'][url] = chk
                         
-                        with ui.row().classes(f'w-full items-center p-2 rounded border transition cursor-pointer {bg_cls}') as row:
-                            chk = ui.checkbox(value=is_checked).props('dense')
-                            checkbox_refs[s['url']] = chk
-                            
-                            def on_row_click(c=chk, r=row):
-                                c.set_value(not c.value)
-                                if c.value: r.classes(add='bg-blue-50 border-blue-200', remove='hover:bg-gray-50 border-transparent')
-                                else: r.classes(remove='bg-blue-50 border-blue-200', add='hover:bg-gray-50 border-transparent')
+                        # 绑定点击
+                        row.on('click', lambda _, c=chk: c.set_value(not c.value))
+                        
+                        # 内容
+                        with ui.column().classes('gap-0 ml-2 overflow-hidden'):
+                            ui.label(s.get('name', 'Unknown')).classes('text-sm font-bold truncate text-gray-700')
+                            tags = s.get('tags', [])
+                            if tags:
+                                ui.label(f"Tags: {len(tags)}").classes('text-[10px] text-gray-400')
 
-                            chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
-                            ui.context.client.layout.on('click', on_row_click)
+    def load_group_data(group_name):
+        state['current_group'] = group_name
+        render_views() # 刷新顶部按钮状态
+        
+        title_input.value = group_name if group_name else ''
+        if not group_name: title_input.run_method('focus')
+        
+        # 按钮显隐
+        action_area.visible = True
+        
+        # 更新勾选
+        for url, chk in state['checkboxes'].items():
+            srv = state['server_map'].get(url)
+            if srv:
+                tags = srv.get('tags', [])
+                should_check = (group_name in tags) if group_name else False
+                chk.value = should_check
 
-                            ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
-                            
-                            # 显示现有标签提示
-                            if s.get('tags'):
-                                ui.label(f"Tags: {len(s['tags'])}").classes('text-[10px] text-gray-400')
+    def toggle_all(val):
+        for chk in state['checkboxes'].values(): chk.value = val
 
-            def toggle_all(state):
-                for chk in checkbox_refs.values(): chk.value = state
-                for k in selection_map: selection_map[k] = state
+    async def save_current_group():
+        old_name = state['current_group']
+        new_name = title_input.value.strip()
+        if not new_name: return safe_notify("名称不能为空", "warning")
 
-        # 底部
-        async def save():
-            new_name = name_input.value.strip()
-            if not new_name: return safe_notify('名称不能为空', 'warning')
+        groups = ADMIN_CONFIG.get('probe_custom_groups', [])
+        
+        if new_name != old_name:
+            if new_name in groups: return safe_notify("名称已存在", "negative")
+            if old_name: groups[groups.index(old_name)] = new_name
+            else: groups.append(new_name)
+        
+        count = 0
+        for url, chk in state['checkboxes'].items():
+            srv = state['server_map'].get(url)
+            if not srv: continue
+            if 'tags' not in srv or not isinstance(srv['tags'], list): srv['tags'] = []
             
-            # 使用 probe_custom_groups 避免污染侧边栏
-            if 'probe_custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['probe_custom_groups'] = []
-            
-            # 如果改名，检查重名
-            if new_name != group_name:
-                if new_name in ADMIN_CONFIG['probe_custom_groups']: return safe_notify('名称已存在', 'warning')
-                # 移除旧名
-                if is_edit_mode and group_name in ADMIN_CONFIG['probe_custom_groups']:
-                    ADMIN_CONFIG['probe_custom_groups'].remove(group_name)
-            
-            # 添加新名
-            if new_name not in ADMIN_CONFIG['probe_custom_groups']:
-                ADMIN_CONFIG['probe_custom_groups'].append(new_name)
-            
+            if chk.value:
+                if new_name not in srv['tags']: srv['tags'].append(new_name)
+                if old_name and old_name != new_name and old_name in srv['tags']: srv['tags'].remove(old_name)
+                count += 1
+            else:
+                if new_name in srv['tags']: srv['tags'].remove(new_name)
+                if old_name and old_name in srv['tags']: srv['tags'].remove(old_name)
+
+        ADMIN_CONFIG['probe_custom_groups'] = groups
+        await save_admin_config()
+        await save_servers()
+        
+        safe_notify(f"✅ 保存成功 ({count}台)", "positive")
+        
+        # 重新加载以保持选中状态
+        load_group_data(new_name)
+        render_probe_page()
+
+    async def delete_current_group():
+        target = state['current_group']
+        if not target: return
+        
+        if target in ADMIN_CONFIG.get('probe_custom_groups', []):
+            ADMIN_CONFIG['probe_custom_groups'].remove(target)
             await save_admin_config()
-            
-            # 更新 Tags
-            count = 0
-            for s in SERVERS_CACHE:
-                if 'tags' not in s: s['tags'] = []
-                
-                # 如果被选中 -> 确保有 tag
-                if selection_map.get(s['url'], False):
-                    if new_name not in s['tags']: s['tags'].append(new_name)
-                    # 如果是改名，移除旧 tag
-                    if is_edit_mode and group_name and group_name in s['tags'] and group_name != new_name:
-                        s['tags'].remove(group_name)
-                    count += 1
-                # 如果没选中 -> 确保没有 tag
-                else:
-                    if new_name in s['tags']: s['tags'].remove(new_name)
-                    # 如果是改名，也移除旧 tag
-                    if is_edit_mode and group_name and group_name in s['tags']:
-                        s['tags'].remove(group_name)
-            
-            await save_servers()
-            
-            safe_notify(f'✅ 视图 "{new_name}" 已保存 ({count}台)', 'positive')
-            d.close()
-            if callback: await callback(new_name)
+        
+        for s in SERVERS_CACHE:
+            if 'tags' in s and target in s['tags']: s['tags'].remove(target)
+        await save_servers()
+        
+        safe_notify("🗑️ 已删除", "positive")
+        load_group_data(None) # 回到新建模式
+        render_probe_page()
 
-        with ui.row().classes('w-full p-4 border-t bg-white justify-end gap-2 flex-shrink-0'):
-            ui.button('取消', on_click=d.close).props('flat color=grey')
-            ui.button('保存', on_click=save).classes('bg-blue-600 text-white shadow-md')
-
+    # --- 初始化 ---
+    # 延迟 0.1 秒渲染，确保弹窗框架先出来
+    def init():
+        render_views()
+        render_servers()
+        load_group_data(None) # 默认进入新建模式
+    
+    ui.timer(0.1, init, once=True)
     d.open()
 
 # ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
@@ -3529,7 +3602,7 @@ def open_server_detail_dialog(server_conf):
         
     d.open()
 
-# ================= 探针设置页 (V28：集成视图管理 + 完美布局) =================
+# ================= 探针设置页 (V31：最终版) =================
 async def render_probe_page():
     # 1. 标记当前视图状态
     global CURRENT_VIEW_STATE
@@ -3658,7 +3731,7 @@ async def render_probe_page():
                 # ======================= 右侧：快捷操作区 (占 1/3) =======================
                 with ui.column().classes('lg:col-span-1 w-full gap-6 h-full'):
                     
-                    # --- 卡片 A: 快捷操作 (已替换排序按钮) ---
+                    # --- 卡片 A: 快捷操作 (✨✨✨ 已按要求修改按钮 ✨✨✨) ---
                     with ui.card().classes('w-full p-6 bg-white border border-gray-200 shadow-sm rounded-xl flex-shrink-0'):
                         ui.label('快捷操作').classes('text-lg font-bold text-slate-700 mb-4 border-l-4 border-blue-500 pl-2')
                         
@@ -3683,13 +3756,13 @@ async def render_probe_page():
                             
                             # 2. 视图管理按钮组 (横向排列)
                             with ui.row().classes('w-full gap-2'):
-                                # 自定义分组排序 (新功能)
-                                ui.button('分组排序', icon='toc', on_click=open_group_sort_dialog) \
-                                    .classes('flex-1 bg-gray-50 text-gray-700 border border-gray-200 shadow-sm hover:bg-gray-100 font-bold align-left')
-                                
-                                # 新建视图 (新功能)
-                                ui.button('新建分组', icon='add_circle', on_click=lambda: open_quick_group_dialog(None)) \
-                                    .classes('flex-1 bg-green-50 text-green-700 border border-green-200 shadow-sm hover:bg-green-100 font-bold align-left')
+                                # ✨ 自定义分组管理 (蓝色，替换了原来的“新建”和“管理”)
+                                ui.button('自定义分组管理', icon='settings', on_click=lambda: open_unified_group_manager('manage')) \
+                                    .classes('flex-1 bg-blue-50 text-blue-700 border border-blue-200 shadow-sm hover:bg-blue-100 font-bold')
+
+                                # 排序视图 (灰色)
+                                ui.button('排序', icon='sort', on_click=open_group_sort_dialog) \
+                                    .classes('flex-1 bg-gray-50 text-gray-700 border border-gray-200 shadow-sm hover:bg-gray-100 font-bold')
                             
                             # 3. 更新所有探针
                             async def reinstall_all():
@@ -3699,7 +3772,7 @@ async def render_probe_page():
                             ui.button('更新所有探针', icon='system_update_alt', on_click=reinstall_all) \
                                 .classes('w-full bg-orange-50 text-orange-700 border border-orange-200 shadow-sm hover:bg-orange-100 font-bold align-left')
 
-                    # --- 卡片 B: 公开监控页入口 (自动拉伸填满高度) ---
+                    # --- 卡片 B: 公开监控页入口 ---
                     with ui.card().classes('w-full p-6 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-xl shadow-lg relative overflow-hidden group cursor-pointer flex-grow flex flex-col justify-center') \
                         .on('click', lambda: ui.navigate.to('/status', new_tab=True)):
                         
@@ -3712,7 +3785,7 @@ async def render_probe_page():
                             ui.label('立即前往')
                             ui.icon('arrow_forward')
 
-                    # --- 卡片 C: 数据统计 (固定高度) ---
+                    # --- 卡片 C: 数据统计 ---
                     online = len([s for s in SERVERS_CACHE if s.get('_status') == 'online'])
                     total = len(SERVERS_CACHE)
                     probe = len([s for s in SERVERS_CACHE if s.get('probe_installed')])
@@ -7093,87 +7166,80 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V30 交互增强版) =================        
+# ================= 电脑端大屏显示 (V41：名称排序初始版) =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
-    # 引入地图依赖
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
-    
-    # ✨✨✨ [Win国旗修复] 引入 Google Noto Color Emoji 字体 ✨✨✨
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
-    
     ui.add_head_html('''
         <style>
-            body { 
-                background-color: #0b1121; 
-                color: #e2e8f0; 
-                overflow: hidden; 
-                margin: 0;
-                /* ✨✨✨ [Win国旗修复] 强制 CSS 优先使用彩色 Emoji 字体 ✨✨✨ */
-                font-family: "Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Noto Sans SC", sans-serif;
-            }
-            .status-card { 
-                background: #1e293b; 
-                border: 1px solid rgba(255,255,255,0.05);
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-                transition: border-color 0.3s, box-shadow 0.3s;
-            }
+            body { background-color: #0b1121; color: #e2e8f0; overflow: hidden; margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Apple Color Emoji", "Noto Sans SC", sans-serif; }
+            .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); transition: border-color 0.3s, box-shadow 0.3s, transform 0.3s; }
             .status-card:hover { border-color: #3b82f6; transform: translateY(-2px); box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5); }
-            .offline-card {
-                border-color: rgba(239, 68, 68, 0.6) !important;
-                background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important;
-                box-shadow: 0 0 15px rgba(239, 68, 68, 0.15) !important;
-            }
+            .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; box-shadow: 0 0 15px rgba(239, 68, 68, 0.15) !important; }
             .scrollbar-hide::-webkit-scrollbar { display: none; }
             .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
             .prog-bar { transition: width 0.5s ease-out; }
         </style>
     ''')
 
-    # --- 准备地图数据 (保持 V30 逻辑) ---
-    server_points = []; active_regions = set(); seen_flags = set(); online_count = 0
-    CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
-    from collections import Counter; country_counter = Counter()
-    for s in SERVERS_CACHE:
-        if s.get('_status') == 'online': online_count += 1
-        c_name = get_echarts_region_name(s.get('name', ''))
-        if not c_name: c_name = s.get('_detected_region', '')
-        if c_name and c_name.upper() in MATCH_MAP: c_name = MATCH_MAP[c_name.upper()]
-        if c_name: active_regions.add(c_name)
-        lat, lon = None, None
-        for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
-            if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
-        if not lat:
-            if 'lat' in s: lat, lon = s['lat'], s['lon']
-            else: 
-                coords = get_coords_from_name(s.get('name', ''))
-                if coords: lat, lon = coords[0], coords[1]
-        if lat and lon:
-            flag = "📍"; 
-            try: flag = detect_country_group(s['name'], s).split(' ')[0]
-            except: pass
-            region_name = detect_country_group(s['name'], s); country_counter[region_name] += 1
-            if flag not in seen_flags: seen_flags.add(flag); server_points.append({'name': flag, 'value': [lon, lat]})
-    
-    chart_data = json.dumps({'points': server_points, 'regions': list(active_regions)}, ensure_ascii=False)
-    pie_data = []
-    sorted_counts = country_counter.most_common(5)
-    for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
-    others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
-    if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
+    RENDERED_CARDS = {} 
+    tab_container = None
+    grid_container = None
+    header_refs = {}
+    pie_chart_ref = None
+    local_ui_version = GLOBAL_UI_VERSION
 
-    # --- 辅助：获取标签栏分组 ---
     def get_probe_groups():
         groups_list = ['ALL']
         customs = ADMIN_CONFIG.get('probe_custom_groups', [])
         groups_list.extend(customs) 
         return groups_list
+    
+    def get_ping_color_safe(val):
+        if val <= 0: return 'text-red-500', '超时'
+        if val < 80: return 'text-green-400', f'{val}ms'
+        if val < 150: return 'text-yellow-400', f'{val}ms'
+        return 'text-red-400', f'{val}ms'
+    def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
+    def fmt_speed(b): return f"{int(b/1024)}K" if b < 1024**2 else f"{round(b/1024**2,1)}M"
 
-    header_refs = {}
+    def prepare_map_data():
+        server_points = []; active_regions = set(); seen_flags = set()
+        CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
+        from collections import Counter; country_counter = Counter()
+        snapshot = list(SERVERS_CACHE)
+        for s in snapshot:
+            c_name = get_echarts_region_name(s.get('name', ''))
+            if not c_name: c_name = s.get('_detected_region', '')
+            if c_name and c_name.upper() in MATCH_MAP: c_name = MATCH_MAP[c_name.upper()]
+            if c_name: active_regions.add(c_name)
+            lat, lon = None, None
+            for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
+                if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
+            if not lat:
+                if 'lat' in s: lat, lon = s['lat'], s['lon']
+                else: 
+                    coords = get_coords_from_name(s.get('name', ''))
+                    if coords: lat, lon = coords[0], coords[1]
+            if lat and lon:
+                flag = "📍"; 
+                try: flag = detect_country_group(s['name'], s).split(' ')[0]
+                except: pass
+                region_name = detect_country_group(s['name'], s); country_counter[region_name] += 1
+                if flag not in seen_flags: seen_flags.add(flag); server_points.append({'name': flag, 'value': [lon, lat]})
+        pie_data = []
+        sorted_counts = country_counter.most_common(5)
+        for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
+        others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
+        if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
+        return json.dumps({'points': server_points, 'regions': list(active_regions)}, ensure_ascii=False), pie_data, len(active_regions)
 
-    # --- 上半部分：地图 ---
-    with ui.column().classes('w-full h-[35vh] relative p-0 gap-0 bg-[#0B1121]'):
+    chart_data, pie_data, region_count = prepare_map_data()
+
+    # ================= UI =================
+    with ui.column().classes('w-full h-[38vh] relative p-0 gap-0 bg-[#0B1121] overflow-hidden'):
         with ui.column().classes('absolute top-6 left-8 z-50 gap-1'):
             with ui.row().classes('items-center gap-3'):
                 ui.icon('public', color='blue').classes('text-3xl drop-shadow-[0_0_10px_rgba(59,130,246,0.8)]')
@@ -7184,264 +7250,224 @@ async def render_desktop_status_page():
                     header_refs['online_count'] = ui.label('在线: --').classes('text-slate-300')
                 with ui.row().classes('items-center gap-1'):
                     ui.icon('language').classes('text-blue-400 text-xs')
-                    header_refs['region_count'] = ui.label(f'分布区域: {len(active_regions)}').classes('text-slate-300')
-
+                    header_refs['region_count'] = ui.label(f'分布区域: {region_count}').classes('text-slate-300')
         with ui.row().classes('absolute top-6 right-8 z-50'):
-            ui.button('后台管理', icon='login', on_click=lambda: ui.navigate.to('/login')) \
-                .props('flat dense color=grey-4').classes('font-bold text-xs hover:text-white transition-colors')
-
+            ui.button('后台管理', icon='login', on_click=lambda: ui.navigate.to('/login')).props('flat dense color=grey-4').classes('font-bold text-xs hover:text-white transition-colors')
         with ui.element('div').classes('absolute left-4 bottom-4 z-40'):
-            ui.echart({
-                'backgroundColor': 'transparent', 'tooltip': {'trigger': 'item'},
-                'legend': {'bottom': '0%', 'left': 'center', 'itemGap': 15, 'icon': 'circle', 'textStyle': {'color': '#94a3b8', 'fontSize': 11}},
-                'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': '#0B1121', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': '#fff', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]
-            }).classes('w-64 h-72')
-
-        # ✅ 修正点1：移除 scaleX，避免 CSS 缩放导致交互坐标错位
+            pie_chart_ref = ui.echart({'backgroundColor': 'transparent', 'tooltip': {'trigger': 'item'}, 'legend': {'bottom': '0%', 'left': 'center', 'itemGap': 15, 'icon': 'circle', 'textStyle': {'color': '#94a3b8', 'fontSize': 11}}, 'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': '#0B1121', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': '#fff', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]}).classes('w-64 h-72')
         ui.html('<div id="public-map-container" style="width:100%; height:100%;"></div>', sanitize=False).classes('w-full h-full')
 
-    # --- 下半部分：固定标签栏 + 监控网格 ---
-    with ui.column().classes('w-full h-[65vh] bg-[#0f172a] relative gap-0'):
-        
-        # 固定标签栏 (V30 纯净模式)
+    with ui.column().classes('w-full h-[62vh] bg-[#0f172a] relative gap-0'):
         with ui.row().classes('w-full px-6 py-2 bg-[#0f172a]/95 backdrop-blur z-40 border-b border-gray-800 items-center'):
-            with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide'):
-                groups = get_probe_groups()
-                if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
+            with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide') as tab_container:
+                pass 
 
-                with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-gray-500 bg-transparent') as tabs:
-                    ui.tab('ALL', label='全部').on('click', lambda: update_tab('ALL'))
-                    for g in groups:
-                        if g == 'ALL': continue
-                        ui.tab(g).on('click', lambda _, g=g: update_tab(g))
-                    
-                    tabs.set_value(CURRENT_PROBE_TAB)
-
-        # 网格滚动区
         with ui.scroll_area().classes('w-full flex-grow p-6'):
             grid_container = ui.grid().classes('w-full gap-5 pb-20').style('grid-template-columns: repeat(auto-fill, minmax(360px, 1fr))')
-            public_refs = {} 
 
-            def render_card_grid(target_group):
-                grid_container.clear()
-                public_refs.clear()
+    # ================= 逻辑 =================
+    def render_tabs():
+        tab_container.clear()
+        groups = get_probe_groups()
+        global CURRENT_PROBE_TAB 
+        if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
+        with tab_container:
+            with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-gray-500 bg-transparent') as tabs:
+                ui.tab('ALL', label='全部').on('click', lambda: apply_filter('ALL'))
+                for g in groups:
+                    if g == 'ALL': continue
+                    ui.tab(g).on('click', lambda _, g=g: apply_filter(g))
+                tabs.set_value(CURRENT_PROBE_TAB)
+
+    def create_server_card(s):
+        url = s['url']
+        refs = {}
+        with grid_container:
+            with ui.card().classes('status-card w-full p-5 rounded-xl flex flex-col gap-3 relative overflow-hidden group') as card:
+                refs['card'] = card
+                with ui.row().classes('w-full justify-between items-center mb-1'):
+                    with ui.row().classes('items-center gap-3 overflow-hidden'):
+                        flag = "🏳️"
+                        try: flag = detect_country_group(s['name'], s).split(' ')[0]
+                        except: pass
+                        ui.label(flag).classes('text-3xl') 
+                        ui.label(s['name']).classes('text-lg font-bold text-gray-100 truncate cursor-pointer hover:text-blue-400 transition').on('click', lambda _, s=s: open_pc_server_detail(s))
+                    refs['badge'] = ui.label('检测中').classes('text-xs font-mono font-bold tracking-wider text-gray-500')
+                with ui.row().classes('w-full justify-between px-1 mb-2'):
+                    with ui.row().classes('items-center gap-1'):
+                        ui.icon('grid_view').classes('text-blue-400 text-xs'); refs['summary_cores'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
+                    with ui.row().classes('items-center gap-1'):
+                        ui.icon('memory').classes('text-green-400 text-xs'); refs['summary_ram'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
+                    with ui.row().classes('items-center gap-1'):
+                        ui.icon('storage').classes('text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
+                with ui.column().classes('w-full gap-3'):
+                    def stat_row(label, color_cls):
+                        with ui.column().classes('w-full gap-1'):
+                            with ui.row().classes('w-full items-center justify-between'):
+                                ui.label(label).classes('text-xs text-gray-500 font-bold w-8')
+                                with ui.element('div').classes('flex-grow h-2.5 bg-gray-700/50 rounded-full overflow-hidden mx-2'):
+                                    bar = ui.element('div').classes(f'h-full {color_cls} prog-bar').style('width: 0%')
+                                pct = ui.label('0%').classes('text-xs font-mono font-bold text-white w-8 text-right')
+                            sub = ui.label('').classes('text-[10px] text-gray-500 font-mono text-right w-full pr-1')
+                        return bar, pct, sub
+                    refs['cpu_bar'], refs['cpu_pct'], refs['cpu_sub'] = stat_row('CPU', 'bg-blue-500')
+                    refs['mem_bar'], refs['mem_pct'], refs['mem_sub'] = stat_row('内存', 'bg-green-500')
+                    refs['disk_bar'], refs['disk_pct'], refs['disk_sub'] = stat_row('硬盘', 'bg-purple-500')
+                ui.separator().classes('bg-white/5 my-1')
+                with ui.grid().classes('w-full grid-cols-2 gap-y-1 gap-x-2 text-xs'):
+                    ui.label('网络').classes('text-gray-500'); 
+                    with ui.row().classes('justify-end gap-2 font-mono'): refs['net_up'] = ui.label('↑ 0B').classes('text-orange-400 font-bold'); refs['net_down'] = ui.label('↓ 0B').classes('text-green-400 font-bold')
+                    ui.label('流量').classes('text-gray-500');
+                    with ui.row().classes('justify-end gap-2 font-mono text-gray-400'): refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
+                    ui.label('负载').classes('text-gray-500'); refs['load'] = ui.label('--').classes('text-gray-300 font-mono text-right font-bold')
+                    ui.label('在线').classes('text-gray-500'); 
+                    with ui.row().classes('justify-end items-center gap-1'): refs['uptime'] = ui.label('--').classes('text-gray-400 font-mono text-right'); refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-500')
+                with ui.row().classes('w-full justify-between items-center mt-1 pt-2 border-t border-white/5 text-[10px]'):
+                    ui.label('延迟').classes('text-gray-500 font-bold')
+                    with ui.row().classes('gap-3 font-mono'):
+                        refs['ping_ct'] = ui.html('电信: <span class="text-gray-500">-</span>', sanitize=False)
+                        refs['ping_cu'] = ui.html('联通: <span class="text-gray-500">-</span>', sanitize=False)
+                        refs['ping_cm'] = ui.html('移动: <span class="text-gray-500">-</span>', sanitize=False)
+        RENDERED_CARDS[url] = {'card': card, 'refs': refs, 'data': s}
+
+    def apply_filter(group_name):
+        global CURRENT_PROBE_TAB
+        CURRENT_PROBE_TAB = group_name
+        
+        # 遍历所有卡片 (RENDERED_CARDS 的遍历顺序取决于插入顺序，而插入顺序由 init 决定)
+        for url, item in RENDERED_CARDS.items():
+            card = item['card']
+            server_data = item['data']
+            should_show = (group_name == 'ALL') or (group_name in server_data.get('tags', []))
+            if card.visible != should_show: card.set_visibility(should_show)
+
+    def sync_cards_pool():
+        current_urls = set(s['url'] for s in SERVERS_CACHE)
+        rendered_urls = set(RENDERED_CARDS.keys())
+        
+        new_urls = current_urls - rendered_urls
+        for url in new_urls:
+            s = next((srv for srv in SERVERS_CACHE if srv['url'] == url), None)
+            if s: create_server_card(s)
+            
+        deleted_urls = rendered_urls - current_urls
+        for url in deleted_urls:
+            item = RENDERED_CARDS.pop(url)
+            if item and item['card']: item['card'].delete()
                 
-                if target_group == 'ALL':
-                    filtered_servers = [s for s in SERVERS_CACHE] 
-                else:
-                    filtered_servers = [s for s in SERVERS_CACHE if target_group in s.get('tags', [])]
-                
-                filtered_servers.sort(key=lambda x: (0 if x.get('_status')=='online' else 1, x.get('name', '')))
+        for s in SERVERS_CACHE:
+            if s['url'] in RENDERED_CARDS: RENDERED_CARDS[s['url']]['data'] = s
 
-                with grid_container:
-                    if not filtered_servers:
-                        ui.label(f'视图 "{target_group}" 下暂无服务器').classes('col-span-full text-center text-gray-500 mt-10')
-                        return
+    # --- 初始化 (✨✨✨ 关键修改：按名称排序创建卡片 ✨✨✨) ---
+    # 这会决定卡片在网格中的初始物理顺序
+    sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
+    for s in sorted_init_list:
+        create_server_card(s)
+    
+    render_tabs()
+    apply_filter(CURRENT_PROBE_TAB)
 
-                    for s in filtered_servers:
-                        url = s['url']
-                        refs = {}
-                        with ui.card().classes('status-card w-full p-5 rounded-xl flex flex-col gap-3 relative overflow-hidden group') as card:
-                            refs['card'] = card
-                            with ui.row().classes('w-full justify-between items-center mb-1'):
-                                with ui.row().classes('items-center gap-3 overflow-hidden'):
-                                    flag = "🏳️"
-                                    try: flag = detect_country_group(s['name'], s).split(' ')[0]
-                                    except: pass
-                                    ui.label(flag).classes('text-3xl') 
-                                    ui.label(s['name']).classes('text-lg font-bold text-gray-100 truncate cursor-pointer hover:text-blue-400 transition').on('click', lambda _, s=s: open_pc_server_detail(s))
-                                refs['badge'] = ui.label('检测中').classes('text-xs font-mono font-bold tracking-wider text-gray-500')
-                            
-                            with ui.row().classes('w-full justify-between px-1 mb-2'):
-                                with ui.row().classes('items-center gap-1'):
-                                    ui.icon('grid_view').classes('text-blue-400 text-xs'); refs['summary_cores'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
-                                with ui.row().classes('items-center gap-1'):
-                                    ui.icon('memory').classes('text-green-400 text-xs'); refs['summary_ram'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
-                                with ui.row().classes('items-center gap-1'):
-                                    ui.icon('storage').classes('text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes('text-xs font-mono text-gray-400 font-bold')
-
-                            with ui.column().classes('w-full gap-3'):
-                                def stat_row(label, color_cls):
-                                    with ui.column().classes('w-full gap-1'):
-                                        with ui.row().classes('w-full items-center justify-between'):
-                                            ui.label(label).classes('text-xs text-gray-500 font-bold w-8')
-                                            with ui.element('div').classes('flex-grow h-2.5 bg-gray-700/50 rounded-full overflow-hidden mx-2'):
-                                                bar = ui.element('div').classes(f'h-full {color_cls} prog-bar').style('width: 0%')
-                                            pct = ui.label('0%').classes('text-xs font-mono font-bold text-white w-8 text-right')
-                                        sub = ui.label('').classes('text-[10px] text-gray-500 font-mono text-right w-full pr-1')
-                                    return bar, pct, sub
-                                refs['cpu_bar'], refs['cpu_pct'], refs['cpu_sub'] = stat_row('CPU', 'bg-blue-500')
-                                refs['mem_bar'], refs['mem_pct'], refs['mem_sub'] = stat_row('内存', 'bg-green-500')
-                                refs['disk_bar'], refs['disk_pct'], refs['disk_sub'] = stat_row('硬盘', 'bg-purple-500')
-                            
-                            ui.separator().classes('bg-white/5 my-1')
-
-                            with ui.grid().classes('w-full grid-cols-2 gap-y-1 gap-x-2 text-xs'):
-                                ui.label('网络').classes('text-gray-500'); 
-                                with ui.row().classes('justify-end gap-2 font-mono'): refs['net_up'] = ui.label('↑ 0B').classes('text-orange-400 font-bold'); refs['net_down'] = ui.label('↓ 0B').classes('text-green-400 font-bold')
-                                ui.label('流量').classes('text-gray-500');
-                                with ui.row().classes('justify-end gap-2 font-mono text-gray-400'): refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
-                                ui.label('负载').classes('text-gray-500'); refs['load'] = ui.label('--').classes('text-gray-300 font-mono text-right font-bold')
-                                ui.label('在线').classes('text-gray-500'); 
-                                with ui.row().classes('justify-end items-center gap-1'): refs['uptime'] = ui.label('--').classes('text-gray-400 font-mono text-right'); refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-500')
-
-                            with ui.row().classes('w-full justify-between items-center mt-1 pt-2 border-t border-white/5 text-[10px]'):
-                                ui.label('延迟').classes('text-gray-500 font-bold')
-                                with ui.row().classes('gap-3 font-mono'):
-                                    refs['ping_ct'] = ui.html('电信: <span class="text-gray-500">-</span>', sanitize=False)
-                                    refs['ping_cu'] = ui.html('联通: <span class="text-gray-500">-</span>', sanitize=False)
-                                    refs['ping_cm'] = ui.html('移动: <span class="text-gray-500">-</span>', sanitize=False)
-                        
-                        public_refs[url] = refs
-
-            def update_tab(new_val):
-                global CURRENT_PROBE_TAB
-                if CURRENT_PROBE_TAB != new_val:
-                    CURRENT_PROBE_TAB = new_val
-                    render_card_grid(new_val)
-
-            render_card_grid(CURRENT_PROBE_TAB)
-
-    # 地图 JS
-    # ✅ 修正点2：更新 JS 配置，启用 roam、设置 scaleLimit、aspectScale 以及 georoam 监听复位
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data};
+        window.updateMapData = function(newData) {{ mapData = newData; }}; 
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
             if (!chartDom || typeof echarts === 'undefined') {{ setTimeout(checkAndRender, 100); return; }}
             fetch('https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json').then(r => r.json()).then(w => {{
                 echarts.registerMap('world', w);
                 var myChart = echarts.init(chartDom);
+                window.publicMapChart = myChart; 
                 var centerPt = [116.4, 39.9]; 
-                if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => {{ centerPt = [p.coords.longitude, p.coords.latitude]; updateChart(myChart, mapData, centerPt); }}, e => {{ updateChart(myChart, mapData, centerPt); }}); }} else {{ updateChart(myChart, mapData, centerPt); }}
-                
-                // 监听缩放事件，实现自动回正
-                myChart.on('georoam', function() {{
-                    var opt = myChart.getOption();
-                    var currZoom = opt.geo[0].zoom;
-                    // 如果缩放比例接近或小于初始值 1.2，则重置中心点
-                    if (currZoom <= 1.21) {{
-                        myChart.setOption({{ geo: {{ center: [-10, 20], zoom: 1.2 }} }});
-                    }}
-                }});
+                function renderMap(center) {{
+                    var regions = mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
+                    var lines = mapData.points.map(pt => ({{ coords: [pt.value, center] }}));
+                    var option = {{
+                        backgroundColor: 'transparent',
+                        geo: {{ 
+                            map: 'world', roam: 'scale', zoom: 1.2, aspectScale: 0.85, scaleLimit: {{ min: 1.2, max: 10 }}, center: [-10, 20], 
+                            label: {{ show: false }}, itemStyle: {{ areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 }}, 
+                            emphasis: {{ itemStyle: {{ areaColor: '#2a333d' }} }}, regions: regions 
+                        }},
+                        series: [
+                            {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: true, position: 'top', formatter: '{{b}}', color: '#fff', fontSize: 16, offset: [0, -2] }}, data: mapData.points }},
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 4, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: center }}] }}
+                        ]
+                    }};
+                    myChart.setOption(option);
+                    myChart.on('georoam', function() {{
+                        var opt = myChart.getOption();
+                        var currZoom = opt.geo[0].zoom;
+                        if (currZoom <= 1.21) {{ myChart.setOption({{ geo: {{ center: [-10, 20], zoom: 1.2 }} }}); }}
+                    }});
+                }}
+                if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => renderMap([p.coords.longitude, p.coords.latitude]), e => renderMap(centerPt)); }} else {{ renderMap(centerPt); }}
+                window.addEventListener('resize', () => myChart.resize());
             }});
-        }}
-        function updateChart(chart, data, center) {{
-            var regions = data.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
-            var lines = data.points.map(pt => ({{ coords: [pt.value, center] }}));
-            var option = {{
-                backgroundColor: '#100C2A',
-                geo: {{ 
-                    map: 'world', 
-                    roam: true,          // ✨ 开启缩放和平移
-                    zoom: 1.2, 
-                    aspectScale: 0.85,   // ✨ 视觉上横向拉宽地图，替代 CSS scaleX
-                    scaleLimit: {{ min: 1.2, max: 10 }}, // ✨ 限制最小缩放比例为初始值
-                    center: [-10, 20], 
-                    label: {{ show: false }}, 
-                    itemStyle: {{ areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 }}, 
-                    emphasis: {{ itemStyle: {{ areaColor: '#2a333d' }} }}, 
-                    regions: regions 
-                }},
-                series: [
-                    {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
-                    {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: true, position: 'top', formatter: '{{b}}', color: '#fff', fontSize: 16, offset: [0, -2] }}, data: data.points }},
-                    {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 4, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: center }}] }}
-                ]
-            }};
-            chart.setOption(option);
-            window.addEventListener('resize', () => chart.resize());
         }}
         checkAndRender();
     }})();
     ''')
 
     async def loop_update():
+        nonlocal local_ui_version
         try:
-            current_urls = set(s['url'] for s in SERVERS_CACHE)
-            displayed_urls = list(public_refs.keys())
-            
-            # 检测新机器或删除机器 (V30 稳定版重绘逻辑)
-            # 为了防止手机端崩溃，这里增加了 length 检查，只有真正发生增减时才触发
-            target_count = len(current_urls) if CURRENT_PROBE_TAB == 'ALL' else len([s for s in SERVERS_CACHE if CURRENT_PROBE_TAB in s.get('tags', [])])
-            if len(public_refs) != target_count:
-                render_card_grid(CURRENT_PROBE_TAB)
-                return
+            if GLOBAL_UI_VERSION != local_ui_version:
+                print(f"🔄 [HotReload] 结构变化，执行差量更新...")
+                local_ui_version = GLOBAL_UI_VERSION
+                render_tabs()
+                sync_cards_pool()
+                apply_filter(CURRENT_PROBE_TAB)
+                new_map, new_pie, new_cnt = prepare_map_data()
+                if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
+                if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
+                ui.run_javascript(f'if(window.updateMapData){{window.updateMapData({new_map});}}')
 
             real_online_count = 0
-            for s in SERVERS_CACHE:
-                url = s['url']
-                refs = public_refs.get(url)
-                if not refs or refs['badge'].is_deleted: continue
-                res = await get_server_status(s)
+            for url in list(RENDERED_CARDS.keys()):
+                item = RENDERED_CARDS.get(url)
+                if not item: continue
+                refs = item['refs']
+                server_data = item['data'] 
+                res = await get_server_status(server_data)
                 
                 if res and res.get('status') == 'online': real_online_count += 1
+                if not item['card'].visible: continue
                 
-                def get_ping_color(val):
-                    if val == -1 or val == 0: return 'text-red-500', '超时'
-                    if val < 80: return 'text-green-400', f'{val}ms'
-                    if val < 150: return 'text-yellow-400', f'{val}ms'
-                    return 'text-red-400', f'{val}ms'
-
                 if res and res.get('status') == 'online':
                     refs['card'].classes(remove='offline-card')
                     refs['badge'].set_text('在线'); refs['badge'].classes(replace='text-green-400', remove='text-gray-500 text-red-500 text-orange-400')
                     refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
                     refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
                     refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
-                    cpu = float(res.get('cpu_usage', 0))
-                    refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
-                    refs['cpu_sub'].set_text(f"{res.get('cpu_cores', 1)} Cores")
-                    mem = float(res.get('mem_usage', 0)); mem_used = float(res.get('mem_total', 0)) * (mem/100)
-                    refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{int(mem)}%')
-                    refs['mem_sub'].set_text(f"{round(mem_used, 2)} GB")
-                    disk = float(res.get('disk_usage', 0)); disk_used = float(res.get('disk_total', 0)) * (disk/100)
-                    refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{int(disk)}%')
-                    refs['disk_sub'].set_text(f"{round(disk_used, 2)} GB")
-                    def fmt(b): 
-                        if b<1024: return f"{int(b)}B"
-                        if b<1024**2: return f"{int(b/1024)}K"
-                        return f"{int(b/1024**2)}M"
-                    refs['net_up'].set_text(f"↑ {fmt(res.get('net_speed_out', 0))}/s")
-                    refs['net_down'].set_text(f"↓ {fmt(res.get('net_speed_in', 0))}/s")
-                    def fmt_t(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
-                    refs['traf_up'].set_text(f"↑ {fmt_t(res.get('net_total_out', 0))}")
-                    refs['traf_down'].set_text(f"↓ {fmt_t(res.get('net_total_in', 0))}")
-                    refs['load'].set_text(str(res.get('load_1', 0)))
-                    refs['uptime'].set_text(str(res.get('uptime', '-')))
-                    refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500')
+                    cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
+                    mem = float(res.get('mem_usage', 0)); mem_total = float(res.get('mem_total', 0)); refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{int(mem)}%'); refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
+                    disk = float(res.get('disk_usage', 0)); disk_total = float(res.get('disk_total', 0)); refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{int(disk)}%'); refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
+                    refs['net_up'].set_text(f"↑ {fmt_speed(res.get('net_speed_out', 0))}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(res.get('net_speed_in', 0))}/s")
+                    refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}"); refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
+                    refs['load'].set_text(str(res.get('load_1', 0))); refs['uptime'].set_text(str(res.get('uptime', '-')))
+                    refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-orange-500')
                     pings = res.get('pings', {})
-                    c1, t1 = get_ping_color(pings.get('电信', 0))
-                    c2, t2 = get_ping_color(pings.get('联通', 0))
-                    c3, t3 = get_ping_color(pings.get('移动', 0))
-                    refs['ping_ct'].set_content(f'电信: <span class="{c1}">{t1}</span>')
-                    refs['ping_cu'].set_content(f'联通: <span class="{c2}">{t2}</span>')
-                    refs['ping_cm'].set_content(f'移动: <span class="{c3}">{t3}</span>')
+                    c1, t1 = get_ping_color_safe(pings.get('电信', 0)); c2, t2 = get_ping_color_safe(pings.get('联通', 0)); c3, t3 = get_ping_color_safe(pings.get('移动', 0))
+                    refs['ping_ct'].set_content(f'电信: <span class="{c1}">{t1}</span>'); refs['ping_cu'].set_content(f'联通: <span class="{c2}">{t2}</span>'); refs['ping_cm'].set_content(f'移动: <span class="{c3}">{t3}</span>')
                 elif res and res.get('status') == 'warning':
-                    refs['card'].classes(remove='offline-card')
-                    refs['badge'].set_text('简易'); refs['badge'].classes(replace='text-orange-400', remove='text-green-400 text-red-500')
-                    refs['cpu_bar'].style(f'width: {res.get("cpu_usage",0)}%')
-                    refs['online_dot'].classes(replace='bg-orange-500')
-                    refs['uptime'].set_text('Agent Missing')
+                    refs['card'].classes(remove='offline-card'); refs['badge'].set_text('简易').classes(replace='text-orange-400', remove='text-green-400 text-red-500')
+                    cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
+                    refs['uptime'].set_text('Agent Missing'); refs['online_dot'].classes(replace='bg-orange-500', remove='bg-green-500 bg-red-500')
                 else:
-                    refs['card'].classes(add='offline-card')
-                    refs['badge'].set_text('离线'); refs['badge'].classes(replace='text-red-500', remove='text-green-400 text-orange-400')
-                    refs['cpu_bar'].style('width: 0%')
-                    refs['online_dot'].classes(replace='bg-red-500')
+                    refs['card'].classes(add='offline-card'); refs['badge'].set_text('离线').classes(replace='text-red-500', remove='text-green-400 text-orange-400')
+                    refs['cpu_bar'].style('width: 0%'); refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
                     last_time_str = "Down"
                     if url in PROBE_DATA_CACHE:
                         cached_info = PROBE_DATA_CACHE[url]
                         if 'uptime' in cached_info: last_time_str = f"停于: {cached_info['uptime']}"
                     refs['uptime'].set_text(last_time_str)
-            
-            if header_refs.get('online_count'):
-                header_refs['online_count'].set_text(f'在线: {real_online_count}')
-
-        except Exception: pass
+            if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
+        except Exception as e:
+            print(f"Loop Update Error: {e}") 
         ui.timer(2.0, loop_update, once=True)
     ui.timer(0.1, loop_update, once=True)
-
 
 # ================= 手机端专用：实时动效 Dashboard 最终完整版 (V52) =================
 async def render_mobile_status_page():
