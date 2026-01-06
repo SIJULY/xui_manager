@@ -122,14 +122,13 @@ IP 归属地识别：自动识别服务器 IP，智能添加国旗 Emoji（如 �
 ---
 # 📸 界面预览
 
-***📊 全景仪表盘与地图***
-
-
-<img width="100%" alt="Dashboard" src="https://github.com/user-attachments/assets/7c8b2163-50aa-4b6a-b550-8dde09e57818" />
 
 ***🧱 探针页面***
 <img width="1933" height="1916" alt="image" src="https://github.com/user-attachments/assets/87eb196f-68aa-4ea0-a263-ad5d6842dedf" />
 
+***📊 全景仪表盘与地图***
+
+<img width="100%" alt="Dashboard" src="https://github.com/user-attachments/assets/7c8b2163-50aa-4b6a-b550-8dde09e57818" />
 
 ***🛠️ 批量添加 (支持双独立开关)***
 <img width="1923" height="1921" alt="image" src="https://github.com/user-attachments/assets/04965188-6aa3-4021-9d4e-106052b568bf" />
