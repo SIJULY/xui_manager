@@ -824,7 +824,7 @@ GLOBE_JS_LOGIC = r"""
     const nodeCountEl = document.getElementById('node-count');
     const regionCountEl = document.getElementById('region-count');
     
-
+    // ✨ 修复：显示真实总数 84，而不是地图上的点数 33
     if(nodeCountEl) nodeCountEl.textContent = realTotal;
     
     const uniqueRegions = new Set(serverData.map(s => s.name));
@@ -1675,9 +1675,9 @@ async def install_probe_on_server(server_conf):
     manager_url = ADMIN_CONFIG.get('manager_base_url', 'http://xui-manager:8080') 
     
     # 2. 获取自定义测速点 (如果没有设置，使用默认值)
-    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 电信
-    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通
-    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动
+    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 安徽电信
+    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通骨干
+    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动骨干
 
     # 3. 替换脚本中的变量
     real_script = PROBE_INSTALL_SCRIPT \
@@ -2520,7 +2520,7 @@ async def auto_register_node(request: Request):
         # 6. 保存到硬盘
         await save_servers()
         
-        # =================后台任务启动区 =================
+        # ================= ✨✨✨ 后台任务启动区 ✨✨✨ =================
         
         # 任务A: 启动 GeoIP 命名任务 (自动变国旗)
         asyncio.create_task(force_geoip_naming_task(target_server_ref))
@@ -2936,7 +2936,7 @@ class SubEditor:
         with self.cont: 
             ui.spinner('dots').classes('self-center mt-10')
 
-        # ✨✨✨ 先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
+        # ✨✨✨ 修复核心：先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
         current_servers_snapshot = list(SERVERS_CACHE)
         
         tasks = [fetch_inbounds_safe(s, force_refresh=False) for s in current_servers_snapshot]
@@ -3189,7 +3189,7 @@ def open_group_sort_dialog():
             ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-slate-900 text-white shadow-lg')
     
     d.open()
-# ================= 2. 探针专用分组弹窗  =================
+# ================= 2. 探针专用分组弹窗 (新建/编辑视图) =================
 # is_edit_mode: 是否为编辑模式
 # group_name: 编辑时的原组名
 def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
@@ -3323,7 +3323,7 @@ def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
 
     d.open()
 
-# ================= 详情弹窗逻辑 =================
+# ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
 def open_server_detail_dialog(server_conf):
     """
     打开服务器详情弹窗 (UI 升级版：大圆角 + 磨砂玻璃风格)
@@ -3529,7 +3529,7 @@ def open_server_detail_dialog(server_conf):
         
     d.open()
 
-# ================= 探针设置页  =================
+# ================= 探针设置页 (V28：集成视图管理 + 完美布局) =================
 async def render_probe_page():
     # 1. 标记当前视图状态
     global CURRENT_VIEW_STATE
@@ -3555,7 +3555,7 @@ async def render_probe_page():
                 ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
         return
 
-    # 4. 渲染布局 
+    # 4. 渲染布局 (限制最大宽度)
     with content_container:
         with ui.column().classes('w-full max-w-7xl gap-6'):
             
@@ -3823,7 +3823,7 @@ async def update_probe_stats(card_refs, is_manual=False):
 
 
     
-# ================= 订阅管理视图  =================
+# ================= 订阅管理视图 (极简模式：只显在线) =================
 async def load_subs_view():
     # ✨✨✨ [新增] 标记当前在订阅管理 ✨✨✨
     global CURRENT_VIEW_STATE
@@ -3896,7 +3896,7 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-# ================= 订阅策略编辑器  =================
+# ================= 订阅策略编辑器 (修复 Switch 报错) =================
 class SubscriptionProcessEditor:
     def __init__(self, sub_data):
         self.sub_data = sub_data
@@ -4058,6 +4058,7 @@ class SubscriptionProcessEditor:
 
     def _render_switch(self, label, key, icon):
         val = self.opt.get(key, False)
+        # ✨✨✨ 修复核心：正确捕获卡片对象并绑定点击事件 ✨✨✨
         card = ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer')
         with card:
             with ui.row().classes('items-center gap-3'):
@@ -4082,7 +4083,7 @@ class SubscriptionProcessEditor:
 def open_process_editor(sub_data):
     with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
 
-# ================= 通用服务器保存函数  =================
+# ================= 通用服务器保存函数 (集成极速修正 + 自动探针) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     """
     统一处理服务器的保存逻辑（新增或编辑）
@@ -4159,7 +4160,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 =================
+# ================= 小巧卡片式弹窗 (UI调整：IP双向同步 + 纯探针校验 + 列表刷新) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     data = SERVERS_CACHE[idx] if is_edit else {}
@@ -4273,7 +4274,7 @@ async def open_server_dialog(idx=None):
                 # 判断 X-UI 信息是否有效 (URL + 账号 + 密码)
                 has_xui_info = bool(final_url and final_user and final_pass)
 
-                # 核心逻辑判断
+                # 核心逻辑判断 (按照你的 3 点要求)
                 final_probe_enable = False
 
                 if has_xui_info:
@@ -4378,7 +4379,7 @@ def open_create_group_dialog():
              ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
     d.open()
     
-# ================= 数据备份/恢复  =================
+# ================= [极简导出版 - 完美居中] 数据备份/恢复 (批量增强版) =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         
@@ -4575,7 +4576,7 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}B"
 
-# ================= 智能排序逻辑 =================
+# ================= 智能排序逻辑=================
 import re
 
 CN_NUM_MAP = {'〇':0, '零':0, '一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9}
@@ -4820,7 +4821,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
                 if sub_text: ui.label(sub_text).classes('text-[10px] text-gray-400')
 
     
-# =================单个服务器视图 =========================
+# =================单个服务器视图 (完整修改版) =========================
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf)
     ui_refs = {}
@@ -5046,7 +5047,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# ================= ✨✨✨ 高性能渲染函数 ✨✨✨ =================
+# ================= ✨✨✨ 高性能渲染函数 (已移除编辑按钮) ✨✨✨ =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     # 如果强制刷新，后台触发一下数据更新，但不阻塞当前 UI 渲染
     if force_refresh:
@@ -5196,7 +5197,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             update_row()
 
 
-# ================= 核心：静默刷新 UI 数据  =================
+# ================= 核心：静默刷新 UI 数据 (清理版) =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -6345,7 +6346,7 @@ def login_page(request: Request):
     render_step1()
 
 
-# ================= 0. 认证检查辅助函数 =================
+# ================= 0. 认证检查辅助函数 (请确保添加了这个函数) =================
 def check_auth(request: Request):
     """
     检查用户是否已登录
@@ -6353,7 +6354,7 @@ def check_auth(request: Request):
     return app.storage.user.get('authenticated', False)
 
 
-# ================= [本地化版] 主页入口 =================
+# ================= [本地化版] 主页入口 (最终完整版) =================
 @ui.page('/')
 def main_page(request: Request):
     # ================= 1. 注入全局资源与样式 =================
@@ -6577,7 +6578,7 @@ async def job_sync_all_traffic():
         await refresh_dashboard_ui()
     logger.info("✅ [定时任务] 流量同步完成")
 
-# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
+# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 (修复版) =================
 async def job_check_geo_ip():
     logger.info("🌍 [定时任务] 开始全量 IP 归属地检测与名称修正...")
     data_changed = False
@@ -6678,7 +6679,7 @@ app.on_shutdown(lambda: PROCESS_POOL.shutdown(wait=False) if PROCESS_POOL else N
 # ✨✨✨飞线优化+定位+高亮地图✨✨✨
 # ==========================================
 
-# 1. 全局地图名称映射表 
+# 1. 全局地图名称映射表 (✨严格清洗版：移除 AR/US 等易误判短词✨)
 MATCH_MAP = {
     # --- 南美 ---
     '🇨🇱': 'Chile', 'CHILE': 'Chile',
@@ -6751,148 +6752,121 @@ def get_echarts_region_name(name_raw):
         if key in name: return MATCH_MAP[key]
     return None
     
-# ================= PC 端详情弹窗 =================
-def open_dark_server_detail(server_conf):
+# ================= [手机端] 详情弹窗 (V54 原始版) =================
+def open_mobile_server_detail(server_conf):
+    # 注入 CSS：确保 Tabs 点击区域正常且隐藏箭头
+    ui.add_head_html('''
+        <style>
+            .full-height-dialog { height: 85vh !important; max-height: 95vh !important; }
+            @media (orientation: landscape) { .full-height-dialog { height: 95vh !important; } }
+            .q-tabs__arrow { display: none !important; }
+            .q-tabs__content { overflow: hidden !important; flex-wrap: nowrap !important; }
+            .q-tab { cursor: pointer !important; min-height: 32px !important; }
+            .q-tab__content { padding: 0 8px !important; }
+            .detail-scroll-area, .detail-scroll-area .q-scrollarea__container, 
+            .detail-scroll-area .q-scrollarea__content { width: 100% !important; max-width: 100% !important; }
+            .q-dialog__inner--minimized > div { max-width: 95vw !important; }
+        </style>
+    ''')
+
     try:
-        # 定义 UI 样式常量
-        LABEL_STYLE = 'text-gray-400 text-sm font-medium'
-        VALUE_STYLE = 'text-gray-200 font-mono text-sm font-bold'
-        SECTION_TITLE = 'text-gray-200 text-base font-black mb-4 flex items-center gap-2'
-        CARD_BG = 'bg-[#161b22]' 
-        BORDER_STYLE = 'border border-[#30363d]'
+        LABEL_STYLE = 'text-gray-500 font-bold text-[9px] md:text-[10px] uppercase tracking-wider' 
+        VALUE_STYLE = 'text-gray-200 font-mono text-xs md:text-sm truncate font-bold'
+        BORDER_STYLE = 'border border-white/10'
+        CARD_BG = 'bg-[#1e293b]/50'
         
-        # ✨ 弹窗高度
-        with ui.dialog() as d, ui.card().classes('p-0 overflow-hidden flex flex-col bg-[#0d1117] shadow-2xl').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
+        with ui.dialog() as d, ui.card().classes(
+            'p-0 overflow-hidden flex flex-col bg-[#0f172a] border border-slate-700 shadow-2xl full-height-dialog'
+        ).style('width: 95vw; max-width: 900px; border-radius: 20px;'): 
+            d.props('backdrop-filter="blur(10px)"')
             
             # --- 1. 顶部标题栏 ---
-            with ui.row().classes('w-full items-center justify-between p-4 bg-[#161b22] border-b border-[#30363d] flex-shrink-0'):
-                with ui.row().classes('items-center gap-3'):
+            with ui.row().classes('w-full items-center justify-between p-3 md:p-6 bg-[#1e293b] border-b border-slate-700 flex-shrink-0 flex-nowrap'):
+                with ui.row().classes('items-center gap-3 overflow-hidden flex-nowrap'):
                     flag = "🏳️"
                     try: flag = detect_country_group(server_conf['name'], server_conf).split(' ')[0]
                     except: pass
-                    ui.label(flag).classes('text-2xl')
-                    ui.label(server_conf['name']).classes('text-lg font-bold text-white')
-                ui.button(icon='close', on_click=d.close).props('flat round dense color=grey-5')
+                    ui.label(flag).classes('text-xl md:text-3xl flex-shrink-0') 
+                    ui.label(server_conf['name']).classes('text-base md:text-lg font-black text-white truncate flex-grow')
+                ui.button(icon='close', on_click=d.close).props('flat round dense color=white')
 
-            # --- 2. 内容滚动区 (适当减少高度) ---
-            with ui.scroll_area().classes('w-full flex-grow p-6').style('height: 60vh;'):
-                refs = {}
-                
-                # 第一行：左右对齐容器 (items-stretch 确保高度一致)
-                with ui.row().classes('w-full gap-6 no-wrap items-stretch'):
+            # --- 2. 内容滚动区 ---
+            with ui.scroll_area().classes('w-full flex-grow detail-scroll-area'):
+                with ui.column().classes('p-4 md:p-8 gap-4 w-full'):
+                    refs = {} 
                     
-                    # A. 资源使用情况 (左侧)
-                    with ui.column().classes(f'flex-1 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
-                        ui.label('资源使用情况').classes(SECTION_TITLE)
-                        
-                        def progress_block(label, key, icon, color_class):
-                            with ui.column().classes('w-full gap-1'):
-                                with ui.row().classes('w-full justify-between items-end'):
-                                    with ui.row().classes('items-center gap-2'):
-                                        ui.icon(icon).classes('text-gray-500 text-xs')
-                                        ui.label(label).classes(LABEL_STYLE)
-                                    refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-400 text-xs font-mono')
-                                
-                                refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color=grey-9').classes('h-1.5 rounded-full')
-                                with ui.row().classes('w-full justify-end'):
-                                    # ✨ 显示已用数值：8.13 GB / 48.38 GB
-                                    refs[f'{key}_val'] = ui.label('0 GB / 0 GB').classes('text-[11px] text-gray-500 font-mono mt-1')
-
-                        progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
-                        progress_block('記憶体', 'mem', 'memory', 'green-5')
-                        progress_block('磁碟', 'disk', 'storage', 'purple-5')
-
-                    # B. 系统资讯 (右侧)
-                    with ui.column().classes(f'w-[400px] p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
-                        ui.label('系统资讯').classes(SECTION_TITLE)
-                        
-                        def info_line(label, icon, key):
-                            with ui.row().classes('w-full items-center justify-between py-3 border-b border-[#30363d] last:border-0'):
-                                with ui.row().classes('items-center gap-2'):
-                                    ui.icon(icon).classes('text-gray-500 text-sm')
+                    # A. 系统信息模块
+                    with ui.card().classes(f'w-full p-0 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
+                        ui.label('系统信息').classes('text-[10px] font-black text-blue-500 m-3 mb-1 tracking-widest')
+                        with ui.row().classes('w-full flex-wrap md:flex-nowrap items-stretch p-0'):
+                            def info_row(label, key, value_cls=VALUE_STYLE):
+                                with ui.row().classes('w-full items-center justify-between border-b border-white/5 pb-1.5 mb-1.5 last:border-0 last:mb-0'):
                                     ui.label(label).classes(LABEL_STYLE)
-                                refs[key] = ui.label('Loading...').classes(VALUE_STYLE)
+                                    refs[key] = ui.label('Loading...').classes(value_cls)
+                            with ui.column().classes('w-full md:w-1/2 p-3 md:p-6 border-b md:border-b-0 md:border-r border-white/10 gap-1'):
+                                info_row('CPU 型号', 'cpu_model'); info_row('操作系统', 'os')
+                                info_row('内存', 'mem_detail'); info_row('总流量', 'traffic_detail')
+                            with ui.column().classes('w-full md:w-1/2 p-3 md:p-6 gap-1'):
+                                info_row('架构/虚拟', 'arch_virt')
+                                info_row('硬盘', 'disk_detail')
+                                info_row('实时网速', 'speed_detail', value_cls='text-blue-400 font-mono text-xs font-bold text-right')
+                                info_row('系统负载', 'load')
 
-                        info_line('作业系统', 'laptop_windows', 'os')
-                        info_line('架构', 'developer_board', 'arch') # ✨ 显示 AMD / ARM
-                        info_line('虚拟化', 'cloud_queue', 'virt')
-                        info_line('在线时长', 'timer', 'uptime')
+                    # B. 三网延迟模块
+                    with ui.card().classes(f'w-full p-3 rounded-xl {CARD_BG} {BORDER_STYLE}'):
+                        ui.label('三网延迟 (ICMP)').classes('text-[10px] font-black text-purple-500 mb-2 tracking-widest')
+                        with ui.grid().classes('w-full grid-cols-3 gap-2'):
+                            def ping_box(name, color, key):
+                                with ui.column().classes(f'bg-[#0f172a]/60 border border-{color}-500/20 rounded-xl p-1.5 items-center'):
+                                    ui.label(name).classes(f'text-{color}-400 font-bold text-[8px] whitespace-nowrap')
+                                    refs[key] = ui.label('--').classes('text-white font-bold text-xs font-mono tracking-tighter')
+                            ping_box('电信', 'blue', 'ping_ct'); ping_box('联通', 'orange', 'ping_cu'); ping_box('移动', 'green', 'ping_cm')
 
-                # 第二行：三网实时延迟卡片
-                with ui.row().classes('w-full gap-4 mt-6'):
-                    def ping_card(name, color, key):
-                        with ui.column().classes(f'flex-1 p-4 rounded-xl {CARD_BG} {BORDER_STYLE} border-l-4 border-l-{color}-500'):
-                            with ui.row().classes('w-full justify-between items-center mb-1'):
-                                ui.label(name).classes(f'text-{color}-400 text-xs font-bold')
-                            with ui.row().classes('items-baseline gap-1'):
-                                refs[f'{key}_cur'] = ui.label('--').classes('text-2xl font-black text-white font-mono')
-                                ui.label('ms').classes('text-gray-500 text-[10px]')
-                    
-                    ping_card('安徽电信', 'blue', 'ping_ct')
-                    ping_card('安徽联通', 'orange', 'ping_cu')
-                    ping_card('安徽移动', 'green', 'ping_cm')
+                    # C. 网络趋势模块
+                    with ui.card().classes(f'w-full p-0 mb-2 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
+                        with ui.row().classes('w-full justify-between items-center p-3 border-b border-white/5'):
+                            ui.label('网络趋势').classes('text-[10px] font-black text-teal-500 tracking-widest')
+                            with ui.tabs().props('dense no-caps hide-arrows active-color=blue-400 indicator-color=transparent').classes('bg-white/5 rounded-lg p-0.5') as chart_tabs:
+                                t_real = ui.tab('real', label='实时').classes('text-[9px] min-h-0 h-7 px-3 rounded-md')
+                                t_1h = ui.tab('1h', label='1小时').classes('text-[9px] min-h-0 h-7 px-3 rounded-md')
+                                t_3h = ui.tab('3h', label='3小时').classes('text-[9px] min-h-0 h-7 px-3 rounded-md')
+                            chart_tabs.set_value('real')
 
-                # --- 网络质量趋势图 ---
-                with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
-                    with ui.row().classes('w-full justify-between items-center mb-4'):
-                        ui.label('网络质量趋势').classes('text-gray-200 text-sm font-bold')
-                        with ui.tabs().props('dense no-caps indicator-color=blue active-color=blue').classes('bg-[#0d1117] rounded-lg p-1') as chart_tabs:
-                            ui.tab('real', label='实时').classes('px-4 text-xs')
-                            ui.tab('1h', label='1小时').classes('px-4 text-xs')
-                            ui.tab('3h', label='3小时').classes('px-4 text-xs')
-                        chart_tabs.set_value('real')
-
-                    chart = ui.echart({
-                        'backgroundColor': 'transparent',
-                        'color': ['#3b82f6', '#f97316', '#22c55e'], 
-                        'legend': { 'data': ['电信', '联通', '移动'], 'textStyle': { 'color': '#94a3b8' }, 'top': 0 },
-                        'grid': { 'left': '1%', 'right': '1%', 'bottom': '5%', 'top': '15%', 'containLabel': True },
-                        'xAxis': { 'type': 'category', 'boundaryGap': False, 'axisLabel': { 'color': '#64748b' } },
-                        'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': '#30363d' } }, 'axisLabel': { 'color': '#64748b' } },
-                        'series': [{'name': n, 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'areaStyle': {'opacity': 0.05}} for n in ['电信','联通','移动']]
-                    }).classes('w-full h-64') # 适当减少图表高度
+                        chart = ui.echart({
+                            'backgroundColor': 'transparent',
+                            'color': ['#3b82f6', '#f97316', '#22c55e'], 
+                            'legend': { 'data': ['电信', '联通', '移动'], 'bottom': 0, 'textStyle': { 'color': '#94a3b8', 'fontSize': 9 } },
+                            'grid': { 'left': '2%', 'right': '4%', 'bottom': '18%', 'top': '10%', 'containLabel': True },
+                            'xAxis': { 'type': 'category', 'boundaryGap': False, 'data': [], 'axisLabel': { 'fontSize': 8, 'color': '#64748b' } },
+                            'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': 'rgba(255,255,255,0.05)' } }, 'axisLabel': { 'fontSize': 8, 'color': '#64748b' } },
+                            'series': [{'name': n, 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'areaStyle': {'opacity': 0.05}} for n in ['电信','联通','移动']]
+                        }).classes('w-full h-64 md:h-72')
 
                 async def update_dark_detail():
                     if not d.value: return
                     try:
                         status = await get_server_status(server_conf)
+                        if not status: return
                         raw_cache = PROBE_DATA_CACHE.get(server_conf['url'], {})
                         static = raw_cache.get('static', {})
-
-                        # 资源更新
-                        refs['cpu_pct'].set_text(f"{status.get('cpu_usage', 0)}%")
-                        refs['cpu_bar'].set_value(status.get('cpu_usage', 0) / 100)
-                        refs['cpu_val'].set_text(f"{status.get('cpu_cores', 1)} Cores")
-
-                        mem_p, mem_t = status.get('mem_usage', 0), status.get('mem_total', 0)
-                        refs['mem_pct'].set_text(f"{mem_p}%")
-                        refs['mem_bar'].set_value(mem_p / 100)
-                        refs['mem_val'].set_text(f"{round(mem_t * (mem_p / 100), 2)} GB / {mem_t} GB")
-
-                        disk_p, disk_t = status.get('disk_usage', 0), status.get('disk_total', 0)
-                        refs['disk_pct'].set_text(f"{disk_p}%")
-                        refs['disk_bar'].set_value(disk_p / 100)
-                        refs['disk_val'].set_text(f"{round(disk_t * (disk_p / 100), 2)} GB / {disk_t} GB")
-
-                        # 系统资讯 (AMD/ARM 架构逻辑)
-                        raw_arch = static.get('arch', '').lower()
-                        display_arch = "AMD" if "x86" in raw_arch or "amd" in raw_arch else "ARM" if "arm" in raw_arch or "aarch" in raw_arch else raw_arch.upper()
-                        refs['os'].set_text(static.get('os', 'Linux'))
-                        refs['arch'].set_text(display_arch)
-                        refs['virt'].set_text(static.get('virt', 'kvm'))
                         
-                        # 在线时长 (绿色)
-                        uptime_str = str(status.get('uptime', '-')).replace('up ', '').replace('days', '天').replace('hours', '时').replace('minutes', '分')
-                        refs['uptime'].set_text(uptime_str)
-                        refs['uptime'].classes('text-green-500')
-
-                        # 延迟卡片
+                        refs['cpu_model'].set_text(status.get('cpu_model', static.get('cpu_model', 'Generic CPU')))
+                        refs['os'].set_text(static.get('os', 'Linux'))
+                        refs['mem_detail'].set_text(f"{int(status.get('mem_usage', 0))}% / {status.get('mem_total', 0)}G")
+                        refs['arch_virt'].set_text(f"{static.get('arch', 'x64')} / {static.get('virt', 'kvm')}")
+                        refs['disk_detail'].set_text(f"{int(status.get('disk_usage', 0))}% / {status.get('disk_total', 0)}G")
+                        
+                        def fmt_b(b): return format_bytes(b)
+                        refs['traffic_detail'].set_text(f"↑{fmt_b(status.get('net_total_out', 0))} ↓{fmt_b(status.get('net_total_in', 0))}")
+                        refs['speed_detail'].set_text(f"↑{fmt_b(status.get('net_speed_out', 0))}/s ↓{fmt_b(status.get('net_speed_in', 0))}/s")
+                        refs['load'].set_text(str(status.get('load_1', 0)))
+                        
                         pings = status.get('pings', {})
-                        refs['ping_ct_cur'].set_text(str(pings.get('电信', 'N/A')))
-                        refs['ping_cu_cur'].set_text(str(pings.get('联通', 'N/A')))
-                        refs['ping_cm_cur'].set_text(str(pings.get('移动', 'N/A')))
+                        def fmt_p(v): return str(v) if v > 0 else "N/A"
+                        refs['ping_ct'].set_text(fmt_p(pings.get('电信', -1)))
+                        refs['ping_cu'].set_text(fmt_p(pings.get('联通', -1)))
+                        refs['ping_cm'].set_text(fmt_p(pings.get('移动', -1)))
 
-                        # 趋势图历史数据同步
                         history_data = PING_TREND_CACHE.get(server_conf['url'], [])
                         if history_data:
                             import time
@@ -6908,10 +6882,152 @@ def open_dark_server_detail(server_conf):
                                 chart.update()
                     except: pass
 
-                # 绑定切换事件
                 chart_tabs.on_value_change(update_dark_detail)
 
-            # 3. 底部版权
+            # 3. 底部状态栏
+            with ui.row().classes('w-full justify-center p-2 bg-[#0f172a] border-t border-white/5 flex-shrink-0'):
+                ui.label(f"已运行: {PROBE_DATA_CACHE.get(server_conf['url'], {}).get('uptime', '-') or '-'}").classes('text-[10px] text-gray-500 font-mono')
+
+        d.open()
+        asyncio.create_task(update_dark_detail())
+        timer = ui.timer(2.0, update_dark_detail)
+        d.on('hide', lambda: timer.cancel())
+
+    except Exception as e:
+        print(f"Mobile Detail error: {e}")
+
+# ================= [电脑端] 详情弹窗 (V57 专用版) =================
+def open_pc_server_detail(server_conf):
+    try:
+        LABEL_STYLE = 'text-gray-400 text-sm font-medium'
+        VALUE_STYLE = 'text-gray-200 font-mono text-sm font-bold'
+        SECTION_TITLE = 'text-gray-200 text-base font-black mb-4 flex items-center gap-2'
+        CARD_BG = 'bg-[#161b22]' 
+        BORDER_STYLE = 'border border-[#30363d]'
+        
+        # 电脑端固定布局：宽 1000px，高 65vh，左右分栏
+        with ui.dialog() as d, ui.card().classes('p-0 overflow-hidden flex flex-col bg-[#0d1117] shadow-2xl').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
+            
+            # --- 标题栏 ---
+            with ui.row().classes('w-full items-center justify-between p-4 bg-[#161b22] border-b border-[#30363d] flex-shrink-0'):
+                with ui.row().classes('items-center gap-3'):
+                    flag = "🏳️"
+                    try: flag = detect_country_group(server_conf['name'], server_conf).split(' ')[0]
+                    except: pass
+                    ui.label(flag).classes('text-2xl')
+                    ui.label(server_conf['name']).classes('text-lg font-bold text-white')
+                ui.button(icon='close', on_click=d.close).props('flat round dense color=grey-5')
+
+            # --- 内容区 ---
+            with ui.scroll_area().classes('w-full flex-grow p-6').style('height: 65vh;'):
+                refs = {}
+                
+                # 第一行：左右分栏，高度对齐
+                with ui.row().classes('w-full gap-6 no-wrap items-stretch'):
+                    
+                    # 左侧：资源
+                    with ui.column().classes(f'flex-1 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
+                        ui.label('资源使用情况').classes(SECTION_TITLE)
+                        def progress_block(label, key, icon, color_class):
+                            with ui.column().classes('w-full gap-1'):
+                                with ui.row().classes('w-full justify-between items-end'):
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.icon(icon).classes('text-gray-500 text-xs'); ui.label(label).classes(LABEL_STYLE)
+                                    refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-400 text-xs font-mono')
+                                refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color=grey-9').classes('h-1.5 rounded-full')
+                                with ui.row().classes('w-full justify-end'):
+                                    refs[f'{key}_val'] = ui.label('0 GB / 0 GB').classes('text-[11px] text-gray-500 font-mono mt-1')
+                        progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
+                        progress_block('記憶体', 'mem', 'memory', 'green-5')
+                        progress_block('磁碟', 'disk', 'storage', 'purple-5')
+
+                    # 右侧：系统
+                    with ui.column().classes(f'w-[400px] p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
+                        ui.label('系统资讯').classes(SECTION_TITLE)
+                        def info_line(label, icon, key):
+                            with ui.row().classes('w-full items-center justify-between py-3 border-b border-[#30363d] last:border-0'):
+                                with ui.row().classes('items-center gap-2'):
+                                    ui.icon(icon).classes('text-gray-500 text-sm'); ui.label(label).classes(LABEL_STYLE)
+                                refs[key] = ui.label('Loading...').classes(VALUE_STYLE)
+                        info_line('作业系统', 'laptop_windows', 'os')
+                        info_line('架构', 'developer_board', 'arch')
+                        info_line('虚拟化', 'cloud_queue', 'virt')
+                        info_line('在线时长', 'timer', 'uptime')
+
+                # 第二行：延迟卡片
+                with ui.row().classes('w-full gap-4 mt-6'):
+                    def ping_card(name, color, key):
+                        with ui.column().classes(f'flex-1 p-4 rounded-xl {CARD_BG} {BORDER_STYLE} border-l-4 border-l-{color}-500'):
+                            with ui.row().classes('w-full justify-between items-center mb-1'):
+                                ui.label(name).classes(f'text-{color}-400 text-xs font-bold')
+                            with ui.row().classes('items-baseline gap-1'):
+                                refs[f'{key}_cur'] = ui.label('--').classes('text-2xl font-black text-white font-mono')
+                                ui.label('ms').classes('text-gray-500 text-[10px]')
+                    ping_card('安徽电信', 'blue', 'ping_ct'); ping_card('安徽联通', 'orange', 'ping_cu'); ping_card('安徽移动', 'green', 'ping_cm')
+
+                # 第三行：趋势图
+                with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
+                    with ui.row().classes('w-full justify-between items-center mb-4'):
+                        ui.label('网络质量趋势').classes('text-gray-200 text-sm font-bold')
+                        with ui.tabs().props('dense no-caps indicator-color=blue active-color=blue').classes('bg-[#0d1117] rounded-lg p-1') as chart_tabs:
+                            ui.tab('real', label='实时').classes('px-4 text-xs'); ui.tab('1h', label='1小时').classes('px-4 text-xs'); ui.tab('3h', label='3小时').classes('px-4 text-xs')
+                        chart_tabs.set_value('real')
+
+                    chart = ui.echart({
+                        'backgroundColor': 'transparent', 'color': ['#3b82f6', '#f97316', '#22c55e'], 
+                        'legend': { 'data': ['电信', '联通', '移动'], 'textStyle': { 'color': '#94a3b8' }, 'top': 0 },
+                        'grid': { 'left': '1%', 'right': '1%', 'bottom': '5%', 'top': '15%', 'containLabel': True },
+                        'xAxis': { 'type': 'category', 'boundaryGap': False, 'axisLabel': { 'color': '#64748b' } },
+                        'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': '#30363d' } }, 'axisLabel': { 'color': '#64748b' } },
+                        'series': [{'name': n, 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'areaStyle': {'opacity': 0.05}} for n in ['电信','联通','移动']]
+                    }).classes('w-full h-64')
+
+                async def update_dark_detail():
+                    if not d.value: return
+                    try:
+                        status = await get_server_status(server_conf)
+                        raw_cache = PROBE_DATA_CACHE.get(server_conf['url'], {})
+                        static = raw_cache.get('static', {})
+
+                        refs['cpu_pct'].set_text(f"{status.get('cpu_usage', 0)}%"); refs['cpu_bar'].set_value(status.get('cpu_usage', 0) / 100)
+                        
+                        mem_p, mem_t = status.get('mem_usage', 0), status.get('mem_total', 0)
+                        refs['mem_pct'].set_text(f"{mem_p}%"); refs['mem_bar'].set_value(mem_p / 100)
+                        refs['mem_val'].set_text(f"{round(mem_t * (mem_p / 100), 2)} GB / {mem_t} GB")
+
+                        disk_p, disk_t = status.get('disk_usage', 0), status.get('disk_total', 0)
+                        refs['disk_pct'].set_text(f"{disk_p}%"); refs['disk_bar'].set_value(disk_p / 100)
+                        refs['disk_val'].set_text(f"{round(disk_t * (disk_p / 100), 2)} GB / {disk_t} GB")
+
+                        raw_arch = static.get('arch', '').lower()
+                        display_arch = "AMD" if "x86" in raw_arch or "amd" in raw_arch else "ARM" if "arm" in raw_arch or "aarch" in raw_arch else raw_arch.upper()
+                        refs['os'].set_text(static.get('os', 'Linux')); refs['arch'].set_text(display_arch); refs['virt'].set_text(static.get('virt', 'kvm'))
+                        
+                        uptime_str = str(status.get('uptime', '-')).replace('up ', '').replace('days', '天').replace('hours', '时').replace('minutes', '分')
+                        refs['uptime'].set_text(uptime_str); refs['uptime'].classes('text-green-500')
+
+                        pings = status.get('pings', {})
+                        refs['ping_ct_cur'].set_text(str(pings.get('电信', 'N/A')))
+                        refs['ping_cu_cur'].set_text(str(pings.get('联通', 'N/A')))
+                        refs['ping_cm_cur'].set_text(str(pings.get('移动', 'N/A')))
+
+                        history_data = PING_TREND_CACHE.get(server_conf['url'], [])
+                        if history_data:
+                            import time
+                            current_mode = chart_tabs.value
+                            duration = 600 if current_mode == 'real' else 3600 if current_mode == '1h' else 10800
+                            cutoff = time.time() - duration
+                            sliced = [p for p in history_data if p['ts'] > cutoff]
+                            if sliced:
+                                chart.options['xAxis']['data'] = [p['time_str'] for p in sliced]
+                                chart.options['series'][0]['data'] = [p['ct'] for p in sliced]
+                                chart.options['series'][1]['data'] = [p['cu'] for p in sliced]
+                                chart.options['series'][2]['data'] = [p['cm'] for p in sliced]
+                                chart.update()
+                    except: pass
+
+                chart_tabs.on_value_change(update_dark_detail)
+
             with ui.row().classes('w-full justify-center p-2 bg-[#161b22] border-t border-[#30363d]'):
                 ui.label('Powered by X-Fusion Monitor').classes('text-[10px] text-gray-600 font-mono italic')
 
@@ -6921,6 +7037,31 @@ def open_dark_server_detail(server_conf):
         d.on('hide', lambda: timer.cancel())
     except Exception as e:
         print(f"PC Detail Error: {e}")
+
+# ================= 自动判断路由函数 =================
+def open_dark_server_detail(server_conf):
+    # 简单的 JS 判断：如果屏幕宽度 > 768px (iPad竖屏宽度)，认为是电脑，否则是手机
+    ui.run_javascript(f'''
+        if (window.innerWidth > 768) {{
+            window.location.href = "javascript:void(0)"; // 占位
+        }}
+    ''')
+    
+    # 由于 NiceGUI 服务端渲染的特性，要在 Python 里即时知道客户端宽度比较困难。
+    # 为了最稳妥，建议直接在调用处区分（例如 render_mobile_status_page 调用 mobile 版，render_desktop 调用 PC 版）。
+    # 或者，我们利用一个折中方案：默认调用 PC 版，但在手机页面入口调用 Mobile 版。
+    
+    # 但为了方便您直接替换，这里做一个简单的假设：
+    # 如果当前处于 Mobile 渲染函数中（render_mobile_status_page），直接调 mobile 版。
+    # 否则默认调 PC 版。
+    
+    # ⚠️ 既然您有两个完全不同的渲染函数 (render_mobile_status_page 和 render_desktop_status_page)
+    # 请手动去 render_mobile_status_page 里把调用改成 open_mobile_server_detail(s)
+    # 去 render_desktop_status_page 里把调用改成 open_pc_server_detail(s)
+    
+    # 既然函数名没变，我就默认打开 PC 版 (因为您刚才是在 PC 调试)，
+    # **请务必去您的 render_mobile_status_page 函数里，把调用的函数名改为 open_mobile_server_detail**
+    open_pc_server_detail(server_conf)
         
 # ================= 全局变量 =================
 # 用于记录当前探针页面选中的标签，防止刷新重置
@@ -6952,7 +7093,7 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 =================        
+# ================= 电脑端大屏显示 (V30 交互增强版) =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -6990,7 +7131,7 @@ async def render_desktop_status_page():
         </style>
     ''')
 
-    # --- 准备地图数据 ---
+    # --- 准备地图数据 (保持 V30 逻辑) ---
     server_points = []; active_regions = set(); seen_flags = set(); online_count = 0
     CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
     from collections import Counter; country_counter = Counter()
@@ -7062,7 +7203,7 @@ async def render_desktop_status_page():
     # --- 下半部分：固定标签栏 + 监控网格 ---
     with ui.column().classes('w-full h-[65vh] bg-[#0f172a] relative gap-0'):
         
-        # 固定标签栏 
+        # 固定标签栏 (V30 纯净模式)
         with ui.row().classes('w-full px-6 py-2 bg-[#0f172a]/95 backdrop-blur z-40 border-b border-gray-800 items-center'):
             with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide'):
                 groups = get_probe_groups()
@@ -7108,7 +7249,7 @@ async def render_desktop_status_page():
                                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
                                     except: pass
                                     ui.label(flag).classes('text-3xl') 
-                                    ui.label(s['name']).classes('text-lg font-bold text-gray-100 truncate cursor-pointer hover:text-blue-400 transition').on('click', lambda _, s=s: open_dark_server_detail(s))
+                                    ui.label(s['name']).classes('text-lg font-bold text-gray-100 truncate cursor-pointer hover:text-blue-400 transition').on('click', lambda _, s=s: open_pc_server_detail(s))
                                 refs['badge'] = ui.label('检测中').classes('text-xs font-mono font-bold tracking-wider text-gray-500')
                             
                             with ui.row().classes('w-full justify-between px-1 mb-2'):
@@ -7162,6 +7303,7 @@ async def render_desktop_status_page():
             render_card_grid(CURRENT_PROBE_TAB)
 
     # 地图 JS
+    # ✅ 修正点2：更新 JS 配置，启用 roam、设置 scaleLimit、aspectScale 以及 georoam 监听复位
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data};
@@ -7220,6 +7362,7 @@ async def render_desktop_status_page():
             current_urls = set(s['url'] for s in SERVERS_CACHE)
             displayed_urls = list(public_refs.keys())
             
+            # 检测新机器或删除机器 (V30 稳定版重绘逻辑)
             # 为了防止手机端崩溃，这里增加了 length 检查，只有真正发生增减时才触发
             target_count = len(current_urls) if CURRENT_PROBE_TAB == 'ALL' else len([s for s in SERVERS_CACHE if CURRENT_PROBE_TAB in s.get('tags', [])])
             if len(public_refs) != target_count:
@@ -7300,7 +7443,7 @@ async def render_desktop_status_page():
     ui.timer(0.1, loop_update, once=True)
 
 
-# ================= 手机端专用：实时动效 Dashboard ==========================
+# ================= 手机端专用：实时动效 Dashboard 最终完整版 (V52) =================
 async def render_mobile_status_page():
     global CURRENT_PROBE_TAB
     # 用于存储 UI 组件引用的字典，实现局部刷新
@@ -7369,7 +7512,7 @@ async def render_mobile_status_page():
                 is_online = s.get('_status') == 'online'
                 srv_ref = {}
                 
-                with ui.column().classes('mobile-card').on('click', lambda _, srv=s: open_dark_server_detail(srv)):
+                with ui.column().classes('mobile-card').on('click', lambda _, srv=s: open_mobile_server_detail(srv)):
                     # 标题与描述
                     with ui.row().classes('items-center gap-3 mb-3'):
                         flag = "🏳️"
@@ -7423,9 +7566,10 @@ async def render_mobile_status_page():
 
                     # 底部状态
                     with ui.row().classes('w-full justify-between mt-3 pt-2 border-t border-[#333] items-center'):
+                        # 修改点：左侧显示绿色加粗的在线时长
                         srv_ref['uptime'] = ui.label("在线时长：--").classes('text-[10px] font-bold text-green-500 font-mono')
                         with ui.row().classes('items-center gap-2'):
-                            # 闪电图标引用 srv_ref['load']，动态展示 load_1 数据
+                            # 修改点：闪电图标引用 srv_ref['load']，动态展示 load_1 数据
                             srv_ref['load'] = ui.label(f"⚡ {status.get('load_1', '0.0')}").classes('text-[10px] text-gray-400 font-bold')
                             ui.label('ACTIVE' if is_online else 'DOWN').classes(f'text-[10px] font-black {"text-green-500" if is_online else "text-red-400"}')
                 
@@ -7472,7 +7616,7 @@ async def render_mobile_status_page():
             
             refs['uptime'].set_text(f"在线时长：{formatted_uptime}")
             
-            # Load 显示实时负载数据
+            # Load 更新：显示实时负载数据
             refs['load'].set_text(f"⚡ {status.get('load_1', '0.0')}")
 
     async def update_mobile_tab(val):
