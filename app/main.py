@@ -26,10 +26,10 @@ from collections import Counter
 
 IP_GEO_CACHE = {}
 
-# ✨✨✨ 定义全局进程池变量 ✨✨✨
+# ================= 定义全局进程池变量  =================
 PROCESS_POOL = None 
 
-# ✨✨✨同步 Ping 函数 (将由独立进程执行) ✨✨✨
+# ================= 全局 同步 Ping 函数 =================
 def sync_ping_worker(host, port):
     try:
         start = time.time()
@@ -824,7 +824,7 @@ GLOBE_JS_LOGIC = r"""
     const nodeCountEl = document.getElementById('node-count');
     const regionCountEl = document.getElementById('region-count');
     
-    // ✨ 修复：显示真实总数 84，而不是地图上的点数 33
+
     if(nodeCountEl) nodeCountEl.textContent = realTotal;
     
     const uniqueRegions = new Set(serverData.map(s => s.name));
@@ -1675,9 +1675,9 @@ async def install_probe_on_server(server_conf):
     manager_url = ADMIN_CONFIG.get('manager_base_url', 'http://xui-manager:8080') 
     
     # 2. 获取自定义测速点 (如果没有设置，使用默认值)
-    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 安徽电信
-    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通骨干
-    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动骨干
+    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 电信
+    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通
+    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动
 
     # 3. 替换脚本中的变量
     real_script = PROBE_INSTALL_SCRIPT \
@@ -2520,7 +2520,7 @@ async def auto_register_node(request: Request):
         # 6. 保存到硬盘
         await save_servers()
         
-        # ================= ✨✨✨ 后台任务启动区 ✨✨✨ =================
+        # =================后台任务启动区 =================
         
         # 任务A: 启动 GeoIP 命名任务 (自动变国旗)
         asyncio.create_task(force_geoip_naming_task(target_server_ref))
@@ -2936,7 +2936,7 @@ class SubEditor:
         with self.cont: 
             ui.spinner('dots').classes('self-center mt-10')
 
-        # ✨✨✨ 修复核心：先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
+        # ✨✨✨ 先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
         current_servers_snapshot = list(SERVERS_CACHE)
         
         tasks = [fetch_inbounds_safe(s, force_refresh=False) for s in current_servers_snapshot]
@@ -3189,7 +3189,7 @@ def open_group_sort_dialog():
             ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-slate-900 text-white shadow-lg')
     
     d.open()
-# ================= 2. 探针专用分组弹窗 (新建/编辑视图) =================
+# ================= 2. 探针专用分组弹窗  =================
 # is_edit_mode: 是否为编辑模式
 # group_name: 编辑时的原组名
 def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
@@ -3323,7 +3323,7 @@ def open_quick_group_dialog(callback=None, is_edit_mode=False, group_name=None):
 
     d.open()
 
-# ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
+# ================= 详情弹窗逻辑 =================
 def open_server_detail_dialog(server_conf):
     """
     打开服务器详情弹窗 (UI 升级版：大圆角 + 磨砂玻璃风格)
@@ -3529,7 +3529,7 @@ def open_server_detail_dialog(server_conf):
         
     d.open()
 
-# ================= 探针设置页 (V28：集成视图管理 + 完美布局) =================
+# ================= 探针设置页  =================
 async def render_probe_page():
     # 1. 标记当前视图状态
     global CURRENT_VIEW_STATE
@@ -3555,7 +3555,7 @@ async def render_probe_page():
                 ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
         return
 
-    # 4. 渲染布局 (限制最大宽度)
+    # 4. 渲染布局 
     with content_container:
         with ui.column().classes('w-full max-w-7xl gap-6'):
             
@@ -3823,7 +3823,7 @@ async def update_probe_stats(card_refs, is_manual=False):
 
 
     
-# ================= 订阅管理视图 (极简模式：只显在线) =================
+# ================= 订阅管理视图  =================
 async def load_subs_view():
     # ✨✨✨ [新增] 标记当前在订阅管理 ✨✨✨
     global CURRENT_VIEW_STATE
@@ -3896,7 +3896,7 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-# ================= 订阅策略编辑器 (修复 Switch 报错) =================
+# ================= 订阅策略编辑器  =================
 class SubscriptionProcessEditor:
     def __init__(self, sub_data):
         self.sub_data = sub_data
@@ -4058,7 +4058,6 @@ class SubscriptionProcessEditor:
 
     def _render_switch(self, label, key, icon):
         val = self.opt.get(key, False)
-        # ✨✨✨ 修复核心：正确捕获卡片对象并绑定点击事件 ✨✨✨
         card = ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer')
         with card:
             with ui.row().classes('items-center gap-3'):
@@ -4083,7 +4082,7 @@ class SubscriptionProcessEditor:
 def open_process_editor(sub_data):
     with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
 
-# ================= 通用服务器保存函数 (集成极速修正 + 自动探针) =================
+# ================= 通用服务器保存函数  =================
 async def save_server_config(server_data, is_add=True, idx=None):
     """
     统一处理服务器的保存逻辑（新增或编辑）
@@ -4160,7 +4159,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (UI调整：IP双向同步 + 纯探针校验 + 列表刷新) =================
+# ================= 小巧卡片式弹窗 =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     data = SERVERS_CACHE[idx] if is_edit else {}
@@ -4274,7 +4273,7 @@ async def open_server_dialog(idx=None):
                 # 判断 X-UI 信息是否有效 (URL + 账号 + 密码)
                 has_xui_info = bool(final_url and final_user and final_pass)
 
-                # 核心逻辑判断 (按照你的 3 点要求)
+                # 核心逻辑判断
                 final_probe_enable = False
 
                 if has_xui_info:
@@ -4379,7 +4378,7 @@ def open_create_group_dialog():
              ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
     d.open()
     
-# ================= [极简导出版 - 完美居中] 数据备份/恢复 (批量增强版) =================
+# ================= 数据备份/恢复  =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         
@@ -4576,7 +4575,7 @@ def format_bytes(size):
         n += 1
     return f"{size:.2f} {power_labels[n]}B"
 
-# ================= 智能排序逻辑=================
+# ================= 智能排序逻辑 =================
 import re
 
 CN_NUM_MAP = {'〇':0, '零':0, '一':1, '二':2, '三':3, '四':4, '五':5, '六':6, '七':7, '八':8, '九':9}
@@ -4821,7 +4820,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
                 if sub_text: ui.label(sub_text).classes('text-[10px] text-gray-400')
 
     
-# =================单个服务器视图 (完整修改版) =========================
+# =================单个服务器视图 =========================
 async def render_single_server_view(server_conf, force_refresh=False):
     mgr = get_manager(server_conf)
     ui_refs = {}
@@ -5047,7 +5046,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
 
-# ================= ✨✨✨ 高性能渲染函数 (已移除编辑按钮) ✨✨✨ =================
+# ================= ✨✨✨ 高性能渲染函数 ✨✨✨ =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     # 如果强制刷新，后台触发一下数据更新，但不阻塞当前 UI 渲染
     if force_refresh:
@@ -5197,7 +5196,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             update_row()
 
 
-# ================= 核心：静默刷新 UI 数据 (清理版) =================
+# ================= 核心：静默刷新 UI 数据  =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -6346,7 +6345,7 @@ def login_page(request: Request):
     render_step1()
 
 
-# ================= 0. 认证检查辅助函数 (请确保添加了这个函数) =================
+# ================= 0. 认证检查辅助函数 =================
 def check_auth(request: Request):
     """
     检查用户是否已登录
@@ -6354,7 +6353,7 @@ def check_auth(request: Request):
     return app.storage.user.get('authenticated', False)
 
 
-# ================= [本地化版] 主页入口 (最终完整版) =================
+# ================= [本地化版] 主页入口 =================
 @ui.page('/')
 def main_page(request: Request):
     # ================= 1. 注入全局资源与样式 =================
@@ -6578,7 +6577,7 @@ async def job_sync_all_traffic():
         await refresh_dashboard_ui()
     logger.info("✅ [定时任务] 流量同步完成")
 
-# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 (修复版) =================
+# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
     logger.info("🌍 [定时任务] 开始全量 IP 归属地检测与名称修正...")
     data_changed = False
@@ -6679,7 +6678,7 @@ app.on_shutdown(lambda: PROCESS_POOL.shutdown(wait=False) if PROCESS_POOL else N
 # ✨✨✨飞线优化+定位+高亮地图✨✨✨
 # ==========================================
 
-# 1. 全局地图名称映射表 (✨严格清洗版：移除 AR/US 等易误判短词✨)
+# 1. 全局地图名称映射表 
 MATCH_MAP = {
     # --- 南美 ---
     '🇨🇱': 'Chile', 'CHILE': 'Chile',
@@ -6762,7 +6761,7 @@ def open_dark_server_detail(server_conf):
         CARD_BG = 'bg-[#161b22]' 
         BORDER_STYLE = 'border border-[#30363d]'
         
-        # ✨ 弹窗高度调整：由 75vh 减小为 60vh，使整体更紧凑
+        # ✨ 弹窗高度
         with ui.dialog() as d, ui.card().classes('p-0 overflow-hidden flex flex-col bg-[#0d1117] shadow-2xl').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
             
             # --- 1. 顶部标题栏 ---
@@ -6833,7 +6832,7 @@ def open_dark_server_detail(server_conf):
                     ping_card('安徽联通', 'orange', 'ping_cu')
                     ping_card('安徽移动', 'green', 'ping_cm')
 
-                # --- 重新加回：网络质量趋势图 ---
+                # --- 网络质量趋势图 ---
                 with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
                     with ui.row().classes('w-full justify-between items-center mb-4'):
                         ui.label('网络质量趋势').classes('text-gray-200 text-sm font-bold')
@@ -6953,7 +6952,7 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V30 原始逻辑) =================        
+# ================= 电脑端大屏显示 =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -6991,7 +6990,7 @@ async def render_desktop_status_page():
         </style>
     ''')
 
-    # --- 准备地图数据 (保持 V30 逻辑) ---
+    # --- 准备地图数据 ---
     server_points = []; active_regions = set(); seen_flags = set(); online_count = 0
     CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
     from collections import Counter; country_counter = Counter()
@@ -7057,12 +7056,13 @@ async def render_desktop_status_page():
                 'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': '#0B1121', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': '#fff', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]
             }).classes('w-64 h-72')
 
+        # ✅ 修正点1：移除 scaleX，避免 CSS 缩放导致交互坐标错位
         ui.html('<div id="public-map-container" style="width:100%; height:100%;"></div>', sanitize=False).classes('w-full h-full')
 
     # --- 下半部分：固定标签栏 + 监控网格 ---
     with ui.column().classes('w-full h-[65vh] bg-[#0f172a] relative gap-0'):
         
-        # 固定标签栏 (V30 纯净模式)
+        # 固定标签栏 
         with ui.row().classes('w-full px-6 py-2 bg-[#0f172a]/95 backdrop-blur z-40 border-b border-gray-800 items-center'):
             with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide'):
                 groups = get_probe_groups()
@@ -7173,6 +7173,16 @@ async def render_desktop_status_page():
                 var myChart = echarts.init(chartDom);
                 var centerPt = [116.4, 39.9]; 
                 if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => {{ centerPt = [p.coords.longitude, p.coords.latitude]; updateChart(myChart, mapData, centerPt); }}, e => {{ updateChart(myChart, mapData, centerPt); }}); }} else {{ updateChart(myChart, mapData, centerPt); }}
+                
+                // 监听缩放事件，实现自动回正
+                myChart.on('georoam', function() {{
+                    var opt = myChart.getOption();
+                    var currZoom = opt.geo[0].zoom;
+                    // 如果缩放比例接近或小于初始值 1.2，则重置中心点
+                    if (currZoom <= 1.21) {{
+                        myChart.setOption({{ geo: {{ center: [-10, 20], zoom: 1.2 }} }});
+                    }}
+                }});
             }});
         }}
         function updateChart(chart, data, center) {{
@@ -7180,7 +7190,18 @@ async def render_desktop_status_page():
             var lines = data.points.map(pt => ({{ coords: [pt.value, center] }}));
             var option = {{
                 backgroundColor: '#100C2A',
-                geo: {{ map: 'world', roam: false, zoom: 1.2, center: [-10, 20], label: {{ show: false }}, itemStyle: {{ areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 }}, emphasis: {{ itemStyle: {{ areaColor: '#2a333d' }} }}, regions: regions }},
+                geo: {{ 
+                    map: 'world', 
+                    roam: true,          // ✨ 开启缩放和平移
+                    zoom: 1.2, 
+                    aspectScale: 0.85,   // ✨ 视觉上横向拉宽地图，替代 CSS scaleX
+                    scaleLimit: {{ min: 1.2, max: 10 }}, // ✨ 限制最小缩放比例为初始值
+                    center: [-10, 20], 
+                    label: {{ show: false }}, 
+                    itemStyle: {{ areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 }}, 
+                    emphasis: {{ itemStyle: {{ areaColor: '#2a333d' }} }}, 
+                    regions: regions 
+                }},
                 series: [
                     {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
                     {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: true, position: 'top', formatter: '{{b}}', color: '#fff', fontSize: 16, offset: [0, -2] }}, data: data.points }},
@@ -7199,7 +7220,6 @@ async def render_desktop_status_page():
             current_urls = set(s['url'] for s in SERVERS_CACHE)
             displayed_urls = list(public_refs.keys())
             
-            # 检测新机器或删除机器 (V30 稳定版重绘逻辑)
             # 为了防止手机端崩溃，这里增加了 length 检查，只有真正发生增减时才触发
             target_count = len(current_urls) if CURRENT_PROBE_TAB == 'ALL' else len([s for s in SERVERS_CACHE if CURRENT_PROBE_TAB in s.get('tags', [])])
             if len(public_refs) != target_count:
@@ -7279,7 +7299,8 @@ async def render_desktop_status_page():
         ui.timer(2.0, loop_update, once=True)
     ui.timer(0.1, loop_update, once=True)
 
-# ================= 手机端专用：实时动效 Dashboard 最终完整版 (V52) =================
+
+# ================= 手机端专用：实时动效 Dashboard ==========================
 async def render_mobile_status_page():
     global CURRENT_PROBE_TAB
     # 用于存储 UI 组件引用的字典，实现局部刷新
@@ -7402,10 +7423,9 @@ async def render_mobile_status_page():
 
                     # 底部状态
                     with ui.row().classes('w-full justify-between mt-3 pt-2 border-t border-[#333] items-center'):
-                        # 修改点：左侧显示绿色加粗的在线时长
                         srv_ref['uptime'] = ui.label("在线时长：--").classes('text-[10px] font-bold text-green-500 font-mono')
                         with ui.row().classes('items-center gap-2'):
-                            # 修改点：闪电图标引用 srv_ref['load']，动态展示 load_1 数据
+                            # 闪电图标引用 srv_ref['load']，动态展示 load_1 数据
                             srv_ref['load'] = ui.label(f"⚡ {status.get('load_1', '0.0')}").classes('text-[10px] text-gray-400 font-bold')
                             ui.label('ACTIVE' if is_online else 'DOWN').classes(f'text-[10px] font-black {"text-green-500" if is_online else "text-red-400"}')
                 
@@ -7452,7 +7472,7 @@ async def render_mobile_status_page():
             
             refs['uptime'].set_text(f"在线时长：{formatted_uptime}")
             
-            # Load 更新：显示实时负载数据
+            # Load 显示实时负载数据
             refs['load'].set_text(f"⚡ {status.get('load_1', '0.0')}")
 
     async def update_mobile_tab(val):
