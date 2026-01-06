@@ -7365,7 +7365,7 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V75：离线使用断开闪电图标) =================        
+# ================= 电脑端大屏显示 (V78：OS简化 + 网速布局修复 + 图标增强) =================        
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -7377,7 +7377,9 @@ async def render_desktop_status_page():
 
     # 2. 资源注入
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
+    ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
+    
     ui.add_head_html('''
         <style>
             body { margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; transition: background-color 0.3s ease; }
@@ -7419,7 +7421,11 @@ async def render_desktop_status_page():
         return 'text-red-500 dark:text-red-400', f'{val}ms'
     
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
-    def fmt_speed(b): return f"{int(b/1024)}K" if b < 1024**2 else f"{round(b/1024**2,1)}M"
+    
+    def fmt_speed(b):
+        if b < 1024: return f"{b:.2f} B"
+        if b < 1024**2: return f"{b/1024:.2f} K"
+        return f"{b/1024**2:.2f} M"
 
     def prepare_map_data():
         server_points = []; active_regions = set(); seen_flags = set()
@@ -7550,23 +7556,34 @@ async def render_desktop_status_page():
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group') as card:
                 refs['card'] = card
                 
-                # 1. 顶栏：单层 Flex + 强制不换行
+                # 1. 顶栏：名称与状态
                 with ui.row().classes('w-full items-center mb-1 gap-2 flex-nowrap'):
-                    
                     flag = "🏳️"
                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
                     except: pass
-                    
                     ui.label(flag).classes('text-2xl md:text-3xl flex-shrink-0 leading-none') 
-                    
                     ui.label(s['name']).classes(
                         'text-base md:text-lg font-bold text-slate-800 dark:text-gray-100 '
                         'truncate flex-grow min-w-0 cursor-pointer hover:text-blue-500 transition leading-tight'
                     ).on('click', lambda _, s=s: open_pc_server_detail(s))
-                    
-                    # 初始状态：灰色实心闪电 (bolt)
                     refs['status_icon'] = ui.icon('bolt').props('size=32px').classes('text-gray-400 flex-shrink-0')
                 
+                # 2. OS 信息行 (V78: 增加 dns 图标)
+                with ui.row().classes('w-full justify-between items-center px-1 mb-2'):
+                    # 左侧: 图标 + 文字标签
+                    with ui.row().classes('items-center gap-1.5'):
+                        ui.icon('dns').classes('text-xs text-gray-400') 
+                        ui.label('OS').classes('text-xs text-slate-500 dark:text-gray-400 font-bold')
+                    
+                    # 右侧: 信息容器
+                    with ui.row().classes('items-center gap-1.5'):
+                        refs['os_icon'] = ui.icon('computer').classes('text-xs text-slate-400')
+                        refs['os_info'] = ui.label('Loading...').classes('text-xs font-mono font-bold text-slate-700 dark:text-gray-300 whitespace-nowrap')
+                
+                # 3. 分割线
+                ui.separator().classes('mb-3 opacity-50 dark:opacity-30')
+
+                # 4. 硬件信息行
                 with ui.row().classes('w-full justify-between px-1 mb-1 md:mb-2'):
                     label_cls = 'text-xs font-mono text-slate-500 dark:text-gray-400 font-bold'
                     with ui.row().classes('items-center gap-1'):
@@ -7576,6 +7593,7 @@ async def render_desktop_status_page():
                     with ui.row().classes('items-center gap-1'):
                         ui.icon('storage').classes('text-purple-500 dark:text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes(label_cls)
                 
+                # 5. 进度条
                 with ui.column().classes('w-full gap-2 md:gap-3'):
                     def stat_row(label, color_cls, light_track_color):
                         with ui.column().classes('w-full gap-1'):
@@ -7594,17 +7612,32 @@ async def render_desktop_status_page():
                 
                 ui.separator().classes('bg-slate-200 dark:bg-white/5 my-1')
                 
-                with ui.grid().classes('w-full grid-cols-2 gap-y-1 gap-x-2 text-xs'):
-                    label_sub_cls = 'text-slate-400 dark:text-gray-500'
-                    val_cls = 'text-slate-600 dark:text-gray-300'
-                    ui.label('网络').classes(label_sub_cls); 
-                    with ui.row().classes('justify-end gap-2 font-mono'): refs['net_up'] = ui.label('↑ 0B').classes('text-orange-500 dark:text-orange-400 font-bold'); refs['net_down'] = ui.label('↓ 0B').classes('text-green-600 dark:text-green-400 font-bold')
-                    ui.label('流量').classes(label_sub_cls);
-                    with ui.row().classes(f'justify-end gap-2 font-mono {val_cls}'): refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
-                    ui.label('负载').classes(label_sub_cls); refs['load'] = ui.label('--').classes(f'{val_cls} font-mono text-right font-bold')
-                    ui.label('在线').classes(label_sub_cls); 
-                    with ui.row().classes('justify-end items-center gap-1'): refs['uptime'] = ui.label('--').classes(f'{val_cls} font-mono text-right'); refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
+                # ✨✨✨ 6. 底部信息网格 (修复网速换行 + 移除负载) ✨✨✨
+                # 原来是 grid-cols-2，现在改为 flex-col，每行单独处理
+                with ui.column().classes('w-full gap-1'):
+                    label_sub_cls = 'text-xs text-slate-400 dark:text-gray-500'
+                    
+                    # 网络行: Flex 布局，左右对齐，防止换行
+                    with ui.row().classes('w-full justify-between items-center no-wrap'):
+                        ui.label('网络').classes(label_sub_cls)
+                        with ui.row().classes('gap-2 font-mono whitespace-nowrap'):
+                            refs['net_up'] = ui.label('↑ 0B').classes('text-xs text-orange-500 dark:text-orange-400 font-bold')
+                            refs['net_down'] = ui.label('↓ 0B').classes('text-xs text-green-600 dark:text-green-400 font-bold')
+                    
+                    # 流量行
+                    with ui.row().classes('w-full justify-between items-center no-wrap'):
+                        ui.label('流量').classes(label_sub_cls)
+                        with ui.row().classes('gap-2 font-mono whitespace-nowrap text-xs text-slate-600 dark:text-gray-300'):
+                            refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
+                    
+                    # 在线行
+                    with ui.row().classes('w-full justify-between items-center no-wrap'):
+                        ui.label('在线').classes(label_sub_cls)
+                        with ui.row().classes('items-center gap-1'):
+                            refs['uptime'] = ui.label('--').classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right')
+                            refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
                 
+                # 7. Ping
                 with ui.row().classes('w-full justify-between items-center mt-1 pt-2 border-t border-slate-200 dark:border-white/5 text-[10px]'):
                     ui.label('延迟').classes('text-slate-500 dark:text-gray-500 font-bold')
                     with ui.row().classes('gap-2 md:gap-3 font-mono'):
@@ -7682,43 +7715,30 @@ async def render_desktop_status_page():
                                 var boxWidth = size.contentSize[0];
                                 var boxHeight = size.contentSize[1];
                                 var viewHeight = size.viewSize[1];
-                                
-                                if (y > viewHeight * 0.6) {{
-                                    return [x - (boxWidth / 2), y - boxHeight - 10]; 
-                                }} else {{
-                                    return [x - (boxWidth / 2), y + 25]; 
-                                }}
+                                if (y > viewHeight * 0.6) {{ return [x - (boxWidth / 2), y - boxHeight - 10]; }} 
+                                else {{ return [x - (boxWidth / 2), y + 25]; }}
                             }},
                             formatter: function(params) {{
                                 var rawName = params.name;
                                 if (!rawName) return;
-                                
                                 var info = window.regionStats[rawName];
-                                if (!info && window.mapNameMap[rawName]) {{
-                                    var flag = window.mapNameMap[rawName];
-                                    info = window.regionStats[flag];
-                                }} else if (!info) {{
+                                if (!info && window.mapNameMap[rawName]) {{ var flag = window.mapNameMap[rawName]; info = window.regionStats[flag]; }} 
+                                else if (!info) {{
                                     var mapKeys = Object.keys(window.mapNameMap);
                                     for (var i = 0; i < mapKeys.length; i++) {{
                                         var k = mapKeys[i];
-                                        if (rawName.includes(k) || k.includes(rawName)) {{
-                                            info = window.regionStats[window.mapNameMap[k]];
-                                            break;
-                                        }}
+                                        if (rawName.includes(k) || k.includes(rawName)) {{ info = window.regionStats[window.mapNameMap[k]]; break; }}
                                     }}
                                 }}
                                 if (!info) return;
-                                
                                 var isD = document.body.classList.contains('body--dark');
                                 var bg = isD ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                                 var textMain = isD ? '#fff' : '#1e293b';
                                 var textSub = isD ? '#94a3b8' : '#64748b';
                                 var shadow = isD ? '0 0 15px rgba(0,0,0,0.5)' : '0 10px 25px rgba(0,0,0,0.15)';
                                 var backdrop = 'blur(10px)';
-                                
                                 var listHtml = '';
                                 var displayList = info.list.slice(0, 5); 
-                                
                                 displayList.forEach(function(item) {{
                                     var dotColor = (item.status === 'online') ? '#22c55e' : '#ef4444';
                                     var statText = (item.status === 'online') ? '线上' : '离线';
@@ -7730,11 +7750,7 @@ async def render_desktop_status_page():
                                                 '<span style="font-size:10px; color:'+(item.status==='online'?textSub:dotColor)+';">' + statText + '</span>' +
                                                 '</div>';
                                 }});
-                                
-                                if (info.total > 5) {{
-                                    listHtml += '<div style="font-size:10px; color:'+textSub+'; margin-top:4px; text-align:center;">+' + (info.total - 5) + ' 更多...</div>';
-                                }}
-                                
+                                if (info.total > 5) {{ listHtml += '<div style="font-size:10px; color:'+textSub+'; margin-top:4px; text-align:center;">+' + (info.total - 5) + ' 更多...</div>'; }}
                                 return '<div style="background:'+bg+'; backdrop-filter:'+backdrop+'; -webkit-backdrop-filter:'+backdrop+'; border-radius:12px; padding:12px 16px; border:none; box-shadow:'+shadow+'; min-width:200px;">' + 
                                        '<div style="font-weight:900; font-size:16px; margin-bottom:4px; color:'+textMain+'; display:flex; align-items:center; gap:6px;">' + 
                                        '<span>' + info.flag + '</span>' + 
@@ -7759,20 +7775,11 @@ async def render_desktop_status_page():
                             label: {{ show: false }}, 
                             itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }}, 
                             tooltip: {{ show: true }}, 
-                            emphasis: {{ 
-                                itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }},
-                                label: {{ show: false }} 
-                            }}, 
+                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }}, label: {{ show: false }} }}, 
                             regions: regions 
                         }},
                         series: [
-                            {{
-                                type: 'map',
-                                map: 'world',
-                                geoIndex: 0,
-                                data: mapData.regions.map(n => ({{ name: n, value: 1 }})),
-                                itemStyle: {{ opacity: 0 }}
-                            }},
+                            {{ type: 'map', map: 'world', geoIndex: 0, data: mapData.regions.map(n => ({{ name: n, value: 1 }})), itemStyle: {{ opacity: 0 }} }},
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -2] }}, data: mapData.points }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 4, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: center }}] }}
@@ -7782,10 +7789,7 @@ async def render_desktop_status_page():
                 }}
                 if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => renderMap([p.coords.longitude, p.coords.latitude]), e => renderMap(centerPt)); }} else {{ renderMap(centerPt); }}
                 window.addEventListener('resize', () => myChart.resize());
-                
-                new MutationObserver(function(mutations) {{
-                    renderMap(centerPt); 
-                }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
+                new MutationObserver(function(mutations) {{ renderMap(centerPt); }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
             }});
         }}
         checkAndRender();
@@ -7826,20 +7830,57 @@ async def render_desktop_status_page():
                 
                 if res and res.get('status') == 'online':
                     refs['card'].classes(remove='offline-card')
-                    
-                    # ✨✨✨ 在线：切换为绿色实心闪电 (bolt) ✨✨✨
                     refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
+                    
+                    # ✨✨✨ V78：OS 简化 + 架构修正 + 图标优化 ✨✨✨
+                    cache = PROBE_DATA_CACHE.get(url, {})
+                    static = cache.get('static', {})
+                    os_str = static.get('os', 'Linux')
+                    arch_raw = static.get('arch', '')
+                    
+                    # 1. 架构转换
+                    if 'aarch64' in arch_raw.lower() or 'arm' in arch_raw.lower(): display_arch = "ARM"
+                    elif 'x86_64' in arch_raw.lower() or 'amd64' in arch_raw.lower(): display_arch = "AMD"
+                    else: display_arch = arch_raw
+
+                    # 2. 图标与简化逻辑
+                    import re
+                    os_lower = os_str.lower()
+                    icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
+                    
+                    # 移除 GNU/Linux, LTS, (bookworm) 等冗余信息
+                    simple_os = os_str
+                    simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
+                    simple_os = re.sub(r' LTS', '', simple_os, flags=re.I)
+                    simple_os = re.sub(r'\s*\(.*?\)', '', simple_os) # 去掉括号内容
+                    
+                    # 针对 Ubuntu 22.04.5 -> Ubuntu 22.04
+                    match = re.search(r'(Ubuntu|Debian|CentOS) (\d+(\.\d+)?)', simple_os, re.I)
+                    if match: simple_os = f"{match.group(1)} {match.group(2)}"
+
+                    if 'ubuntu' in os_lower: icon_name = 'fa-brands fa-ubuntu'; icon_color = 'text-orange-500'
+                    elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500' # Debian 用 Linux 企鹅图标代替，或者 fa-brands fa-debian (如果有)
+                    elif 'centos' in os_lower: icon_name = 'fa-brands fa-centos'; icon_color = 'text-purple-500'
+                    elif 'windows' in os_lower: icon_name = 'fa-brands fa-windows'; icon_color = 'text-blue-500'
+                    elif 'apple' in os_lower or 'macos' in os_lower: icon_name = 'fa-brands fa-apple'; icon_color = 'text-gray-300'
+                    
+                    refs['os_icon'].set_name(icon_name)
+                    refs['os_icon'].classes(replace=icon_color)
+                    refs['os_info'].set_text(f"{simple_os} / {display_arch}")
                     
                     refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
                     refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
                     refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
-                    cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
-                    mem = float(res.get('mem_usage', 0)); mem_total = float(res.get('mem_total', 0)); refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{int(mem)}%'); refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
-                    disk = float(res.get('disk_usage', 0)); disk_total = float(res.get('disk_total', 0)); refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{int(disk)}%'); refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
+                    
+                    cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
+                    mem = float(res.get('mem_usage', 0)); mem_total = float(res.get('mem_total', 0)); refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%'); refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
+                    disk = float(res.get('disk_usage', 0)); disk_total = float(res.get('disk_total', 0)); refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%'); refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
+                    
                     refs['net_up'].set_text(f"↑ {fmt_speed(res.get('net_speed_out', 0))}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(res.get('net_speed_in', 0))}/s")
+                    
                     refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}"); refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
-                    refs['load'].set_text(str(res.get('load_1', 0))); refs['uptime'].set_text(str(res.get('uptime', '-')))
+                    refs['uptime'].set_text(str(res.get('uptime', '-')))
                     refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-orange-500')
                     pings = res.get('pings', {})
                     c1, t1 = get_ping_color_safe(pings.get('电信', 0)); c2, t2 = get_ping_color_safe(pings.get('联通', 0)); c3, t3 = get_ping_color_safe(pings.get('移动', 0))
@@ -7847,7 +7888,6 @@ async def render_desktop_status_page():
                 
                 elif res and res.get('status') == 'warning':
                     refs['card'].classes(add='offline-card')
-                    # ✨✨✨ 警告：切换为红色断开闪电 (flash_off) ✨✨✨
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     
@@ -7856,7 +7896,6 @@ async def render_desktop_status_page():
                 
                 else:
                     refs['card'].classes(add='offline-card')
-                    # ✨✨✨ 离线：切换为红色断开闪电 (flash_off) ✨✨✨
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     
