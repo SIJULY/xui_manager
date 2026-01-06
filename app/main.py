@@ -7022,7 +7022,7 @@ async def render_desktop_status_page():
         with ui.column().classes('absolute top-6 left-8 z-50 gap-1'):
             with ui.row().classes('items-center gap-3'):
                 ui.icon('public', color='blue').classes('text-3xl drop-shadow-[0_0_10px_rgba(59,130,246,0.8)]')
-                ui.label('Global Network Status').classes('text-2xl font-black text-white tracking-wide')
+                ui.label('X-Fusion Status').classes('text-2xl font-black text-white tracking-wide')
             with ui.row().classes('gap-4 text-sm font-bold font-mono pl-1'):
                 with ui.row().classes('items-center gap-1'):
                     ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.8)]')
