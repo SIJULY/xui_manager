@@ -7477,7 +7477,7 @@ async def render_desktop_status_page():
                     var option = {{
                         backgroundColor: 'transparent',
                         geo: {{ 
-                            map: 'world', roam: 'scale', zoom: 1.2, aspectScale: 0.85, scaleLimit: {{ min: 1.2, max: 10 }}, center: [-10, 20], 
+                            map: 'world', roam: true, zoom: 1.2, aspectScale: 0.85, scaleLimit: {{ min: 1.2, max: 10 }}, center: [-10, 20], 
                             label: {{ show: false }}, itemStyle: {{ areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 }}, 
                             emphasis: {{ itemStyle: {{ areaColor: '#2a333d' }} }}, regions: regions 
                         }},
