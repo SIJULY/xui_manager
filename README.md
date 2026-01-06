@@ -45,15 +45,15 @@ graph TD
 
 ### 1. 🛡️ 混合双轨制监控 (Hybrid Monitor)
 
-原理：在服务器上一键植入 Python 轻量探针，Agent 每 3 秒主动向面板汇报状态。
+***原理：在服务器上一键植入 Python 轻量探针，Agent 每 3 秒主动向面板汇报状态。***
 
-优势：无需开放额外端口（走 HTTP/HTTPS），不受防火墙入站规则限制；即使 X-UI 面板崩溃，探针依然能独立汇报服务器存活状态。
+***优势：无需开放额外端口（走 HTTP/HTTPS），不受防火墙入站规则限制；即使 X-UI 面板崩溃，探针依然能独立汇报服务器存活状态。***
 
-⚡ 轨道 B：主动拉取 (Panel Mode)
+***⚡ 轨道 B：主动拉取 (Panel Mode)***
 
-原理：对于未安装探针的机器，自动降级为 API 轮询模式。
+***原理：对于未安装探针的机器，自动降级为 API 轮询模式。***
 
-优势：兼容性强，确保在不侵入系统的情况下，依然能获取基础的流量统计和节点信息。
+***优势：兼容性强，确保在不侵入系统的情况下，依然能获取基础的流量统计和节点信息。***
 
 ### ✨核心功能亮点
 
@@ -97,10 +97,13 @@ IP 归属地识别：自动识别服务器 IP，智能添加国旗 Emoji（如 �
 ## 📸 界面预览## 
 
 ***📊 全景仪表盘与地图***
+
+
 <img width="100%" alt="Dashboard" src="https://github.com/user-attachments/assets/7c8b2163-50aa-4b6a-b550-8dde09e57818" />
 
 ***🧱 探针页面***
-<img width="1909" height="1919" alt="image" src="https://github.com/user-attachments/assets/d3e50a4a-5ccb-4e39-8ae2-8c08034a75a5" />
+<img width="1933" height="1916" alt="image" src="https://github.com/user-attachments/assets/87eb196f-68aa-4ea0-a263-ad5d6842dedf" />
+
 
 ***🛠️ 批量添加 (支持双独立开关)***
 <img width="1923" height="1921" alt="image" src="https://github.com/user-attachments/assets/04965188-6aa3-4021-9d4e-106052b568bf" />
