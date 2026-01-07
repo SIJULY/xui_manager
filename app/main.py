@@ -7089,37 +7089,55 @@ def open_mobile_server_detail(server_conf):
     except Exception as e:
         print(f"Mobile Detail error: {e}")
         
-# ================= [电脑端] 详情弹窗 (V63 修复交互版) =================
+# ================= [电脑端] 详情弹窗 (V81：白天玻璃拟态风格适配版) =================
 def open_pc_server_detail(server_conf):
     try:
-        LABEL_STYLE = 'text-gray-400 text-sm font-medium'
-        VALUE_STYLE = 'text-gray-200 font-mono text-sm font-bold'
-        SECTION_TITLE = 'text-gray-200 text-base font-black mb-4 flex items-center gap-2'
-        CARD_BG = 'bg-[#161b22]' 
-        BORDER_STYLE = 'border border-[#30363d]'
+        # 1. 获取当前主题状态
+        is_dark = app.storage.user.get('is_dark', True)
         
+        # 2. 定义双模样式 (✨ 核心修改：复刻主页卡片的玻璃拟态风格)
+        
+        # 文字颜色：白天深蓝灰 / 黑夜浅灰
+        LABEL_STYLE = 'text-slate-500 dark:text-gray-400 text-sm font-medium'
+        VALUE_STYLE = 'text-[#1e293b] dark:text-gray-200 font-mono text-sm font-bold'
+        SECTION_TITLE = 'text-[#1e293b] dark:text-gray-200 text-base font-black mb-4 flex items-center gap-2'
+        
+        # 背景颜色：
+        # 白天：高透白底 + 高斯模糊 (backdrop-blur-xl) | 黑夜：深色实底
+        DIALOG_BG = 'bg-white/85 backdrop-blur-xl dark:bg-[#0d1117] dark:backdrop-blur-none'
+        # 内部卡片：白天半透白 | 黑夜：黑灰
+        CARD_BG   = 'bg-white/60 dark:bg-[#161b22]' 
+        
+        # 边框与投影：
+        # 白天：半透白边框 + 淡蓝阴影 | 黑夜：深灰边框 + 无阴影
+        BORDER_STYLE = 'border border-white/50 dark:border-[#30363d]'
+        SHADOW_STYLE = 'shadow-[0_8px_32px_0_rgba(31,38,135,0.15)] dark:shadow-2xl'
+        
+        # 进度条底色
+        TRACK_COLOR = 'blue-1' if not is_dark else 'grey-9'
+
         visible_series = {0: True, 1: True, 2: True}
         is_smooth = {'value': False}
 
         # 样式注入
         ui.add_head_html('''
             <style>
-                /* ✨ 修复：卡片样式 (无缩放，仅变色) */
                 .ping-card-base { border-width: 2px; border-style: solid; transition: all 0.3s; }
                 .ping-card-inactive { border-color: transparent !important; opacity: 0.4; filter: grayscale(100%); }
             </style>
         ''')
         
-        with ui.dialog() as d, ui.card().classes('p-0 overflow-hidden flex flex-col bg-[#0d1117] shadow-2xl').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
+        # 应用新的背景和阴影样式
+        with ui.dialog() as d, ui.card().classes(f'p-0 overflow-hidden flex flex-col {DIALOG_BG} {SHADOW_STYLE}').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
             
-            # --- 标题栏 ---
-            with ui.row().classes('w-full items-center justify-between p-4 bg-[#161b22] border-b border-[#30363d] flex-shrink-0'):
+            # --- 标题栏 (背景适配) ---
+            with ui.row().classes(f'w-full items-center justify-between p-4 {CARD_BG} border-b border-white/50 dark:border-[#30363d] flex-shrink-0'):
                 with ui.row().classes('items-center gap-3'):
                     flag = "🏳️"
                     try: flag = detect_country_group(server_conf['name'], server_conf).split(' ')[0]
                     except: pass
                     ui.label(flag).classes('text-2xl')
-                    ui.label(server_conf['name']).classes('text-lg font-bold text-white')
+                    ui.label(server_conf['name']).classes(f'text-lg font-bold text-[#1e293b] dark:text-white')
                 ui.button(icon='close', on_click=d.close).props('flat round dense color=grey-5')
 
             # --- 内容区 ---
@@ -7128,36 +7146,38 @@ def open_pc_server_detail(server_conf):
                 
                 # 第一行：左右分栏
                 with ui.row().classes('w-full gap-6 no-wrap items-stretch'):
-                    # 左侧：资源
+                    # 左侧：资源 (背景适配)
                     with ui.column().classes(f'flex-1 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
                         ui.label('资源使用情况').classes(SECTION_TITLE)
                         def progress_block(label, key, icon, color_class):
                             with ui.column().classes('w-full gap-1'):
                                 with ui.row().classes('w-full justify-between items-end'):
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.icon(icon).classes('text-gray-500 text-xs'); ui.label(label).classes(LABEL_STYLE)
-                                    refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-400 text-xs font-mono')
-                                refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color=grey-9').classes('h-1.5 rounded-full')
+                                        ui.icon(icon).classes('text-gray-400 dark:text-gray-500 text-xs'); ui.label(label).classes(LABEL_STYLE)
+                                    refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-500 dark:text-gray-400 text-xs font-mono')
+                                # 进度条底色适配
+                                refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color={TRACK_COLOR}').classes('h-1.5 rounded-full')
                                 with ui.row().classes('w-full justify-end'):
                                     refs[f'{key}_val'] = ui.label('0 GB / 0 GB').classes('text-[11px] text-gray-500 font-mono mt-1')
                         progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
                         progress_block('RAM', 'mem', 'memory', 'green-5')
                         progress_block('DISK', 'disk', 'storage', 'purple-5')
 
-                    # 右侧：系统
+                    # 右侧：系统 (背景适配)
                     with ui.column().classes(f'w-[400px] p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
                         ui.label('系统资讯').classes(SECTION_TITLE)
                         def info_line(label, icon, key):
-                            with ui.row().classes('w-full items-center justify-between py-3 border-b border-[#30363d] last:border-0'):
+                            # 分割线颜色适配
+                            with ui.row().classes('w-full items-center justify-between py-3 border-b border-white/50 dark:border-[#30363d] last:border-0'):
                                 with ui.row().classes('items-center gap-2'):
-                                    ui.icon(icon).classes('text-gray-500 text-sm'); ui.label(label).classes(LABEL_STYLE)
+                                    ui.icon(icon).classes('text-gray-400 dark:text-gray-500 text-sm'); ui.label(label).classes(LABEL_STYLE)
                                 refs[key] = ui.label('Loading...').classes(VALUE_STYLE)
                         info_line('作业系统', 'laptop_windows', 'os')
                         info_line('架构', 'developer_board', 'arch')
                         info_line('虚拟化', 'cloud_queue', 'virt')
                         info_line('在线时长', 'timer', 'uptime')
 
-                # 第二行：延迟卡片 (修复：点击交互逻辑)
+                # 第二行：延迟卡片 (背景适配)
                 with ui.row().classes('w-full gap-4 mt-6'):
                     def toggle_series(idx, card_el, color_cls):
                         visible_series[idx] = not visible_series[idx]
@@ -7167,44 +7187,45 @@ def open_pc_server_detail(server_conf):
                             card_el.classes(add='ping-card-inactive', remove=color_cls)
 
                     def ping_card(name, color, key, idx):
-                        # 四周有色边框
                         color_border_cls = f'border-{color}-500'
-                        # 默认激活状态
+                        # 使用 CARD_BG
                         base_cls = f'flex-1 p-4 rounded-xl {CARD_BG} ping-card-base cursor-pointer {color_border_cls}'
                         
                         with ui.element('div').classes(base_cls) as card:
                             card.on('click', lambda _, i=idx, c=card, col=color_border_cls: toggle_series(i, c, col))
                             with ui.row().classes('w-full justify-between items-center mb-1'):
-                                ui.label(name).classes(f'text-{color}-400 text-xs font-bold')
+                                ui.label(name).classes(f'text-{color}-500 text-xs font-bold')
                             with ui.row().classes('items-baseline gap-1'):
-                                refs[f'{key}_cur'] = ui.label('--').classes('text-2xl font-black text-white font-mono')
+                                refs[f'{key}_cur'] = ui.label('--').classes(f'text-2xl font-black font-mono text-[#1e293b] dark:text-white')
                                 ui.label('ms').classes('text-gray-500 text-[10px]')
                     
                     ping_card('安徽电信', 'blue', 'ping_ct', 0)
                     ping_card('安徽联通', 'orange', 'ping_cu', 1)
                     ping_card('安徽移动', 'green', 'ping_cm', 2)
 
-                # 第三行：趋势图
+                # 第三行：趋势图 (背景适配)
                 with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
                     
                     # 工具栏
                     with ui.row().classes('w-full justify-between items-center mb-4'):
                         with ui.row().classes('items-center gap-4'):
-                            ui.label('网络质量趋势').classes('text-gray-200 text-sm font-bold')
-                            # 平滑开关
-                            with ui.row().classes('items-center gap-2 cursor-pointer bg-[#0d1117] px-3 py-1 rounded-full border border-[#30363d]').on('click', lambda: smooth_sw.set_value(not smooth_sw.value)):
+                            ui.label('网络质量趋势').classes(f'text-sm font-bold text-[#1e293b] dark:text-gray-200')
+                            # 平滑开关背景适配
+                            switch_bg = 'bg-blue-50/50 dark:bg-[#0d1117]'
+                            with ui.row().classes(f'items-center gap-2 cursor-pointer {switch_bg} px-3 py-1 rounded-full border border-white/50 dark:border-[#30363d]').on('click', lambda: smooth_sw.set_value(not smooth_sw.value)):
                                 smooth_sw = ui.switch().props('dense size=sm color=blue')
-                                ui.label('平滑曲线').classes('text-xs text-gray-400 select-none')
+                                ui.label('平滑曲线').classes('text-xs text-slate-500 dark:text-gray-400 select-none')
                                 smooth_sw.on_value_change(lambda e: is_smooth.update({'value': e.value}))
 
-                        # 标签页
-                        with ui.tabs().props('dense no-caps indicator-color=blue active-color=blue').classes('bg-[#0d1117] rounded-lg p-1') as chart_tabs:
-                            ui.tab('1h', label='1小时').classes('px-4 text-xs')
-                            ui.tab('3h', label='3小时').classes('px-4 text-xs')
-                            ui.tab('6h', label='6小时').classes('px-4 text-xs')
+                        # 标签页背景适配
+                        tab_bg = 'bg-blue-50/50 dark:bg-[#0d1117]'
+                        with ui.tabs().props('dense no-caps indicator-color=blue active-color=blue').classes(f'{tab_bg} rounded-lg p-1') as chart_tabs:
+                            tab_cls = 'px-4 text-xs text-slate-500 dark:text-gray-400'
+                            ui.tab('1h', label='1小时').classes(tab_cls)
+                            ui.tab('3h', label='3小时').classes(tab_cls)
+                            ui.tab('6h', label='6小时').classes(tab_cls)
                         chart_tabs.set_value('1h')
 
-                    # EWMA 算法
                     def calculate_ewma(data, alpha=0.3):
                         if not data: return []
                         result = [data[0]]
@@ -7212,15 +7233,22 @@ def open_pc_server_detail(server_conf):
                             result.append(alpha * data[i] + (1 - alpha) * result[-1])
                         return [int(x) for x in result]
 
+                    # ECharts 颜色适配
+                    chart_text = '#64748b' if not is_dark else '#94a3b8'
+                    split_line = '#e2e8f0' if not is_dark else '#30363d'
+                    tooltip_bg = 'rgba(255, 255, 255, 0.95)' if not is_dark else 'rgba(13, 17, 23, 0.95)'
+                    tooltip_border = '#cbd5e1' if not is_dark else '#30363d'
+                    tooltip_text = '#334155' if not is_dark else '#e6edf3'
+
                     chart = ui.echart({
                         'backgroundColor': 'transparent', 
                         'color': ['#3b82f6', '#f97316', '#22c55e'], 
                         'legend': { 'show': False },
                         'tooltip': {
                             'trigger': 'axis',
-                            'backgroundColor': 'rgba(13, 17, 23, 0.95)',
-                            'borderColor': '#30363d',
-                            'textStyle': {'color': '#e6edf3'},
+                            'backgroundColor': tooltip_bg,
+                            'borderColor': tooltip_border,
+                            'textStyle': {'color': tooltip_text},
                             'axisPointer': {'type': 'line', 'lineStyle': {'color': '#8b949e', 'type': 'dashed'}},
                             'formatter': '{b}<br/>{a0}: {c0}ms<br/>{a1}: {c1}ms<br/>{a2}: {c2}ms'
                         },
@@ -7228,8 +7256,8 @@ def open_pc_server_detail(server_conf):
                             {'type': 'inside', 'xAxisIndex': 0, 'zoomLock': False}
                         ],
                         'grid': { 'left': '1%', 'right': '1%', 'bottom': '5%', 'top': '15%', 'containLabel': True },
-                        'xAxis': { 'type': 'category', 'boundaryGap': False, 'axisLabel': { 'color': '#64748b' } },
-                        'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': '#30363d' } }, 'axisLabel': { 'color': '#64748b' } },
+                        'xAxis': { 'type': 'category', 'boundaryGap': False, 'axisLabel': { 'color': chart_text } },
+                        'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': split_line } }, 'axisLabel': { 'color': chart_text } },
                         'series': [
                             {'name': '电信', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'areaStyle': {'opacity': 0.05}},
                             {'name': '联通', 'type': 'line', 'smooth': True, 'showSymbol': False, 'data': [], 'areaStyle': {'opacity': 0.05}},
@@ -7300,8 +7328,9 @@ def open_pc_server_detail(server_conf):
 
                 chart_tabs.on_value_change(update_dark_detail)
 
-            with ui.row().classes('w-full justify-center p-2 bg-[#161b22] border-t border-[#30363d]'):
-                ui.label('Powered by X-Fusion Monitor').classes('text-[10px] text-gray-600 font-mono italic')
+            # --- 底部 (背景适配) ---
+            with ui.row().classes(f'w-full justify-center p-2 {CARD_BG} border-t border-white/50 dark:border-[#30363d]'):
+                ui.label('Powered by X-Fusion Monitor').classes('text-[10px] text-gray-500 dark:text-gray-600 font-mono italic')
 
         d.open()
         asyncio.create_task(update_dark_detail())
@@ -7365,7 +7394,9 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V78：OS简化 + 网速布局修复 + 图标增强) =================        
+# ================= 电脑端大屏显示 (V79：防卡死修复 + UI终极精修) =================        
+import asyncio # 必须引入 asyncio
+
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -7556,7 +7587,7 @@ async def render_desktop_status_page():
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group') as card:
                 refs['card'] = card
                 
-                # 1. 顶栏：名称与状态
+                # 1. 顶栏
                 with ui.row().classes('w-full items-center mb-1 gap-2 flex-nowrap'):
                     flag = "🏳️"
                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
@@ -7568,14 +7599,11 @@ async def render_desktop_status_page():
                     ).on('click', lambda _, s=s: open_pc_server_detail(s))
                     refs['status_icon'] = ui.icon('bolt').props('size=32px').classes('text-gray-400 flex-shrink-0')
                 
-                # 2. OS 信息行 (V78: 增加 dns 图标)
+                # 2. OS 信息
                 with ui.row().classes('w-full justify-between items-center px-1 mb-2'):
-                    # 左侧: 图标 + 文字标签
                     with ui.row().classes('items-center gap-1.5'):
                         ui.icon('dns').classes('text-xs text-gray-400') 
                         ui.label('OS').classes('text-xs text-slate-500 dark:text-gray-400 font-bold')
-                    
-                    # 右侧: 信息容器
                     with ui.row().classes('items-center gap-1.5'):
                         refs['os_icon'] = ui.icon('computer').classes('text-xs text-slate-400')
                         refs['os_info'] = ui.label('Loading...').classes('text-xs font-mono font-bold text-slate-700 dark:text-gray-300 whitespace-nowrap')
@@ -7583,7 +7611,7 @@ async def render_desktop_status_page():
                 # 3. 分割线
                 ui.separator().classes('mb-3 opacity-50 dark:opacity-30')
 
-                # 4. 硬件信息行
+                # 4. 硬件信息
                 with ui.row().classes('w-full justify-between px-1 mb-1 md:mb-2'):
                     label_cls = 'text-xs font-mono text-slate-500 dark:text-gray-400 font-bold'
                     with ui.row().classes('items-center gap-1'):
@@ -7612,25 +7640,18 @@ async def render_desktop_status_page():
                 
                 ui.separator().classes('bg-slate-200 dark:bg-white/5 my-1')
                 
-                # ✨✨✨ 6. 底部信息网格 (修复网速换行 + 移除负载) ✨✨✨
-                # 原来是 grid-cols-2，现在改为 flex-col，每行单独处理
+                # 6. 底部网格 (强制不换行)
                 with ui.column().classes('w-full gap-1'):
                     label_sub_cls = 'text-xs text-slate-400 dark:text-gray-500'
-                    
-                    # 网络行: Flex 布局，左右对齐，防止换行
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('网络').classes(label_sub_cls)
                         with ui.row().classes('gap-2 font-mono whitespace-nowrap'):
                             refs['net_up'] = ui.label('↑ 0B').classes('text-xs text-orange-500 dark:text-orange-400 font-bold')
                             refs['net_down'] = ui.label('↓ 0B').classes('text-xs text-green-600 dark:text-green-400 font-bold')
-                    
-                    # 流量行
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('流量').classes(label_sub_cls)
                         with ui.row().classes('gap-2 font-mono whitespace-nowrap text-xs text-slate-600 dark:text-gray-300'):
                             refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
-                    
-                    # 在线行
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('在线').classes(label_sub_cls)
                         with ui.row().classes('items-center gap-1'):
@@ -7796,6 +7817,7 @@ async def render_desktop_status_page():
     }})();
     ''')
 
+    # ✨✨✨ [重点修改] 异步循环核心 ✨✨✨
     async def loop_update():
         nonlocal local_ui_version
         try:
@@ -7823,7 +7845,13 @@ async def render_desktop_status_page():
                 if not item: continue
                 refs = item['refs']
                 server_data = item['data'] 
-                res = await get_server_status(server_data)
+                
+                # ✨✨✨ 关键修复：加入 asyncio.wait_for 防止单个服务器卡死整个循环 ✨✨✨
+                res = None
+                try:
+                    res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
+                except Exception:
+                    res = None # 超时或报错视为离线，继续下一个
                 
                 if res and res.get('status') == 'online': real_online_count += 1
                 if not item['card'].visible: continue
@@ -7833,34 +7861,29 @@ async def render_desktop_status_page():
                     refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
                     
-                    # ✨✨✨ V78：OS 简化 + 架构修正 + 图标优化 ✨✨✨
+                    # OS 信息更新
                     cache = PROBE_DATA_CACHE.get(url, {})
                     static = cache.get('static', {})
                     os_str = static.get('os', 'Linux')
                     arch_raw = static.get('arch', '')
                     
-                    # 1. 架构转换
                     if 'aarch64' in arch_raw.lower() or 'arm' in arch_raw.lower(): display_arch = "ARM"
                     elif 'x86_64' in arch_raw.lower() or 'amd64' in arch_raw.lower(): display_arch = "AMD"
                     else: display_arch = arch_raw
 
-                    # 2. 图标与简化逻辑
                     import re
                     os_lower = os_str.lower()
                     icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
                     
-                    # 移除 GNU/Linux, LTS, (bookworm) 等冗余信息
                     simple_os = os_str
                     simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
                     simple_os = re.sub(r' LTS', '', simple_os, flags=re.I)
-                    simple_os = re.sub(r'\s*\(.*?\)', '', simple_os) # 去掉括号内容
-                    
-                    # 针对 Ubuntu 22.04.5 -> Ubuntu 22.04
+                    simple_os = re.sub(r'\s*\(.*?\)', '', simple_os)
                     match = re.search(r'(Ubuntu|Debian|CentOS) (\d+(\.\d+)?)', simple_os, re.I)
                     if match: simple_os = f"{match.group(1)} {match.group(2)}"
 
                     if 'ubuntu' in os_lower: icon_name = 'fa-brands fa-ubuntu'; icon_color = 'text-orange-500'
-                    elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500' # Debian 用 Linux 企鹅图标代替，或者 fa-brands fa-debian (如果有)
+                    elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500' 
                     elif 'centos' in os_lower: icon_name = 'fa-brands fa-centos'; icon_color = 'text-purple-500'
                     elif 'windows' in os_lower: icon_name = 'fa-brands fa-windows'; icon_color = 'text-blue-500'
                     elif 'apple' in os_lower or 'macos' in os_lower: icon_name = 'fa-brands fa-apple'; icon_color = 'text-gray-300'
