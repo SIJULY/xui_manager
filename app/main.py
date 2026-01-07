@@ -687,7 +687,7 @@ def parse_vless_link_to_node(link, remark_override=None):
         logger.error(f"解析 VLESS 链接失败: {e}")
         return None
 
-# ================= [V75 强制覆盖版] 部署弹窗 (强制使用 CF API 根域名) =================
+# ================= [V75 自定义域名版] 部署弹窗 (自定义使用 CF API 根域名) =================
 async def open_deploy_xhttp_dialog(server_conf, callback):
     # 1. 获取服务器真实 IP (用于解析)
     # 无论配置里填的是域名还是IP，我们都需要解析出最终的 IPv4 地址
@@ -711,15 +711,15 @@ async def open_deploy_xhttp_dialog(server_conf, callback):
     root_domain = cf_handler.root_domain
 
     if not has_cf_api or not root_domain:
-        safe_notify("❌ 强制模式失败: 请先在左下角配置 Cloudflare API 和根域名", "negative")
+        safe_notify("❌ 自定义模式失败: 请先在左下角配置 Cloudflare API 和根域名", "negative")
         return
 
-    # 3. 生成强制使用的新域名
+    # 3. 生成自定义使用的新域名
     import random, string
     rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
     # 格式: node-1-2-3-4-abcd.aaabb.com
     sub_prefix = f"node-{real_ip.replace('.', '-')}-{rand_suffix}"
-    # ✨✨✨ 核心修改：强制使用配置的根域名 ✨✨✨
+    # ✨✨✨ 核心修改：使用配置的根域名 ✨✨✨
     target_domain = f"{sub_prefix}.{root_domain}"
 
     # === 构建弹窗 ===
@@ -729,11 +729,11 @@ async def open_deploy_xhttp_dialog(server_conf, callback):
         with ui.column().classes('w-full bg-slate-900 p-6 gap-2'):
             with ui.row().classes('items-center gap-2 text-white'):
                 ui.icon('rocket_launch', size='md')
-                ui.label('部署 XHTTP-Reality (强制覆盖模式)').classes('text-lg font-bold')
+                ui.label('部署 XHTTP-Reality (自定义域名模式)').classes('text-lg font-bold')
             
             ui.label(f"服务器 IP: {real_ip}").classes('text-xs text-gray-400 font-mono')
             ui.label(f"即将部署到: {target_domain}").classes('text-sm text-green-400 font-mono font-bold')
-            ui.label(f"(忽略原地址，强制使用 {root_domain})").classes('text-[10px] text-orange-300')
+            ui.label(f"(忽略原地址，将使用 {root_domain})").classes('text-[10px] text-orange-300')
 
         # --- 内容输入区 ---
         with ui.column().classes('w-full p-6 gap-4'):
@@ -813,7 +813,7 @@ bash /tmp/install_xhttp.sh "{target_domain}"
                 btn_cancel.enable()
                 btn_deploy.props(remove='loading')
 
-            btn_deploy = ui.button('强制部署', on_click=start_process).classes('bg-red-600 text-white shadow-lg')
+            btn_deploy = ui.button('自定义部署', on_click=start_process).classes('bg-red-600 text-white shadow-lg')
 
     d.open()
 
