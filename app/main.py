@@ -1551,23 +1551,24 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False):
                 inbounds = await run_in_bg_executor(mgr.get_inbounds)
             
             if inbounds is not None:
-                # ✅ 成功：更新缓存
+                # ✅ 成功：更新内存缓存
                 NODES_DATA[url] = inbounds
-                # 标记为在线 (可选，目前通过列表非空来判断即可)
+                # 标记为在线
                 server_conf['_status'] = 'online' 
                 
-                asyncio.create_task(save_nodes_cache())
+                # ✨✨✨ [核心修改]：移除这里的 asyncio.create_task(save_nodes_cache()) ✨✨✨
+                # 不要每同步一个就写一次硬盘，这会堵死主线程锁！改为在批量任务结束后统一保存。
+                
                 return inbounds
             
-            # ❌ 失败 (登录失败/连接超时)：清空该服务器的节点缓存，确保仪表盘数据归零
+            # ❌ 失败
             logger.error(f"❌ [{name}] 连接失败 (清除缓存)")
-            NODES_DATA[url] = [] # ✨ 关键修改：连接失败则清空节点数据
-            server_conf['_status'] = 'offline' # 标记离线
+            NODES_DATA[url] = [] 
+            server_conf['_status'] = 'offline'
             return []
             
         except Exception as e: 
             logger.error(f"❌ [{name}] 异常: {e}")
-            # ❌ 异常：同样清空缓存
             NODES_DATA[url] = [] 
             server_conf['_status'] = 'error'
             return []
@@ -4242,223 +4243,302 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (UI调整：IP双向同步 + 纯探针校验 + 列表刷新) =================
+# ================= 小巧卡片式弹窗  =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
-    data = SERVERS_CACHE[idx] if is_edit else {}
+    original_data = SERVERS_CACHE[idx] if is_edit else {}
+    # data 是本地副本，所有的修改（包括保存）都会同步更新到这个副本
+    data = original_data.copy()
     
+    # --- 1. 智能检测初始状态 (仅用于控制 UI 面板的显隐) ---
+    if is_edit:
+        has_xui_conf = bool(data.get('url') and data.get('user') and data.get('pass'))
+        raw_ssh_host = data.get('ssh_host')
+        if not raw_ssh_host and not has_xui_conf: 
+            raw_ssh_host = data.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
+        has_ssh_conf = bool(raw_ssh_host or data.get('ssh_user') or data.get('ssh_key') or data.get('ssh_password'))
+        # 兜底：防止全空def 
+        if not has_ssh_conf and not has_xui_conf: has_ssh_conf = True
+    else:
+        # 新建模式默认全开
+        has_xui_conf = True; has_ssh_conf = True
+
+    # state 仅用于控制“是否显示输入框”的 UI 状态
+    state = {'ssh_active': has_ssh_conf, 'xui_active': has_xui_conf}
+
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm p-5 flex flex-col gap-4'):
         
-        # 1. 标题栏
+        # --- 标题栏 ---
         with ui.row().classes('w-full justify-between items-center'):
             ui.label('编辑服务器' if is_edit else '添加服务器').classes('text-lg font-bold')
             tabs = ui.tabs().classes('text-blue-600')
             with tabs:
-                t_xui = ui.tab('面板', icon='settings')
                 t_ssh = ui.tab('SSH / 探针', icon='terminal')
+                t_xui = ui.tab('X-UI面板', icon='settings')
 
-        # 2. 通用字段
-        name = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
-        group = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('w-full').props('outlined dense')
+        # --- 通用字段 ---
+        name_input = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
+        group_input = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('w-full').props('outlined dense')
         
-        # 3. 内容面板
-        with ui.tab_panels(tabs, value=t_xui).classes('w-full animated fadeIn'):
+        inputs = {}
+
+        # ==================== 样式定义 ====================
+        btn_keycap_blue = 'bg-white rounded-lg font-bold tracking-wide border-t border-x border-gray-100 border-b-4 border-blue-100 text-blue-600 px-4 py-1 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-blue-50'
+        btn_keycap_delete = 'bg-white rounded-xl font-bold tracking-wide w-full border-t border-x border-gray-100 border-b-4 border-red-100 text-red-500 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-red-50'
+        btn_keycap_red_confirm = 'rounded-lg font-bold tracking-wide text-white border-b-4 border-red-900 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1'
+
+        # ==================== 保存逻辑 ====================
+        async def save_panel_data(panel_type):
+            final_name = name_input.value.strip()
+            final_group = group_input.value
+            new_server_data = data.copy()
+            new_server_data['group'] = final_group
+
+            # --- SSH 保存 ---
+            if panel_type == 'ssh':
+                if not inputs.get('ssh_host'): return
+                s_host = inputs['ssh_host'].value.strip()
+                if not s_host: safe_notify("SSH 主机 IP 不能为空", "negative"); return
+
+                new_server_data.update({
+                    'ssh_host': s_host,
+                    'ssh_port': inputs['ssh_port'].value.strip(),
+                    'ssh_user': inputs['ssh_user'].value.strip(),
+                    'ssh_auth_type': inputs['auth_type'].value,
+                    'ssh_password': inputs['ssh_pwd'].value if inputs['ssh_pwd'] else '',
+                    'ssh_key': inputs['ssh_key'].value if inputs['ssh_key'] else '',
+                    'probe_installed': data.get('probe_installed', True)
+                })
+                # 确保主键 URL 存在
+                if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
+
+            # --- X-UI 保存 ---
+            elif panel_type == 'xui':
+                if not inputs.get('xui_url'): return
+                x_url = inputs['xui_url'].value.strip()
+                x_user = inputs['xui_user'].value.strip()
+                x_pass = inputs['xui_pass'].value.strip()
+                if not (x_url and x_user and x_pass): safe_notify("必填项不能为空", "negative"); return
+
+                new_server_data.update({
+                    'url': x_url, 'user': x_user, 'pass': x_pass,
+                    'prefix': inputs['xui_prefix'].value.strip(),
+                    'probe_installed': inputs['probe_chk'].value
+                })
+
+            # 智能名称
+            if not final_name:
+                safe_notify("正在生成名称...", "ongoing")
+                final_name = await generate_smart_name(new_server_data)
+            new_server_data['name'] = final_name
+
+            # 执行保存
+            success = await save_server_config(new_server_data, is_add=not is_edit, idx=idx)
             
-            # --- Tab 1: 面板设置 ---
-            with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
-                # 这里的 url 变量稍后会和 Tab 2 的输入框绑定
-                url = ui.input(value=data.get('url',''), label='面板 URL 或 IP').classes('w-full').props('outlined dense')
+            if success:
+                # ✨✨✨ 关键：保存成功后，立即更新本地的 data 和 state ✨✨✨
+                data.update(new_server_data)
                 
-                with ui.row().classes('w-full gap-2'):
-                    user = ui.input(value=data.get('user',''), label='账号').classes('flex-1').props('outlined dense')
-                    pwd = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
-                prefix = ui.input(value=data.get('prefix',''), label='API 前缀 (选填)').classes('w-full').props('outlined dense')
+                # 更新 UI 状态，确保下次操作（如删除）能识别到新添加的模块
+                if panel_type == 'ssh': state['ssh_active'] = True
+                if panel_type == 'xui': state['xui_active'] = True
 
-                ui.separator().classes('my-1')
-
-                # 复选框
-                probe_chk = ui.checkbox('启用 Root 探针 (自动安装)', value=data.get('probe_installed', False))
-                probe_chk.classes('text-sm font-bold text-slate-700')
+                if panel_type == 'ssh' and new_server_data.get('probe_installed'):
+                     safe_notify(f"🚀 配置已保存，后台推送 Agent...", "ongoing")
+                     asyncio.create_task(install_probe_on_server(new_server_data))
+                elif panel_type == 'xui' and new_server_data.get('probe_installed') and new_server_data.get('ssh_host'):
+                     safe_notify(f"🚀 X-UI保存，尝试推送 Agent...", "ongoing")
+                     asyncio.create_task(install_probe_on_server(new_server_data))
+                else:
+                     safe_notify(f"✅ {panel_type.upper()} 已保存", "positive")
                 
-                ui.label('提示：若此处未填写信息且仅填写了 SSH，保存时将自动启用探针模式。').classes('text-[10px] text-gray-400 ml-8 -mt-2 leading-tight')
+                # 保持弹窗打开，方便后续操作
+                # d.close() 
 
-            # --- Tab 2: SSH 配置 ---
-            with ui.tab_panel(t_ssh).classes('p-0 flex flex-col gap-3'):
-                
-                # ✨✨✨ [新增] SSH 页面的 Host 输入框 (与 Tab 1 同步) ✨✨✨
-                # 逻辑：自动获取 Tab 1 的值；输入时同步回 Tab 1
-                ssh_host_input = ui.input(label='面板 URL 或 IP (必填)', value=url.value).classes('w-full').props('outlined dense')
-                
-                # ✨ 双向绑定逻辑 ✨
-                # 1. 当在这个框输入时 -> 更新 Tab 1 的 url
-                ssh_host_input.on_value_change(lambda e: url.set_value(e.value))
-                # 2. 当 Tab 1 的 url 变化时 -> 更新这个框
-                url.on_value_change(lambda e: ssh_host_input.set_value(e.value))
+        # ==================== SSH 面板渲染 ====================
+        @ui.refreshable
+        def render_ssh_panel():
+            if not state['ssh_active']:
+                with ui.column().classes('w-full h-48 justify-center items-center bg-gray-50 rounded border border-dashed border-gray-300'):
+                    ui.icon('terminal', color='grey').classes('text-4xl mb-2')
+                    ui.label('SSH 功能未启用').classes('text-gray-500 font-bold mb-2')
+                    ui.button('启用 SSH 配置', icon='add', on_click=lambda: _activate_panel('ssh')).props('flat bg-blue-50 text-blue-600')
+            else:
+                init_host = data.get('ssh_host')
+                # 兼容纯IP模式
+                if not init_host and is_edit and not has_xui_conf:
+                     init_host = data.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
 
-                ui.label('SSH 连接信息').classes('text-xs font-bold text-gray-500 mb-1 mt-1')
+                inputs['ssh_host'] = ui.input(label='SSH 主机 IP', value=init_host).classes('w-full').props('outlined dense')
                 
                 with ui.column().classes('w-full gap-3'):
                     with ui.row().classes('w-full gap-2'):
-                        ssh_user = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
-                        ssh_port = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
+                        inputs['ssh_user'] = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
+                        inputs['ssh_port'] = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
                     
-                    auth_type = ui.select(['全局密钥', '独立密码', '独立密钥'], value=data.get('ssh_auth_type', '全局密钥'), label='认证方式').classes('w-full').props('outlined dense options-dense')
+                    # 校验 select 值
+                    valid_auth_options = ['全局密钥', '独立密码', '独立密钥']
+                    current_auth = data.get('ssh_auth_type', '全局密钥')
+                    if current_auth not in valid_auth_options: current_auth = '全局密钥'
                     
-                    ssh_pwd = ui.input(label='SSH 密码', password=True, value=data.get('ssh_password','')).classes('w-full').props('outlined dense')
-                    ssh_pwd.bind_visibility_from(auth_type, 'value', value='独立密码')
-                    
-                    ssh_key = ui.textarea(label='SSH 私钥', value=data.get('ssh_key','')).classes('w-full').props('outlined dense rows=3 input-class=font-mono text-xs')
-                    ssh_key.bind_visibility_from(auth_type, 'value', value='独立密钥')
-                    
-                    ui.label('✅ 将自动使用全局私钥连接').bind_visibility_from(auth_type, 'value', value='全局密钥').classes('text-green-600 text-xs text-center mt-2')
+                    inputs['auth_type'] = ui.select(valid_auth_options, value=current_auth, label='认证方式').classes('w-full').props('outlined dense options-dense')
 
-        # 4. 底部按钮
-        with ui.row().classes('w-full justify-end gap-2 mt-2'):
-            if is_edit:
-                async def delete():
-                    if idx < len(SERVERS_CACHE): 
-                        # 获取要删除的服务器信息
-                        deleted_srv = SERVERS_CACHE.pop(idx)
-                        deleted_url = deleted_srv.get('url')
+                    inputs['ssh_pwd'] = ui.input(label='SSH 密码', password=True, value=data.get('ssh_password','')).classes('w-full').props('outlined dense')
+                    inputs['ssh_pwd'].bind_visibility_from(inputs['auth_type'], 'value', value='独立密码')
+                    
+                    inputs['ssh_key'] = ui.textarea(label='SSH 私钥', value=data.get('ssh_key','')).classes('w-full').props('outlined dense rows=3 input-class=font-mono text-xs')
+                    inputs['ssh_key'].bind_visibility_from(inputs['auth_type'], 'value', value='独立密钥')
+                
+                ui.separator().classes('my-1')
+                with ui.row().classes('w-full justify-between items-center'):
+                    ui.label('✅ 自动使用全局私钥').bind_visibility_from(inputs['auth_type'], 'value', value='全局密钥').classes('text-green-600 text-xs font-bold')
+                    ui.element('div').bind_visibility_from(inputs['auth_type'], 'value', value='独立密码') 
+                    ui.element('div').bind_visibility_from(inputs['auth_type'], 'value', value='独立密钥') 
+                    
+                    ui.button('保存 SSH', icon='save', on_click=lambda: save_panel_data('ssh')).props('flat').classes(btn_keycap_blue)
+
+        # ==================== X-UI 面板渲染 ====================
+        @ui.refreshable
+        def render_xui_panel():
+            if not state['xui_active']:
+                with ui.column().classes('w-full h-48 justify-center items-center bg-gray-50 rounded border border-dashed border-gray-300'):
+                    ui.icon('settings_applications', color='grey').classes('text-4xl mb-2')
+                    ui.label('X-UI 面板未配置').classes('text-gray-500 font-bold mb-2')
+                    ui.button('配置 X-UI 信息', icon='add', on_click=lambda: _activate_panel('xui')).props('flat bg-purple-50 text-purple-600')
+            else:
+                inputs['xui_url'] = ui.input(value=data.get('url',''), label='面板 URL (http://ip:port)').classes('w-full').props('outlined dense')
+                with ui.row().classes('w-full gap-2'):
+                    inputs['xui_user'] = ui.input(value=data.get('user',''), label='账号').classes('flex-1').props('outlined dense')
+                    inputs['xui_pass'] = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
+                inputs['xui_prefix'] = ui.input(value=data.get('prefix',''), label='API 前缀 (选填)').classes('w-full').props('outlined dense')
+
+                ui.separator().classes('my-1')
+                
+                with ui.row().classes('w-full justify-between items-center'):
+                    inputs['probe_chk'] = ui.checkbox('启用 Root 探针', value=data.get('probe_installed', False))
+                    inputs['probe_chk'].classes('text-sm font-bold text-slate-700')
+                    
+                    ui.button('保存 X-UI', icon='save', on_click=lambda: save_panel_data('xui')).props('flat').classes(btn_keycap_blue)
+
+                ui.label('提示: 启用探针需先配置 SSH 登录信息').classes('text-[10px] text-red-500 ml-8 -mt-2')
+
+                def auto_fill_ssh():
+                    if inputs['probe_chk'].value and state['ssh_active'] and inputs.get('ssh_host') and not inputs['ssh_host'].value:
+                        p_url = inputs['xui_url'].value
+                        if p_url:
+                            clean_ip = p_url.split('://')[-1].split(':')[0]
+                            inputs['ssh_host'].set_value(clean_ip)
+                inputs['probe_chk'].on_value_change(auto_fill_ssh)
+
+        def _activate_panel(panel_type):
+            state[f'{panel_type}_active'] = True
+            if panel_type == 'ssh': render_ssh_panel.refresh()
+            elif panel_type == 'xui': render_xui_panel.refresh()
+
+        default_tab = t_ssh
+        if is_edit and not state['ssh_active'] and state['xui_active']: default_tab = t_xui
+
+        with ui.tab_panels(tabs, value=default_tab).classes('w-full animated fadeIn'):
+            with ui.tab_panel(t_ssh).classes('p-0 flex flex-col gap-3'):
+                render_ssh_panel()
+            with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
+                render_xui_panel()
+
+        # ================= 5. 全局删除逻辑 (数据实时扫描版) =================
+        if is_edit:
+            with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
+                async def open_delete_confirm():
+                    with ui.dialog() as del_d, ui.card().classes('w-80 p-4'):
+                        ui.label('删除确认').classes('text-lg font-bold text-red-600')
+                        ui.label('请选择要删除的内容：').classes('text-sm text-gray-600 mb-2')
                         
-                        # ✨✨✨ 双重保险：显式清理所有相关缓存 ✨✨✨
-                        if deleted_url in PROBE_DATA_CACHE: del PROBE_DATA_CACHE[deleted_url]
-                        if deleted_url in NODES_DATA: del NODES_DATA[deleted_url]
-                        if deleted_url in PING_TREND_CACHE: del PING_TREND_CACHE[deleted_url]
+                        # ✨✨✨ 核心修复：打开删除弹窗时，实时检查 data 里的数据是否存在 ✨✨✨
+                        # 不再依赖可能滞后的 state，而是直接看“肚子里有没有货”
+                        
+                        # 判断 SSH 是否存在：如果有 host 或 user，就算存在
+                        real_ssh_exists = bool(data.get('ssh_host') or data.get('ssh_user'))
+                        # 判断 X-UI 是否存在：如果有 url 和 user，就算存在
+                        real_xui_exists = bool(data.get('url') and data.get('user') and data.get('pass'))
 
-                    await save_servers()
-                    d.close()
-                    render_sidebar_content.refresh()
-                    await refresh_content('ALL')
-                    safe_notify('服务器已删除，缓存已清理', 'positive')
-                ui.button('删除', on_click=delete, color='red').props('flat dense')
+                        # 如果两者都不存在（异常数据），默认认为都存在，防止没法删
+                        if not real_ssh_exists and not real_xui_exists:
+                            real_ssh_exists = True; real_xui_exists = True
 
-            async def save():
-                # 1. 获取最终 URL (因为双向绑定，取 url.value 即可获取两边最新的值)
-                final_url = url.value.strip()
-                final_user = user.value.strip()
-                final_pass = pwd.value.strip()
-                
-                # ✨✨✨ [校验]：如果此时 URL 还是空的，说明两边都没填 ✨✨✨
-                if not final_url:
-                     safe_notify("错误：必须填写 '面板 URL 或 IP'", "negative")
-                     # 可以在这里做个小交互，自动切到 Tab 2 并聚焦输入框
-                     t_ssh.value = True # 切换 Tab
-                     return
+                        chk_ssh = ui.checkbox('SSH 连接信息', value=real_ssh_exists).classes('text-sm font-bold')
+                        chk_xui = ui.checkbox('X-UI 面板信息', value=real_xui_exists).classes('text-sm font-bold')
+                        
+                        # 逻辑：如果本身就没有数据，禁用复选框
+                        if not real_ssh_exists: chk_ssh.value = False; chk_ssh.disable()
+                        if not real_xui_exists: chk_xui.value = False; chk_xui.disable()
+                        
+                        # 逻辑：如果只剩一项有效配置，强制勾选（防止删成空壳）
+                        if real_ssh_exists and not real_xui_exists: chk_ssh.disable()
+                        if real_xui_exists and not real_ssh_exists: chk_xui.disable()
 
-                # 判断 SSH 信息是否有效
-                has_ssh_info = False
-                if ssh_user.value:
-                    if auth_type.value == '全局密钥': has_ssh_info = True
-                    elif auth_type.value == '独立密码' and ssh_pwd.value: has_ssh_info = True
-                    elif auth_type.value == '独立密钥' and ssh_key.value: has_ssh_info = True
+                        async def confirm_execution():
+                            if idx >= len(SERVERS_CACHE): return
+                            target_srv = SERVERS_CACHE[idx]
+                            
+                            will_delete_ssh = chk_ssh.value
+                            will_delete_xui = chk_xui.value
+                            
+                            # 预测删完后的状态
+                            remaining_ssh = real_ssh_exists and not will_delete_ssh
+                            remaining_xui = real_xui_exists and not will_delete_xui
+                            
+                            is_full_delete = False
 
-                # 判断 X-UI 信息是否有效 (URL + 账号 + 密码)
-                has_xui_info = bool(final_url and final_user and final_pass)
+                            # 如果删完后两手空空 -> 彻底删除
+                            if not remaining_ssh and not remaining_xui:
+                                SERVERS_CACHE.pop(idx)
+                                u = target_srv.get('url'); p_u = target_srv.get('ssh_host') or u
+                                for k in [u, p_u]:
+                                    if k in PROBE_DATA_CACHE: del PROBE_DATA_CACHE[k]
+                                    if k in NODES_DATA: del NODES_DATA[k]
+                                safe_notify('✅ 服务器已彻底删除', 'positive')
+                                is_full_delete = True
+                            else:
+                                # 局部清除
+                                if will_delete_ssh:
+                                    for k in ['ssh_host', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key', 'ssh_auth_type']: target_srv[k] = ''
+                                    target_srv['probe_installed'] = False
+                                    # 更新本地状态
+                                    state['ssh_active'] = False
+                                    # 同时也清空本地 data，防止还没关弹窗又点保存
+                                    data['ssh_host'] = ''
+                                    safe_notify('✅ SSH 信息已清除', 'positive')
+                                
+                                if will_delete_xui:
+                                    for k in ['url', 'user', 'pass', 'prefix']: target_srv[k] = ''
+                                    state['xui_active'] = False
+                                    data['url'] = '' # 清空本地标识
+                                    safe_notify('✅ X-UI 信息已清除', 'positive')
 
-                # 核心逻辑判断 (按照你的 3 点要求)
-                final_probe_enable = False
+                            await save_servers()
+                            del_d.close()
+                            d.close()
+                            
+                            render_sidebar_content.refresh()
+                            current_scope = CURRENT_VIEW_STATE.get('scope')
+                            current_data = CURRENT_VIEW_STATE.get('data')
 
-                if has_xui_info:
-                    # 场景 1: 填写了 X-UI 信息 -> 严格遵循复选框
-                    final_probe_enable = probe_chk.value
-                else:
-                    # 场景 2: 未填写 X-UI 信息 (只有 IP/URL，没账号密码)
-                    if has_ssh_info:
-                        final_probe_enable = True
-                    else:
-                        final_probe_enable = False
+                            if is_full_delete:
+                                if current_scope == 'SINGLE' and current_data == target_srv:
+                                    content_container.clear()
+                                    with content_container:
+                                        ui.label('该服务器已删除').classes('text-gray-400 text-lg w-full text-center mt-20')
+                                elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
+                                    await refresh_content(current_scope, current_data)
+                            else:
+                                if current_scope == 'SINGLE' and current_data == target_srv:
+                                    await refresh_content('SINGLE', target_srv)
 
-                # 自动命名
-                final_name = name.value.strip()
-                if not final_name:
-                    safe_notify("正在智能获取名称...", "ongoing")
-                    temp_conf = {'url': final_url, 'user': final_user, 'pass': final_pass, 'prefix': prefix.value}
-                    final_name = await generate_smart_name(temp_conf)
-                
-                server_data = {
-                    'name': final_name, 
-                    'group': group.value,
-                    'url': final_url, 
-                    'user': final_user, 
-                    'pass': final_pass, 
-                    'prefix': prefix.value,
-                    'ssh_port': ssh_port.value, 
-                    'ssh_user': ssh_user.value,
-                    'ssh_auth_type': auth_type.value, 
-                    'ssh_password': ssh_pwd.value, 
-                    'ssh_key': ssh_key.value,
-                    'probe_installed': final_probe_enable 
-                }
-                
-                success = await save_server_config(server_data, is_add=not is_edit, idx=idx)
-                
-                if success:
-                    # ✨✨✨ [修复核心] 保存成功后，立即刷新当前列表视图 ✨✨✨
-                    # 判断当前是不是在列表页，如果是，就刷新一下
-                    if CURRENT_VIEW_STATE.get('scope') in ['ALL', 'TAG', 'COUNTRY']:
-                        await refresh_content(CURRENT_VIEW_STATE['scope'], CURRENT_VIEW_STATE['data'])
-                    elif not is_edit: 
-                        # 如果是新增，且当前不在列表页，强制跳转到所有服务器列表
-                        await refresh_content('ALL')
+                        with ui.row().classes('w-full justify-end mt-4 gap-2'):
+                            ui.button('取消', on_click=del_d.close).props('flat dense color=grey')
+                            ui.button('确认执行', color='red', on_click=confirm_execution).props('unelevated').classes(btn_keycap_red_confirm)
+                    del_d.open()
 
-                    if final_probe_enable:
-                        safe_notify(f"🚀 正在后台连接 SSH 并推送 Agent...", "ongoing")
-                        asyncio.create_task(install_probe_on_server(server_data))
-                    else:
-                        safe_notify(f"✅ 配置已保存 (未启用探针)", "positive")
-                    d.close()
-            
-            ui.button('保存配置', on_click=save).classes('bg-slate-900 text-white shadow-lg')
-    d.open()
-
-
-# 辅助函数：获取所有唯一分组名（包括主分组、Tags和自定义空分组）
-def get_all_groups_set():
-    groups = set()
-    # 1. 现有服务器的主分组和Tags
-    for s in SERVERS_CACHE:
-        if s.get('group'): groups.add(s['group'])
-        if s.get('tags'): groups.update(s['tags'])
-    # 2. 预设的自定义分组
-    if 'custom_groups' in ADMIN_CONFIG:
-        groups.update(ADMIN_CONFIG['custom_groups'])
-    
-    # 3. 保证基本分组存在
-    groups.add('默认分组')
-    return groups
-
-def open_create_group_dialog():
-    with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
-        ui.label('新建自定义分组').classes('text-lg font-bold mb-2')
-        
-        # ✨ 修改点：只保留名称输入框，去掉了 server_select 下拉框
-        name_input = ui.input('分组名称', placeholder='例如: 微软云 / 生产环境').classes('w-full').props('outlined')
-        
-        async def save_new_group():
-            new_name = name_input.value.strip()
-            if not new_name:
-                safe_notify("分组名称不能为空", "warning")
-                return
-            
-            # 检查是否重名
-            existing_groups = get_all_groups_set()
-            if new_name in existing_groups:
-                safe_notify("该分组已存在", "warning")
-                return
-
-            # ✨ 修改点：保存到 ADMIN_CONFIG，而不是去修改服务器数据
-            if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
-            ADMIN_CONFIG['custom_groups'].append(new_name)
-            await save_admin_config()
-            
-            d.close()
-            render_sidebar_content.refresh()
-            safe_notify(f"已创建分组: {new_name}", "positive")
-
-        with ui.row().classes('w-full justify-end gap-2 mt-4'):
-             ui.button('取消', on_click=d.close).props('flat color=grey')
-             ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
+                ui.button('删除 / 卸载配置', icon='delete', on_click=open_delete_confirm).props('flat').classes(btn_keycap_delete)
     d.open()
     
 # ================= [极简导出版 - 完美居中] 数据备份/恢复 (批量增强版) =================
@@ -5380,7 +5460,83 @@ async def refresh_dashboard_ui():
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
 
-# ================= 核心：仪表盘主视图渲染 =================
+
+# ================= 核心：前端轮询用的纯数据接口 (API) =================
+@app.get('/api/dashboard/live_data')
+def get_dashboard_live_data():
+    data = calculate_dashboard_data()
+    return data if data else {"error": "Calculation failed"}
+
+
+
+# ================= 辅助：统一数据计算逻辑 =================
+def calculate_dashboard_data():
+    """
+    计算并返回当前所有面板数据。
+    供 API 和 页面初始化 共用。
+    """
+    try:
+        total_servers = len(SERVERS_CACHE)
+        online_servers = 0
+        total_nodes = 0
+        total_traffic_bytes = 0
+        
+        server_traffic_map = {}
+        from collections import Counter
+        protocol_count = Counter()
+        country_counter = Counter()
+
+        for s in SERVERS_CACHE:
+            res = NODES_DATA.get(s['url'], [])
+            name = s.get('name', '未命名')
+            
+            # 统计区域
+            try:
+                region_str = detect_country_group(name, s)
+                if not region_str or region_str.strip() == "🏳️": region_str = "🏳️ 未知区域"
+            except: region_str = "🏳️ 未知区域"
+            country_counter[region_str] += 1
+
+            if res:
+                online_servers += 1
+                total_nodes += len(res)
+                srv_traffic = 0
+                for n in res: 
+                    t = int(n.get('up', 0)) + int(n.get('down', 0))
+                    total_traffic_bytes += t
+                    srv_traffic += t
+                    proto = str(n.get('protocol', 'unknown')).upper()
+                    protocol_count[proto] += 1
+                server_traffic_map[name] = srv_traffic
+            else:
+                server_traffic_map[name] = 0
+
+        # 构建图表数据
+        sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15]
+        bar_names = [x[0] for x in sorted_traffic]
+        bar_values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
+
+        chart_data = []
+        sorted_regions = country_counter.most_common()
+        top_5 = sorted_regions[:5]
+        for region, count in top_5: chart_data.append({'name': f"{region} ({count})", 'value': count})
+        others_count = sum(count for _, count in sorted_regions[5:])
+        if others_count > 0: chart_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
+        if not chart_data: chart_data = [{'name': '暂无数据', 'value': 0}]
+
+        return {
+            "servers": f"{online_servers}/{total_servers}",
+            "nodes": str(total_nodes),
+            "traffic": f"{total_traffic_bytes/(1024**3):.2f} GB",
+            "subs": str(len(SUBS_CACHE)),
+            "bar_chart": {"names": bar_names, "values": bar_values},
+            "pie_chart": chart_data
+        }
+    except:
+        return None
+
+
+# ================= 核心：仪表盘主视图渲染 (V102：预填充数据完美版) =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
@@ -5390,124 +5546,121 @@ async def load_dashboard_stats():
     content_container.clear()
     content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
     
+    # ✨ 第一道保险：Python 端先计算一次初始数据
+    # 这样页面加载完成的瞬间，图表就有数据，不会白屏
+    init_data = calculate_dashboard_data()
+    
+    # 如果刚启动没数据，给个默认空值防止报错
+    if not init_data:
+        init_data = {
+            "servers": "0/0", "nodes": "0", "traffic": "0 GB", "subs": "0",
+            "bar_chart": {"names": [], "values": []}, "pie_chart": []
+        }
+
     with content_container:
+        # JS 轮询脚本 (第二道保险：负责后续的静默更新)
+        ui.run_javascript("""
+        if (window.dashInterval) clearInterval(window.dashInterval);
+        window.dashInterval = setInterval(async () => {
+            if (document.hidden) return;
+            try {
+                const res = await fetch('/api/dashboard/live_data');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.error) return;
+
+                const ids = ['stat-servers', 'stat-nodes', 'stat-traffic', 'stat-subs'];
+                const keys = ['servers', 'nodes', 'traffic', 'subs'];
+                ids.forEach((id, i) => {
+                    const el = document.getElementById(id);
+                    if (el) el.innerText = data[keys[i]];
+                });
+
+                const barDom = document.getElementById('chart-bar');
+                if (barDom) {
+                    const chart = echarts.getInstanceByDom(barDom);
+                    if (chart) {
+                        chart.setOption({
+                            xAxis: { data: data.bar_chart.names },
+                            series: [{ data: data.bar_chart.values }]
+                        });
+                    }
+                }
+                
+                const pieDom = document.getElementById('chart-pie');
+                if (pieDom) {
+                    const chart = echarts.getInstanceByDom(pieDom);
+                    if (chart) {
+                        chart.setOption({
+                            series: [{ data: data.pie_chart }]
+                        });
+                    }
+                }
+            } catch (e) {}
+        }, 3000);
+        """)
+
         ui.label('系统概览').classes('text-3xl font-bold mb-6 text-slate-800 tracking-tight')
         
-        # === A. 顶部统计卡片 (保持不变) ===
+        # === A. 顶部统计卡片 (使用 init_data 填充初始值) ===
         with ui.row().classes('w-full gap-6 mb-8 items-stretch'):
-            def create_stat_card(key, title, sub_text, icon, gradient):
+            def create_stat_card(dom_id, title, sub_text, icon, gradient, init_val):
                 with ui.card().classes(f'flex-1 p-6 shadow-lg border-none text-white {gradient} rounded-xl transform hover:scale-105 transition duration-300 relative overflow-hidden'):
                     ui.element('div').classes('absolute -right-6 -top-6 w-24 h-24 bg-white opacity-10 rounded-full')
                     with ui.row().classes('items-center justify-between w-full relative z-10'):
                         with ui.column().classes('gap-1'):
                             ui.label(title).classes('opacity-80 text-xs font-bold uppercase tracking-wider')
-                            DASHBOARD_REFS[key] = ui.label('Wait...').classes('text-3xl font-extrabold tracking-tight')
+                            # ✨ 这里填入 init_val
+                            ui.label(init_val).props(f'id={dom_id}').classes('text-3xl font-extrabold tracking-tight')
                             ui.label(sub_text).classes('opacity-70 text-xs font-medium')
                         ui.icon(icon).classes('text-4xl opacity-80')
 
-            create_stat_card('servers', '在线服务器', 'Online / Total', 'dns', 'bg-gradient-to-br from-blue-500 to-indigo-600')
-            create_stat_card('nodes', '节点总数', 'Active Nodes', 'hub', 'bg-gradient-to-br from-purple-500 to-pink-600')
-            create_stat_card('traffic', '总流量消耗', 'Upload + Download', 'bolt', 'bg-gradient-to-br from-emerald-500 to-teal-600')
-            create_stat_card('subs', '订阅配置', 'Subscriptions', 'rss_feed', 'bg-gradient-to-br from-orange-400 to-red-500')
+            create_stat_card('stat-servers', '在线服务器', 'Online / Total', 'dns', 'bg-gradient-to-br from-blue-500 to-indigo-600', init_data['servers'])
+            create_stat_card('stat-nodes', '节点总数', 'Active Nodes', 'hub', 'bg-gradient-to-br from-purple-500 to-pink-600', init_data['nodes'])
+            create_stat_card('stat-traffic', '总流量消耗', 'Upload + Download', 'bolt', 'bg-gradient-to-br from-emerald-500 to-teal-600', init_data['traffic'])
+            create_stat_card('stat-subs', '订阅配置', 'Subscriptions', 'rss_feed', 'bg-gradient-to-br from-orange-400 to-red-500', init_data['subs'])
 
-        # === B. 图表区域 ===
+        # === B. 图表区域 (使用 init_data 填充初始图表) ===
         with ui.row().classes('w-full gap-6 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
             
-            # --- 第三张卡片：流量排行 (保持不变) ---
+            # --- 流量排行 ---
             with ui.card().classes('w-full xl:w-2/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-lg font-bold text-slate-700')
-                    ui.badge('Live', color='indigo').props('outline') 
-                DASHBOARD_REFS['bar_chart'] = ui.echart({
+                    with ui.row().classes('items-center gap-1 px-2 py-1 bg-green-50 rounded-full border border-green-200'):
+                        ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 animate-pulse')
+                        ui.label('Live').classes('text-xs font-bold text-green-700')
+                
+                # ✨ 这里直接把 data 填进去，不要留空
+                ui.echart({
                     'tooltip': {'trigger': 'axis'},
                     'grid': {'left': '3%', 'right': '4%', 'bottom': '3%', 'containLabel': True},
-                    'xAxis': {'type': 'category', 'data': [], 'axisLabel': {'interval': 0, 'rotate': 30, 'color': '#64748b'}},
+                    'xAxis': {'type': 'category', 'data': init_data['bar_chart']['names'], 'axisLabel': {'interval': 0, 'rotate': 30, 'color': '#64748b'}},
                     'yAxis': {'type': 'value', 'splitLine': {'lineStyle': {'type': 'dashed', 'color': '#f1f5f9'}}},
-                    'series': [{'type': 'bar', 'data': [], 'barWidth': '40%', 'itemStyle': {'borderRadius': [4, 4, 0, 0], 'color': '#6366f1'}}]
-                }).classes('w-full h-64')
+                    'series': [{'type': 'bar', 'data': init_data['bar_chart']['values'], 'barWidth': '40%', 'itemStyle': {'borderRadius': [4, 4, 0, 0], 'color': '#6366f1'}}]
+                }).classes('w-full h-64').props('id=chart-bar')
 
-            # --- ✨✨✨ 第四张卡片：服务器区域分布 (Top 5 + 其他) ✨✨✨ ---
+            # --- 区域分布 ---
             with ui.card().classes('w-full xl:w-1/3 p-6 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 ui.label('🌏 服务器分布').classes('text-lg font-bold text-slate-700 mb-2')
                 
-                # --- 1. 数据统计逻辑 ---
-                from collections import Counter
-                country_counter = Counter()
+                color_palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#6366f1', '#ec4899', '#14b8a6', '#f97316']
                 
-                if SERVERS_CACHE:
-                    for s in SERVERS_CACHE:
-                        try:
-                            region_str = detect_country_group(s.get('name', ''), s)
-                            if not region_str or region_str.strip() == "🏳️":
-                                region_str = "🏳️ 未知区域"
-                        except:
-                            region_str = "🏳️ 未知区域"
-                        country_counter[region_str] += 1
-                else:
-                    country_counter["暂无数据"] = 1
-
-                # --- 2. Top 5 + "其他" 分组逻辑 ---
-                sorted_counts = country_counter.most_common()
-                chart_data = []
-                
-                top_5 = sorted_counts[:5]
-                for region, count in top_5:
-                    chart_data.append({'name': f"{region} ({count})", 'value': count})
-                
-                others_count = sum(count for _, count in sorted_counts[5:])
-                if others_count > 0:
-                    chart_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
-
-                # --- 3. ECharts 图表配置 (尺寸已调整) ---
-                color_palette = [
-                    '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', 
-                    '#6366f1', '#ec4899', '#14b8a6', '#f97316'
-                ]
-                
+                # ✨ 这里也是直接填入 init_data
                 ui.echart({
-                    'tooltip': {
-                        'trigger': 'item',
-                        'formatter': '{b}: <br/><b>{c} 台</b> ({d}%)'
-                    },
-                    'legend': {
-                        'bottom': '0%',
-                        'left': 'center',
-                        'icon': 'circle',
-                        'itemGap': 15,
-                        # ✨ 修改 1：字体变大到 13
-                        'textStyle': {'color': '#64748b', 'fontSize': 13}
-                    },
+                    'tooltip': {'trigger': 'item', 'formatter': '{b}: <br/><b>{c} 台</b> ({d}%)'},
+                    'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': '#64748b', 'fontSize': 13}},
                     'color': color_palette,
-                    'series': [
-                        {
-                            'name': '服务器分布',
-                            'type': 'pie',
-                            # ✨ 修改 2：圆环变大变粗 (55% -> 85%)
-                            'radius': ['35%', '75%'],
-                            'center': ['50%', '45%'],
-                            'avoidLabelOverlap': False,
-                            'itemStyle': {
-                                'borderRadius': 5,
-                                'borderColor': '#fff',
-                                'borderWidth': 2
-                            },
-                            'label': { 'show': False, 'position': 'center' },
-                            'emphasis': {
-                                'label': {
-                                    'show': True,
-                                    'fontSize': 18, # 中间高亮文字也稍微加大
-                                    'fontWeight': 'bold',
-                                    'color': '#334155'
-                                },
-                                'scale': True,
-                                'scaleSize': 5
-                            },
-                            'labelLine': { 'show': False },
-                            'data': chart_data
-                        }
-                    ]
-                # ✨ 修改 3：容器高度增加到 h-80 (约320px)
-                }).classes('w-full h-80')
+                    'series': [{
+                        'name': '服务器分布', 'type': 'pie', 'radius': ['35%', '75%'], 'center': ['50%', '45%'],
+                        'avoidLabelOverlap': False,
+                        'itemStyle': {'borderRadius': 5, 'borderColor': '#fff', 'borderWidth': 2},
+                        'label': { 'show': False, 'position': 'center' },
+                        'emphasis': {'label': {'show': True, 'fontSize': 18, 'fontWeight': 'bold', 'color': '#334155'}, 'scale': True, 'scaleSize': 5},
+                        'labelLine': { 'show': False },
+                        'data': init_data['pie_chart']
+                    }]
+                }).classes('w-full h-80').props('id=chart-pie')
 
         # === C. 底部地图区域 (保持不变) ===
         with ui.row().classes('w-full gap-6 mb-6'):
@@ -5516,21 +5669,16 @@ async def load_dashboard_stats():
                     with ui.row().classes('gap-2 items-center'):
                         ui.icon('public', color='blue-4').classes('text-xl')
                         ui.label('全球节点实景 (Global View)').classes('text-lg font-bold text-white')
-                    DASHBOARD_REFS['map_info'] = ui.label('渲染中...').classes('text-xs text-gray-400')
+                    ui.label('Live Rendering').classes('text-xs text-gray-400')
 
                 globe_data_list = []
                 seen_locations = set()
                 total_server_count = len(SERVERS_CACHE)
-
-                flag_map_py = {
-                    'CN':'China', 'HK':'Hong Kong', 'TW':'Taiwan', 'US':'United States', 'JP':'Japan', 
-                    'KR':'South Korea', 'SG':'Singapore', 'RU':'Russia', 'DE':'Germany', 'GB':'United Kingdom'
-                }
+                flag_map_py = {'CN':'China', 'HK':'Hong Kong', 'TW':'Taiwan', 'US':'United States', 'JP':'Japan', 'KR':'South Korea', 'SG':'Singapore', 'RU':'Russia', 'DE':'Germany', 'GB':'United Kingdom'}
 
                 for s in SERVERS_CACHE:
                     lat, lon = None, None
-                    if 'lat' in s and 'lon' in s:
-                        lat, lon = s['lat'], s['lon']
+                    if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
                     else:
                         coords = get_coords_from_name(s.get('name', ''))
                         if coords: lat, lon = coords[0], coords[1]
@@ -5539,29 +5687,20 @@ async def load_dashboard_stats():
                         coord_key = (round(lat, 2), round(lon, 2))
                         if coord_key not in seen_locations:
                             seen_locations.add(coord_key)
-                            
                             flag_only = "📍"
                             country_name = s.get('_detected_region', '')
                             try:
                                 full_group = detect_country_group(s.get('name', ''), s)
                                 flag_only = full_group.split(' ')[0]
-                                if not country_name and flag_only in flag_map_py:
-                                    country_name = flag_map_py[flag_only]
+                                if not country_name and flag_only in flag_map_py: country_name = flag_map_py[flag_only]
                             except: pass
-                            
-                            globe_data_list.append({
-                                'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name
-                            })
+                            globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name})
 
                 import json
                 json_data = json.dumps(globe_data_list, ensure_ascii=False)
-                
                 ui.html(GLOBE_STRUCTURE, sanitize=False).classes('w-full h-[850px] overflow-hidden')
                 ui.run_javascript(f'window.GLOBE_DATA = {json_data}; window.SERVER_TOTAL = {total_server_count};')
                 ui.run_javascript(GLOBE_JS_LOGIC)
-                DASHBOARD_REFS['map'] = None
-
-    await refresh_dashboard_ui()
         
 # ================= 全能批量编辑器 =================
 class BulkEditor:
@@ -6133,43 +6272,71 @@ def open_combined_group_management(group_name):
 
     d.open()
     
-# ================= [侧边栏渲染：艺术字标题版] =================
-_current_dragged_group = None
+# ================= 快捷创建分组弹窗 (必须放在 render_sidebar_content 之前) =================
+def open_create_group_dialog():
+    with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
+        ui.label('新建自定义分组').classes('text-lg font-bold mb-2')
+        
+        name_input = ui.input('分组名称', placeholder='例如: 微软云 / 生产环境').classes('w-full').props('outlined')
+        
+        async def save_new_group():
+            new_name = name_input.value.strip()
+            if not new_name:
+                safe_notify("分组名称不能为空", "warning")
+                return
+            
+            # 检查是否重名
+            existing_groups = get_all_groups_set()
+            if new_name in existing_groups:
+                safe_notify("该分组已存在", "warning")
+                return
+
+            if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
+            ADMIN_CONFIG['custom_groups'].append(new_name)
+            await save_admin_config()
+            
+            d.close()
+            render_sidebar_content.refresh()
+            safe_notify(f"已创建分组: {new_name}", "positive")
+
+        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+             ui.button('取消', on_click=d.close).props('flat color=grey')
+             ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
+    d.open()
+
+# ================= [侧边栏渲染：V90 纯净灰3D键帽版] =================
+
+# 👇 这一句必须保留在函数外
+_current_dragged_group = None 
 
 @ui.refreshable
 def render_sidebar_content():
     global _current_dragged_group
 
-    # --- 通用 3D 按钮样式 ---
-    btn_3d_style = (
+    # --- 1. 顶部固定区域 ---
+    btn_top_style = (
         'w-full bg-white border border-gray-200 rounded-lg shadow-sm '
-        'text-slate-700 font-medium px-3 py-2 '
+        'text-gray-600 font-medium px-3 py-2 '
         'transition-all duration-200 ease-out '
-        'hover:shadow-md hover:-translate-y-0.5 hover:border-blue-300 hover:text-blue-600 '
+        'hover:shadow-md hover:-translate-y-0.5 hover:border-gray-300 hover:text-gray-900 '
         'active:translate-y-0 active:shadow-none active:bg-gray-50 active:scale-[0.98]'
     )
     
-    # --- 1. 顶部固定区域 (带水印) ---
     with ui.column().classes('w-full p-4 border-b bg-gray-50 flex-shrink-0 relative overflow-hidden'):
-        
-        # ✨ 水印：位于右上角 ✨
         ui.label('X-Fusion').classes(
-            'absolute top-2 right-6 text-[3rem] font-black text-slate-300 '
-            'opacity-20 pointer-events-none -rotate-12 select-none z-0 tracking-tighter leading-tight'
+            'absolute top-2 right-6 text-[3rem] font-black text-gray-200 '
+            'opacity-30 pointer-events-none -rotate-12 select-none z-0 tracking-tighter leading-tight'
         )
-
-        # ✨✨✨ [修改] 艺术字标题 ✨✨✨
-        # 使用 bg-clip-text 实现渐变色文字效果
         ui.label('X-Fusion Panel').classes(
             'text-2xl font-black mb-4 z-10 relative '
-            'bg-gradient-to-r from-blue-600 via-purple-600 to-pink-500 bg-clip-text text-transparent '
+            'bg-gradient-to-r from-gray-700 to-black bg-clip-text text-transparent '
             'tracking-wide drop-shadow-sm'
         )
         
         with ui.column().classes('w-full gap-2 z-10 relative'):
-            ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes(btn_3d_style)
-            ui.button('探针设置', icon='tune', on_click=render_probe_page).props('flat align=left').classes(btn_3d_style)
-            ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes(btn_3d_style)
+            ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes(btn_top_style)
+            ui.button('探针设置', icon='tune', on_click=render_probe_page).props('flat align=left').classes(btn_top_style)
+            ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes(btn_top_style)
             
     # --- 2. 列表区域 ---
     with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-2 bg-slate-50'):
@@ -6177,35 +6344,56 @@ def render_sidebar_content():
         # 功能按钮
         with ui.row().classes('w-full gap-2 px-1 mb-2'):
             func_btn_base = (
-                'flex-grow text-xs font-bold text-white rounded-lg shadow-md '
-                'transition-all duration-150 hover:-translate-y-0.5 hover:shadow-lg '
-                'active:translate-y-0 active:shadow-sm active:scale-[0.98]'
+                'flex-grow text-xs font-bold text-white rounded-lg '
+                'border-b-4 active:border-b-0 active:translate-y-[4px] transition-all '
             )
-            ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-600 hover:bg-blue-500 {func_btn_base}')
-            ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes(f'bg-green-600 hover:bg-green-500 {func_btn_base}')
+            # ✨ 这里的 open_create_group_dialog 现在能找到了
+            ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-500 border-blue-700 hover:bg-blue-400 {func_btn_base}')
+            ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes(f'bg-green-500 border-green-700 hover:bg-green-400 {func_btn_base}')
 
         # --- A. 全部服务器 ---
         list_item_3d = (
             'w-full items-center justify-between p-3 border border-gray-200 rounded-xl mb-1 '
             'bg-white shadow-sm cursor-pointer group '
             'transition-all duration-200 '
-            'hover:shadow-md hover:-translate-y-0.5 hover:border-blue-300 '
+            'hover:shadow-md hover:-translate-y-0.5 hover:border-gray-300 '
             'active:translate-y-0 active:shadow-none active:bg-gray-50 active:scale-[0.98]'
         )
         
         with ui.row().classes(list_item_3d).on('click', lambda _: refresh_content('ALL')):
             with ui.row().classes('items-center gap-3'):
-                with ui.column().classes('p-1.5 bg-blue-50 rounded-lg group-hover:bg-blue-100 transition-colors'):
-                    ui.icon('dns', color='primary').classes('text-sm')
-                ui.label('所有服务器').classes('font-bold text-slate-700')
+                with ui.column().classes('p-1.5 bg-gray-100 rounded-lg group-hover:bg-gray-200 transition-colors'):
+                    ui.icon('dns', color='grey-8').classes('text-sm')
+                ui.label('所有服务器').classes('font-bold text-gray-700')
             ui.badge(str(len(SERVERS_CACHE)), color='blue').props('rounded outline')
 
-        # --- B. ✨✨✨ [修复] 自定义分组 ✨✨✨ ---
+        # ==============================================================================
+        # 纯灰 3D 键帽样式定义
+        # ==============================================================================
+        
+        btn_keycap_base = (
+            'bg-white '                                     
+            'border-t border-x border-gray-200 border-b-[3px] border-b-gray-300 ' 
+            'rounded-lg '                                   
+            'transition-all duration-100 '                  
+            'active:border-b-0 active:border-t-[3px] active:translate-y-[3px] ' 
+        )
+
+        btn_name_cls = (
+            f'{btn_keycap_base} flex-grow text-xs font-bold text-gray-700 truncate px-3 py-2.5 '
+            'hover:bg-gray-50 hover:text-black hover:border-gray-400'
+        )
+        
+        btn_settings_cls = (
+            f'{btn_keycap_base} w-10 py-2.5 px-0 flex items-center justify-center text-gray-400 '
+            'hover:text-gray-700 hover:bg-gray-50 hover:border-gray-400'
+        )
+
+        # --- B. 自定义分组 ---
         custom_groups = ADMIN_CONFIG.get('custom_groups', [])
         if custom_groups:
             ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-4 mb-2 px-2 uppercase tracking-wider')
             for tag_group in custom_groups:
-                # ✨✨✨ 修复：增加类型检查，防止因脏数据导致网页打不开 ✨✨✨
                 tag_servers = [
                     s for s in SERVERS_CACHE 
                     if isinstance(s, dict) and (tag_group in s.get('tags', []) or s.get('group') == tag_group)
@@ -6215,10 +6403,8 @@ def render_sidebar_content():
 
                 is_open = tag_group in EXPANDED_GROUPS
                 
-                # 样式：移除 overflow-hidden，防止内容被遮挡
                 group_card_cls = 'w-full border border-gray-200 rounded-xl mb-2 bg-white shadow-sm transition-all duration-300'
                 
-                # 关键修复：移除 .props('group')，只保留 expand-icon-toggle
                 with ui.expansion('', icon='folder', value=is_open).classes(group_card_cls).props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                     with exp.add_slot('header'):
                         header_cls = (
@@ -6226,20 +6412,15 @@ def render_sidebar_content():
                             'hover:bg-gray-50 transition-all duration-200 active:bg-gray-100 active:scale-[0.98]'
                         )
                         with ui.row().classes(header_cls).on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
-                            ui.label(tag_group).classes('flex-grow font-bold text-slate-700 truncate pl-2')
-                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-4').classes('hover:text-blue-500').on('click.stop')
+                            ui.label(tag_group).classes('flex-grow font-bold text-gray-700 truncate pl-2')
+                            ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-4').classes('hover:text-gray-700').on('click.stop')
                             ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey').props('rounded outline')
                     
-                    with ui.column().classes('w-full gap-1 p-1 bg-gray-50/50'):
+                    with ui.column().classes('w-full gap-2 p-2 bg-gray-50/50'):
                         for s in tag_servers:
-                            sub_item_cls = (
-                                'w-full justify-between items-center p-2 pl-3 rounded-lg border border-transparent '
-                                'hover:bg-white hover:shadow-sm hover:border-gray-200 transition-all duration-200 cursor-pointer '
-                                'active:scale-[0.97]'
-                            )
-                            with ui.row().classes(sub_item_cls).on('click', lambda _, s=s: refresh_content('SINGLE', s)):
-                                ui.label(s['name']).classes('text-xs font-medium text-slate-600 truncate flex-grow')
-                                ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey-4').classes('hover:text-blue-600').on('click.stop')
+                            with ui.row().classes('w-full gap-2 no-wrap items-stretch'):
+                                ui.button(s['name'], on_click=lambda _, s=s: refresh_content('SINGLE', s)).props('no-caps align=left flat text-color=grey-8').classes(btn_name_cls)
+                                ui.button(icon='settings', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat square size=sm text-color=grey-5').classes(btn_settings_cls).tooltip('配置 / 删除')
 
         # --- C. 区域分组 ---
         ui.label('区域分组').classes('text-xs font-bold text-gray-400 mt-4 mb-2 px-2 uppercase tracking-wider')
@@ -6277,7 +6458,6 @@ def render_sidebar_content():
                     render_sidebar_content.refresh()
             except: pass
 
-        # ---------------- 渲染区域列表 ----------------
         with ui.column().classes('w-full gap-2 pb-4'):
             for c_name in sorted_regions:
                 c_servers = country_buckets[c_name]
@@ -6291,7 +6471,7 @@ def render_sidebar_content():
 
                     group_card_cls = (
                         'w-full border border-gray-200 rounded-xl bg-white shadow-sm transition-all duration-300 '
-                        'hover:border-blue-200 hover:shadow-md'
+                        'hover:border-gray-300 hover:shadow-md'
                     )
                     
                     with ui.expansion('', icon=None, value=is_open).classes(group_card_cls).props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
@@ -6302,41 +6482,30 @@ def render_sidebar_content():
                             )
                             with ui.row().classes(header_cls).on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                                 with ui.row().classes('items-center gap-3 flex-grow overflow-hidden'):
-                                    
-                                    ui.icon('drag_indicator').props('draggable="true"').classes(
-                                        'cursor-move text-gray-300 hover:text-blue-500 p-1 rounded transition-colors group-hover/header:text-gray-400'
-                                    ).on('dragstart', lambda e, n=c_name: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
-                                    
+                                    ui.icon('drag_indicator').props('draggable="true"').classes('cursor-move text-gray-300 hover:text-gray-500 p-1 rounded transition-colors group-hover/header:text-gray-400').on('dragstart', lambda e, n=c_name: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
                                     with ui.row().classes('items-center gap-2 flex-grow'):
                                         flag = c_name.split(' ')[0] if ' ' in c_name else '🏳️'
                                         ui.label(flag).classes('text-lg filter drop-shadow-sm')
                                         display_name = c_name.split(' ')[1] if ' ' in c_name else c_name
-                                        ui.label(display_name).classes('font-bold text-slate-700 truncate')
+                                        ui.label(display_name).classes('font-bold text-gray-700 truncate')
                                 
                                 with ui.row().classes('items-center gap-2 pr-2').on('mousedown.stop').on('click.stop'):
-                                    ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey-4').classes('hover:text-blue-600').tooltip('批量管理')
+                                    ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey-4').classes('hover:text-gray-600').tooltip('批量管理')
                                     ui.badge(str(len(c_servers)), color='green').props('rounded outline').classes('font-mono font-bold')
 
-                        with ui.column().classes('w-full gap-1 p-1 bg-slate-50/80 border-t border-gray-100'):
+                        with ui.column().classes('w-full gap-2 p-2 bg-slate-50/80 border-t border-gray-100'):
                             for s in c_servers:
-                                sub_item_cls = (
-                                    'w-full justify-between items-center p-2 pl-4 rounded-lg border border-transparent '
-                                    'hover:bg-white hover:shadow-sm hover:border-blue-100 transition-all duration-200 cursor-pointer '
-                                    'active:scale-[0.97] active:bg-gray-100'
-                                )
-                                with ui.row().classes(sub_item_cls).on('click', lambda _, s=s: refresh_content('SINGLE', s)):
-                                    ui.label(s['name']).classes('text-xs font-medium text-slate-600 truncate flex-grow')
-                                    with ui.row().classes('gap-1 items-center'):
-                                        ui.button(icon='edit', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat dense round size=xs color=grey-4').classes('hover:text-blue-600').on('click.stop')
+                                with ui.row().classes('w-full gap-2 no-wrap items-stretch'):
+                                    ui.button(s['name'], on_click=lambda _, s=s: refresh_content('SINGLE', s)).props('no-caps align=left flat text-color=grey-8').classes(btn_name_cls)
+                                    ui.button(icon='settings', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat square size=sm text-color=grey-5').classes(btn_settings_cls).tooltip('配置 / 删除')
 
     # --- 3. 底部功能区 ---
     with ui.column().classes('w-full p-2 border-t mt-auto mb-4 gap-2 bg-white z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]'):
         bottom_btn_3d = (
-            'w-full text-slate-600 text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 '
+            'w-full text-gray-600 text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 '
             'transition-all duration-200 hover:bg-white hover:shadow-sm hover:border-slate-300 hover:text-slate-800 '
             'active:translate-y-0 active:bg-slate-100 active:scale-[0.98]'
         )
-        
         ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(bottom_btn_3d)
         ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes(bottom_btn_3d)
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes(bottom_btn_3d)
@@ -6671,7 +6840,7 @@ async def job_monitor_status():
                             f"🖥️ **名称**: `{name}`\n"
                             f"🔗 **地址**: `{display_ip}`\n"
                             f"🕒 **时间**: `{current_time}`\n"
-                            f"⚠️ **提示**: 连续监测失败 {current_count} 次"
+                            f"⚠️ **提示**: 连续监测，无法连接"
                         )
                         logger.warning(f"🔔 [报警] {name} 确认离线 (重试{current_count}次)")
                         asyncio.create_task(send_telegram_message(msg))
@@ -6686,14 +6855,21 @@ async def job_monitor_status():
 app.add_static_files('/static', 'static')
 # ================= 优雅的后台任务调度 (APScheduler) =================
 
-# 1. 定义流量同步任务 (单次运行逻辑)
+# 1. 定义流量同步任务 (优化版：统一保存)
 async def job_sync_all_traffic():
     logger.info("🕒 [定时任务] 开始全量同步流量...")
     tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in SERVERS_CACHE]
     if tasks:
+        # 等待所有服务器同步完成
         await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # ✨✨✨ [核心修改]：所有数据拉取完后，统一保存一次到硬盘 ✨✨✨
+        await save_nodes_cache()
+        
+        # 刷新界面
         await refresh_dashboard_ui()
-    logger.info("✅ [定时任务] 流量同步完成")
+        
+    logger.info("✅ [定时任务] 流量同步完成 (已落盘)")
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 (修复版) =================
 async def job_check_geo_ip():
