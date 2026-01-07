@@ -4247,23 +4247,30 @@ async def save_server_config(server_data, is_add=True, idx=None):
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
-    # data 是本地副本，所有的修改（包括保存）都会同步更新到这个副本
     data = original_data.copy()
     
-    # --- 1. 智能检测初始状态 (仅用于控制 UI 面板的显隐) ---
+    # --- 1. 智能检测初始状态 ---
     if is_edit:
         has_xui_conf = bool(data.get('url') and data.get('user') and data.get('pass'))
         raw_ssh_host = data.get('ssh_host')
         if not raw_ssh_host and not has_xui_conf: 
             raw_ssh_host = data.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
-        has_ssh_conf = bool(raw_ssh_host or data.get('ssh_user') or data.get('ssh_key') or data.get('ssh_password'))
-        # 兜底：防止全空def 
+        
+        # ✨✨✨ 核心修复：如果勾选了探针 (probe_installed)，也视为 SSH 已启用 ✨✨✨
+        has_ssh_conf = bool(
+            raw_ssh_host or 
+            data.get('ssh_user') or 
+            data.get('ssh_key') or 
+            data.get('ssh_password') or 
+            data.get('probe_installed') # <--- 新增判定条件
+        )
+        
+        # 兜底
         if not has_ssh_conf and not has_xui_conf: has_ssh_conf = True
     else:
         # 新建模式默认全开
         has_xui_conf = True; has_ssh_conf = True
 
-    # state 仅用于控制“是否显示输入框”的 UI 状态
     state = {'ssh_active': has_ssh_conf, 'xui_active': has_xui_conf}
 
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm p-5 flex flex-col gap-4'):
@@ -4294,7 +4301,7 @@ async def open_server_dialog(idx=None):
             new_server_data = data.copy()
             new_server_data['group'] = final_group
 
-            # --- SSH 保存 ---
+            # --- SSH 保存逻辑 ---
             if panel_type == 'ssh':
                 if not inputs.get('ssh_host'): return
                 s_host = inputs['ssh_host'].value.strip()
@@ -4309,10 +4316,9 @@ async def open_server_dialog(idx=None):
                     'ssh_key': inputs['ssh_key'].value if inputs['ssh_key'] else '',
                     'probe_installed': data.get('probe_installed', True)
                 })
-                # 确保主键 URL 存在
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
-            # --- X-UI 保存 ---
+            # --- X-UI 保存逻辑 ---
             elif panel_type == 'xui':
                 if not inputs.get('xui_url'): return
                 x_url = inputs['xui_url'].value.strip()
@@ -4320,11 +4326,23 @@ async def open_server_dialog(idx=None):
                 x_pass = inputs['xui_pass'].value.strip()
                 if not (x_url and x_user and x_pass): safe_notify("必填项不能为空", "negative"); return
 
+                probe_val = inputs['probe_chk'].value
                 new_server_data.update({
                     'url': x_url, 'user': x_user, 'pass': x_pass,
                     'prefix': inputs['xui_prefix'].value.strip(),
-                    'probe_installed': inputs['probe_chk'].value
+                    'probe_installed': probe_val
                 })
+                
+                # ✨✨✨ 核心修复：如果开启探针但缺失 SSH 信息，自动补全 ✨✨✨
+                if probe_val:
+                    # 1. 补全 Host
+                    if not new_server_data.get('ssh_host'):
+                        if '://' in x_url: new_server_data['ssh_host'] = x_url.split('://')[-1].split(':')[0]
+                        else: new_server_data['ssh_host'] = x_url.split(':')[0]
+                    # 2. 补全默认 SSH 配置 (防止空值导致下次打开显示未启用)
+                    if not new_server_data.get('ssh_port'): new_server_data['ssh_port'] = '22'
+                    if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
+                    if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
 
             # 智能名称
             if not final_name:
@@ -4336,24 +4354,24 @@ async def open_server_dialog(idx=None):
             success = await save_server_config(new_server_data, is_add=not is_edit, idx=idx)
             
             if success:
-                # ✨✨✨ 关键：保存成功后，立即更新本地的 data 和 state ✨✨✨
+                # 更新本地状态
                 data.update(new_server_data)
-                
-                # 更新 UI 状态，确保下次操作（如删除）能识别到新添加的模块
                 if panel_type == 'ssh': state['ssh_active'] = True
                 if panel_type == 'xui': state['xui_active'] = True
+                
+                # 如果 X-UI 保存时开启了探针，也要激活 SSH 状态
+                if panel_type == 'xui' and new_server_data.get('probe_installed'):
+                    state['ssh_active'] = True
 
                 if panel_type == 'ssh' and new_server_data.get('probe_installed'):
                      safe_notify(f"🚀 配置已保存，后台推送 Agent...", "ongoing")
                      asyncio.create_task(install_probe_on_server(new_server_data))
-                elif panel_type == 'xui' and new_server_data.get('probe_installed') and new_server_data.get('ssh_host'):
+                elif panel_type == 'xui' and new_server_data.get('probe_installed'):
                      safe_notify(f"🚀 X-UI保存，尝试推送 Agent...", "ongoing")
+                     # 因为刚刚自动补全了 SSH 信息，所以这里可以安全推送
                      asyncio.create_task(install_probe_on_server(new_server_data))
                 else:
                      safe_notify(f"✅ {panel_type.upper()} 已保存", "positive")
-                
-                # 保持弹窗打开，方便后续操作
-                # d.close() 
 
         # ==================== SSH 面板渲染 ====================
         @ui.refreshable
@@ -4365,9 +4383,13 @@ async def open_server_dialog(idx=None):
                     ui.button('启用 SSH 配置', icon='add', on_click=lambda: _activate_panel('ssh')).props('flat bg-blue-50 text-blue-600')
             else:
                 init_host = data.get('ssh_host')
-                # 兼容纯IP模式
-                if not init_host and is_edit and not has_xui_conf:
-                     init_host = data.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
+                # 兼容性尝试
+                if not init_host and is_edit:
+                     # 尝试从 URL 提取
+                     if '://' in data.get('url', ''):
+                         init_host = data.get('url', '').split('://')[-1].split(':')[0]
+                     else:
+                         init_host = data.get('url', '').split(':')[0]
 
                 inputs['ssh_host'] = ui.input(label='SSH 主机 IP', value=init_host).classes('w-full').props('outlined dense')
                 
@@ -4376,7 +4398,6 @@ async def open_server_dialog(idx=None):
                         inputs['ssh_user'] = ui.input(value=data.get('ssh_user','root'), label='SSH 用户').classes('flex-1').props('outlined dense')
                         inputs['ssh_port'] = ui.input(value=data.get('ssh_port','22'), label='端口').classes('w-1/3').props('outlined dense')
                     
-                    # 校验 select 值
                     valid_auth_options = ['全局密钥', '独立密码', '独立密钥']
                     current_auth = data.get('ssh_auth_type', '全局密钥')
                     if current_auth not in valid_auth_options: current_auth = '全局密钥'
@@ -4444,7 +4465,7 @@ async def open_server_dialog(idx=None):
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 render_xui_panel()
 
-        # ================= 5. 全局删除逻辑 (数据实时扫描版) =================
+        # ================= 5. 全局删除逻辑 =================
         if is_edit:
             with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
                 async def open_delete_confirm():
@@ -4452,26 +4473,18 @@ async def open_server_dialog(idx=None):
                         ui.label('删除确认').classes('text-lg font-bold text-red-600')
                         ui.label('请选择要删除的内容：').classes('text-sm text-gray-600 mb-2')
                         
-                        # ✨✨✨ 核心修复：打开删除弹窗时，实时检查 data 里的数据是否存在 ✨✨✨
-                        # 不再依赖可能滞后的 state，而是直接看“肚子里有没有货”
-                        
-                        # 判断 SSH 是否存在：如果有 host 或 user，就算存在
+                        # 实时检查数据是否存在
                         real_ssh_exists = bool(data.get('ssh_host') or data.get('ssh_user'))
-                        # 判断 X-UI 是否存在：如果有 url 和 user，就算存在
                         real_xui_exists = bool(data.get('url') and data.get('user') and data.get('pass'))
 
-                        # 如果两者都不存在（异常数据），默认认为都存在，防止没法删
                         if not real_ssh_exists and not real_xui_exists:
                             real_ssh_exists = True; real_xui_exists = True
 
                         chk_ssh = ui.checkbox('SSH 连接信息', value=real_ssh_exists).classes('text-sm font-bold')
                         chk_xui = ui.checkbox('X-UI 面板信息', value=real_xui_exists).classes('text-sm font-bold')
                         
-                        # 逻辑：如果本身就没有数据，禁用复选框
                         if not real_ssh_exists: chk_ssh.value = False; chk_ssh.disable()
                         if not real_xui_exists: chk_xui.value = False; chk_xui.disable()
-                        
-                        # 逻辑：如果只剩一项有效配置，强制勾选（防止删成空壳）
                         if real_ssh_exists and not real_xui_exists: chk_ssh.disable()
                         if real_xui_exists and not real_ssh_exists: chk_xui.disable()
 
@@ -4482,13 +4495,11 @@ async def open_server_dialog(idx=None):
                             will_delete_ssh = chk_ssh.value
                             will_delete_xui = chk_xui.value
                             
-                            # 预测删完后的状态
                             remaining_ssh = real_ssh_exists and not will_delete_ssh
                             remaining_xui = real_xui_exists and not will_delete_xui
                             
                             is_full_delete = False
 
-                            # 如果删完后两手空空 -> 彻底删除
                             if not remaining_ssh and not remaining_xui:
                                 SERVERS_CACHE.pop(idx)
                                 u = target_srv.get('url'); p_u = target_srv.get('ssh_host') or u
@@ -4498,20 +4509,17 @@ async def open_server_dialog(idx=None):
                                 safe_notify('✅ 服务器已彻底删除', 'positive')
                                 is_full_delete = True
                             else:
-                                # 局部清除
                                 if will_delete_ssh:
                                     for k in ['ssh_host', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key', 'ssh_auth_type']: target_srv[k] = ''
                                     target_srv['probe_installed'] = False
-                                    # 更新本地状态
                                     state['ssh_active'] = False
-                                    # 同时也清空本地 data，防止还没关弹窗又点保存
                                     data['ssh_host'] = ''
                                     safe_notify('✅ SSH 信息已清除', 'positive')
                                 
                                 if will_delete_xui:
                                     for k in ['url', 'user', 'pass', 'prefix']: target_srv[k] = ''
                                     state['xui_active'] = False
-                                    data['url'] = '' # 清空本地标识
+                                    data['url'] = '' 
                                     safe_notify('✅ X-UI 信息已清除', 'positive')
 
                             await save_servers()
