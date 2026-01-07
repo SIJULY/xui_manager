@@ -1703,9 +1703,9 @@ async def install_probe_on_server(server_conf):
     manager_url = ADMIN_CONFIG.get('manager_base_url', 'http://xui-manager:8080') 
     
     # 2. 获取自定义测速点 (如果没有设置，使用默认值)
-    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 安徽电信
-    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通骨干
-    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动骨干
+    ping_ct = ADMIN_CONFIG.get('ping_target_ct', '202.102.192.68') # 电信
+    ping_cu = ADMIN_CONFIG.get('ping_target_cu', '112.122.10.26')  # 联通
+    ping_cm = ADMIN_CONFIG.get('ping_target_cm', '211.138.180.2')  # 移动
 
     # 3. 替换脚本中的变量
     real_script = PROBE_INSTALL_SCRIPT \
@@ -7199,9 +7199,9 @@ def open_pc_server_detail(server_conf):
                                 refs[f'{key}_cur'] = ui.label('--').classes(f'text-2xl font-black font-mono text-[#1e293b] dark:text-white')
                                 ui.label('ms').classes('text-gray-500 text-[10px]')
                     
-                    ping_card('安徽电信', 'blue', 'ping_ct', 0)
-                    ping_card('安徽联通', 'orange', 'ping_cu', 1)
-                    ping_card('安徽移动', 'green', 'ping_cm', 2)
+                    ping_card('电信', 'blue', 'ping_ct', 0)
+                    ping_card('联通', 'orange', 'ping_cu', 1)
+                    ping_card('移动', 'green', 'ping_cm', 2)
 
                 # 第三行：趋势图 (背景适配)
                 with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
