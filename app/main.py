@@ -821,21 +821,18 @@ GLOBE_STRUCTURE = r"""
     <div id="earth-render-area" style="width:100%; height:100%;"></div>
 </div>
 """
-# ================= 2D 平面地图：JS 逻辑  =================
+# ================= 2D 平面地图：JS 逻辑 (已锁定视角) =================
 GLOBE_JS_LOGIC = r"""
 (function() {
     const serverData = window.GLOBE_DATA || [];
-    // ✨✨✨ 获取 Python 传过来的真实总数 ✨✨✨
     const realTotal = window.SERVER_TOTAL || serverData.length;
     
     const container = document.getElementById('earth-render-area');
     if (!container) return;
 
-    // 更新统计面板
     const nodeCountEl = document.getElementById('node-count');
     const regionCountEl = document.getElementById('region-count');
     
-    // ✨ 修复：显示真实总数 84，而不是地图上的点数 33
     if(nodeCountEl) nodeCountEl.textContent = realTotal;
     
     const uniqueRegions = new Set(serverData.map(s => s.name));
@@ -843,14 +840,10 @@ GLOBE_JS_LOGIC = r"""
 
     const myChart = echarts.init(container);
 
-    // ✨✨✨ 1. 终极国旗/名称 -> 搜索关键词映射 (支持全球主要地区) ✨✨✨
     const searchKeys = {
-        // --- 北美 ---
         '🇺🇸': 'United States', 'US': 'United States', 'USA': 'United States',
         '🇨🇦': 'Canada', 'CA': 'Canada',
         '🇲🇽': 'Mexico', 'MX': 'Mexico',
-        
-        // --- 欧洲 ---
         '🇬🇧': 'United Kingdom', 'UK': 'United Kingdom', 'GB': 'United Kingdom',
         '🇩🇪': 'Germany', 'DE': 'Germany',
         '🇫🇷': 'France', 'FR': 'France',
@@ -871,10 +864,8 @@ GLOBE_JS_LOGIC = r"""
         '🇵🇹': 'Portugal', 'PT': 'Portugal',
         '🇬🇷': 'Greece', 'GR': 'Greece',
         '🇩🇰': 'Denmark', 'DK': 'Denmark',
-        
-        // --- 亚太 ---
         '🇨🇳': 'China', 'CN': 'China',
-        '🇭🇰': 'China', 'HK': 'China', // ECharts China 包含 HK
+        '🇭🇰': 'China', 'HK': 'China', 
         '🇲🇴': 'China', 'MO': 'China',
         '🇹🇼': 'Taiwan', 'TW': 'Taiwan',
         '🇯🇵': 'Japan', 'JP': 'Japan',
@@ -889,8 +880,6 @@ GLOBE_JS_LOGIC = r"""
         '🇮🇩': 'Indonesia', 'ID': 'Indonesia',
         '🇵🇭': 'Philippines', 'PH': 'Philippines',
         '🇰🇭': 'Cambodia', 'KH': 'Cambodia',
-        
-        // --- 中东/非洲 ---
         '🇦🇪': 'United Arab Emirates', 'UAE': 'United Arab Emirates', 'AE': 'United Arab Emirates',
         '🇿🇦': 'South Africa', 'ZA': 'South Africa',
         '🇸🇦': 'Saudi Arabia', 'SA': 'Saudi Arabia',
@@ -898,8 +887,6 @@ GLOBE_JS_LOGIC = r"""
         '🇪🇬': 'Egypt', 'EG': 'Egypt',
         '🇮🇷': 'Iran', 'IR': 'Iran',
         '🇳🇬': 'Nigeria', 'NG': 'Nigeria',
-        
-        // --- 南美 ---
         '🇧🇷': 'Brazil', 'BR': 'Brazil',
         '🇦🇷': 'Argentina', 'AR': 'Argentina',
         '🇨🇱': 'Chile', 'CL': 'Chile',
@@ -909,13 +896,11 @@ GLOBE_JS_LOGIC = r"""
 
     function renderMap(mapGeoJSON, userLat, userLon) {
         
-        // 智能匹配高亮
         const mapFeatureNames = mapGeoJSON.features.map(f => f.properties.name);
         const activeMapNames = new Set();
 
         serverData.forEach(s => {
             let keyword = null;
-            // 1. 优先匹配名字里的国旗/关键词
             for (let key in searchKeys) {
                 if ((s.name && s.name.includes(key)) || (s.country && s.country.includes(key))) {
                     keyword = searchKeys[key];
@@ -924,7 +909,6 @@ GLOBE_JS_LOGIC = r"""
             }
             if (!keyword && s.country) keyword = s.country; 
 
-            // 2. 在地图数据中找匹配
             if (keyword) {
                 if (mapFeatureNames.includes(keyword)) {
                     activeMapNames.add(keyword);
@@ -964,9 +948,9 @@ GLOBE_JS_LOGIC = r"""
             backgroundColor: '#100C2A',
             geo: {
                 map: 'world',
-                roam: true,
-                zoom: 1.2,
-                center: [15, 10], // 非洲/大西洋中心
+                roam: false, // ✨✨✨ 禁止漫游（拖拽+缩放）✨✨✨
+                zoom: 1.2,   // 设置一个合适的默认缩放比例
+                center: [15, 10], // 设置中心点，确保地图居中显示
                 label: { show: false },
                 itemStyle: {
                     areaColor: '#1B2631',
