@@ -4263,7 +4263,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗  =================
+# ================= 小巧卡片式弹窗 (V66：智能端口补全版) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -4276,19 +4276,15 @@ async def open_server_dialog(idx=None):
         if not raw_ssh_host and not has_xui_conf: 
             raw_ssh_host = data.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
         
-        # ✨✨✨ 核心修复：如果勾选了探针 (probe_installed)，也视为 SSH 已启用 ✨✨✨
         has_ssh_conf = bool(
             raw_ssh_host or 
             data.get('ssh_user') or 
             data.get('ssh_key') or 
             data.get('ssh_password') or 
-            data.get('probe_installed') # <--- 新增判定条件
+            data.get('probe_installed')
         )
-        
-        # 兜底
         if not has_ssh_conf and not has_xui_conf: has_ssh_conf = True
     else:
-        # 新建模式默认全开
         has_xui_conf = True; has_ssh_conf = True
 
     state = {'ssh_active': has_ssh_conf, 'xui_active': has_xui_conf}
@@ -4338,28 +4334,46 @@ async def open_server_dialog(idx=None):
                 })
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
-            # --- X-UI 保存逻辑 ---
+            # --- X-UI 保存逻辑 (✨✨✨ 核心修改：智能补全端口 ✨✨✨) ---
             elif panel_type == 'xui':
                 if not inputs.get('xui_url'): return
-                x_url = inputs['xui_url'].value.strip()
+                x_url_raw = inputs['xui_url'].value.strip()
                 x_user = inputs['xui_user'].value.strip()
                 x_pass = inputs['xui_pass'].value.strip()
-                if not (x_url and x_user and x_pass): safe_notify("必填项不能为空", "negative"); return
+                
+                if not (x_url_raw and x_user and x_pass): 
+                    safe_notify("必填项不能为空", "negative")
+                    return
+
+                # 1. 补全协议 (如果缺)
+                if '://' not in x_url_raw: 
+                    x_url_raw = f"http://{x_url_raw}"
+                
+                # 2. 补全默认端口 54321 (如果缺)
+                # 逻辑：提取 :// 后面的部分，检查是否包含冒号
+                try:
+                    parts = x_url_raw.split('://')
+                    body = parts[1]
+                    # 如果 body 里没有冒号 (排除ipv6的复杂情况，暂且简单判断)
+                    if ':' not in body:
+                        x_url_raw = f"{x_url_raw}:54321"
+                        safe_notify(f"已自动添加默认端口: {x_url_raw}", "positive")
+                except: pass
 
                 probe_val = inputs['probe_chk'].value
                 new_server_data.update({
-                    'url': x_url, 'user': x_user, 'pass': x_pass,
+                    'url': x_url_raw, 
+                    'user': x_user, 
+                    'pass': x_pass,
                     'prefix': inputs['xui_prefix'].value.strip(),
                     'probe_installed': probe_val
                 })
                 
-                # ✨✨✨ 核心修复：如果开启探针但缺失 SSH 信息，自动补全 ✨✨✨
+                # 补全 SSH 信息 (如果开启探针但缺失 SSH)
                 if probe_val:
-                    # 1. 补全 Host
                     if not new_server_data.get('ssh_host'):
-                        if '://' in x_url: new_server_data['ssh_host'] = x_url.split('://')[-1].split(':')[0]
-                        else: new_server_data['ssh_host'] = x_url.split(':')[0]
-                    # 2. 补全默认 SSH 配置 (防止空值导致下次打开显示未启用)
+                        if '://' in x_url_raw: new_server_data['ssh_host'] = x_url_raw.split('://')[-1].split(':')[0]
+                        else: new_server_data['ssh_host'] = x_url_raw.split(':')[0]
                     if not new_server_data.get('ssh_port'): new_server_data['ssh_port'] = '22'
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
@@ -4374,21 +4388,15 @@ async def open_server_dialog(idx=None):
             success = await save_server_config(new_server_data, is_add=not is_edit, idx=idx)
             
             if success:
-                # 更新本地状态
                 data.update(new_server_data)
                 if panel_type == 'ssh': state['ssh_active'] = True
                 if panel_type == 'xui': state['xui_active'] = True
                 
-                # 如果 X-UI 保存时开启了探针，也要激活 SSH 状态
                 if panel_type == 'xui' and new_server_data.get('probe_installed'):
                     state['ssh_active'] = True
 
-                if panel_type == 'ssh' and new_server_data.get('probe_installed'):
+                if (panel_type == 'ssh' or panel_type == 'xui') and new_server_data.get('probe_installed'):
                      safe_notify(f"🚀 配置已保存，后台推送 Agent...", "ongoing")
-                     asyncio.create_task(install_probe_on_server(new_server_data))
-                elif panel_type == 'xui' and new_server_data.get('probe_installed'):
-                     safe_notify(f"🚀 X-UI保存，尝试推送 Agent...", "ongoing")
-                     # 因为刚刚自动补全了 SSH 信息，所以这里可以安全推送
                      asyncio.create_task(install_probe_on_server(new_server_data))
                 else:
                      safe_notify(f"✅ {panel_type.upper()} 已保存", "positive")
@@ -4403,13 +4411,9 @@ async def open_server_dialog(idx=None):
                     ui.button('启用 SSH 配置', icon='add', on_click=lambda: _activate_panel('ssh')).props('flat bg-blue-50 text-blue-600')
             else:
                 init_host = data.get('ssh_host')
-                # 兼容性尝试
                 if not init_host and is_edit:
-                     # 尝试从 URL 提取
-                     if '://' in data.get('url', ''):
-                         init_host = data.get('url', '').split('://')[-1].split(':')[0]
-                     else:
-                         init_host = data.get('url', '').split(':')[0]
+                     if '://' in data.get('url', ''): init_host = data.get('url', '').split('://')[-1].split(':')[0]
+                     else: init_host = data.get('url', '').split(':')[0]
 
                 inputs['ssh_host'] = ui.input(label='SSH 主机 IP', value=init_host).classes('w-full').props('outlined dense')
                 
@@ -4448,6 +4452,9 @@ async def open_server_dialog(idx=None):
                     ui.button('配置 X-UI 信息', icon='add', on_click=lambda: _activate_panel('xui')).props('flat bg-purple-50 text-purple-600')
             else:
                 inputs['xui_url'] = ui.input(value=data.get('url',''), label='面板 URL (http://ip:port)').classes('w-full').props('outlined dense')
+                # ✨✨✨ 新增提示 ✨✨✨
+                ui.label('默认端口 54321，如不填写将自动补全').classes('text-[10px] text-gray-400 ml-1 -mt-1 mb-1')
+                
                 with ui.row().classes('w-full gap-2'):
                     inputs['xui_user'] = ui.input(value=data.get('user',''), label='账号').classes('flex-1').props('outlined dense')
                     inputs['xui_pass'] = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
@@ -4468,6 +4475,7 @@ async def open_server_dialog(idx=None):
                         p_url = inputs['xui_url'].value
                         if p_url:
                             clean_ip = p_url.split('://')[-1].split(':')[0]
+                            if ':' in clean_ip: clean_ip = clean_ip.split(':')[0] # 去掉可能存在的端口
                             inputs['ssh_host'].set_value(clean_ip)
                 inputs['probe_chk'].on_value_change(auto_fill_ssh)
 
@@ -4493,7 +4501,6 @@ async def open_server_dialog(idx=None):
                         ui.label('删除确认').classes('text-lg font-bold text-red-600')
                         ui.label('请选择要删除的内容：').classes('text-sm text-gray-600 mb-2')
                         
-                        # 实时检查数据是否存在
                         real_ssh_exists = bool(data.get('ssh_host') or data.get('ssh_user'))
                         real_xui_exists = bool(data.get('url') and data.get('user') and data.get('pass'))
 
