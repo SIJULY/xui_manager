@@ -8167,7 +8167,6 @@ import asyncio # 必须引入 asyncio
 
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
-    
     # 1. 启用 Dark Mode 管理
     dark_mode = ui.dark_mode()
     if app.storage.user.get('is_dark') is None:
@@ -8178,29 +8177,27 @@ async def render_desktop_status_page():
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
-    
     ui.add_head_html('''
-        <style>
-            body { margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; transition: background-color 0.3s ease; }
-            body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
-            body.body--dark { background-color: #0b1121; }
+    <style>
+    body { margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; transition: background-color 0.3s ease; }
+    body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
+    body.body--dark { background-color: #0b1121; }
 
-            .status-card { transition: all 0.3s ease; border-radius: 16px; }
-            body:not(.body--dark) .status-card { background: rgba(255, 255, 255, 0.65); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.5); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #1e293b; }
-            body.body--dark .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); color: #e2e8f0; }
-            .status-card:hover { transform: translateY(-3px); }
-            
-            .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; }
-            body.body--dark .offline-card { background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; }
-            body:not(.body--dark) .offline-card { background: rgba(254, 226, 226, 0.8) !important; }
+    .status-card { transition: all 0.3s ease; border-radius: 16px; }
+    body:not(.body--dark) .status-card { background: rgba(255, 255, 255, 0.65); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.5); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #1e293b; }
+    body.body--dark .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); color: #e2e8f0; }
+    .status-card:hover { transform: translateY(-3px); }
+    .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; }
+    body.body--dark .offline-card { background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; }
+    body:not(.body--dark) .offline-card { background: rgba(254, 226, 226, 0.8) !important; }
 
-            .scrollbar-hide::-webkit-scrollbar { display: none; }
-            .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-            .prog-bar { transition: width 0.5s ease-out; }
-        </style>
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    .prog-bar { transition: width 0.5s ease-out; }
+    </style>
     ''')
 
-    RENDERED_CARDS = {} 
+    RENDERED_CARDS = {}
     tab_container = None
     grid_container = None
     header_refs = {}
@@ -8210,17 +8207,14 @@ async def render_desktop_status_page():
     def get_probe_groups():
         groups_list = ['ALL']
         customs = ADMIN_CONFIG.get('probe_custom_groups', [])
-        groups_list.extend(customs) 
+        groups_list.extend(customs)
         return groups_list
-    
     def get_ping_color_safe(val):
         if val <= 0: return 'text-red-500', '超时'
         if val < 80: return 'text-green-500 dark:text-green-400', f'{val}ms'
         if val < 150: return 'text-yellow-600 dark:text-yellow-400', f'{val}ms'
         return 'text-red-500 dark:text-red-400', f'{val}ms'
-    
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
-    
     def fmt_speed(b):
         if b < 1024: return f"{b:.2f} B"
         if b < 1024**2: return f"{b/1024:.2f} K"
@@ -8228,60 +8222,51 @@ async def render_desktop_status_page():
 
     def prepare_map_data():
         server_points = []; active_regions = set(); seen_flags = set()
-        region_stats = {} 
-        name_to_flag_map = {} 
-        
+        region_stats = {}
+        name_to_flag_map = {}
         CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
         from collections import Counter; country_counter = Counter()
         snapshot = list(SERVERS_CACHE)
-        
         for s in snapshot:
             group_str = detect_country_group(s['name'], s)
             country_counter[group_str] += 1
             parts = group_str.split(' ')
-            flag_icon = parts[0] if len(parts) > 0 else "📍" 
+            flag_icon = parts[0] if len(parts) > 0 else "📍"
             cn_name = parts[1] if len(parts) > 1 else group_str
-            
             lat, lon = None, None
             for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
                 if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
             if not lat:
                 if 'lat' in s: lat, lon = s['lat'], s['lon']
-                else: 
+                else:
                     coords = get_coords_from_name(s.get('name', ''))
                     if coords: lat, lon = coords[0], coords[1]
-            
             if lat and lon:
-                if flag_icon not in seen_flags: 
+                if flag_icon not in seen_flags:
                     seen_flags.add(flag_icon)
-                    server_points.append({'name': flag_icon, 'value': [lon, lat]})
-            
-            map_name_en = get_echarts_region_name(s.get('name', ''))
-            if not map_name_en: map_name_en = s.get('_detected_region', '')
-            if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
-            
-            if map_name_en:
-                active_regions.add(map_name_en)
-                name_to_flag_map[map_name_en] = flag_icon
-            
-            if flag_icon not in region_stats:
-                region_stats[flag_icon] = {'flag': flag_icon, 'cn': cn_name, 'total': 0, 'online': 0, 'list': []}
-            
-            rs = region_stats[flag_icon]
-            rs['total'] += 1
-            is_on = s.get('_status') == 'online'
-            if is_on: rs['online'] += 1
-            if len(rs['list']) < 15:
-                rs['list'].append({'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline'})
+                server_points.append({'name': flag_icon, 'value': [lon, lat]})
+                map_name_en = get_echarts_region_name(s.get('name', ''))
+                if not map_name_en: map_name_en = s.get('_detected_region', '')
+                if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
+                if map_name_en:
+                    active_regions.add(map_name_en)
+                    name_to_flag_map[map_name_en] = flag_icon
+                if flag_icon not in region_stats:
+                    region_stats[flag_icon] = {'flag': flag_icon, 'cn': cn_name, 'total': 0, 'online': 0, 'list': []}
+                rs = region_stats[flag_icon]
+                rs['total'] += 1
+                is_on = s.get('_status') == 'online'
+                if is_on: rs['online'] += 1
+                if len(rs['list']) < 15:
+                    rs['list'].append({'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline'})
 
         pie_data = []
         sorted_counts = country_counter.most_common(5)
         for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
         others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
         if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
-        
-        return (json.dumps({'points': server_points, 'regions': list(active_regions)}, ensure_ascii=False), 
-                pie_data, len(active_regions), 
+        return (json.dumps({'points': server_points, 'regions': list(active_regions)}, ensure_ascii=False),
+                pie_data, len(active_regions),
                 json.dumps(region_stats, ensure_ascii=False),
                 json.dumps(name_to_flag_map, ensure_ascii=False))
 
@@ -8289,7 +8274,6 @@ async def render_desktop_status_page():
 
     # ================= UI 布局 =================
     with ui.column().classes('w-full h-screen p-0 gap-0 overflow-hidden flex flex-col'):
-        
         # --- 1. 地图区域 ---
         with ui.element('div').classes('w-full h-[35vh] min-h-[300px] max-h-[500px] relative p-0 shrink-0 dark:bg-[#0B1121] overflow-hidden'):
             with ui.row().classes('absolute top-6 left-8 right-8 z-50 justify-between items-start'):
@@ -8304,7 +8288,6 @@ async def render_desktop_status_page():
                         with ui.row().classes('items-center gap-1'):
                             ui.icon('language').classes('text-blue-500 dark:text-blue-400 text-xs')
                             header_refs['region_count'] = ui.label(f'分布区域: {region_count}').classes('text-slate-600 dark:text-slate-300')
-                
                 with ui.row().classes('items-center gap-2'):
                     def toggle_dark():
                         dark_mode.value = not dark_mode.value
@@ -8315,22 +8298,20 @@ async def render_desktop_status_page():
                             pie_chart_ref.update()
                     ui.button(icon='dark_mode', on_click=toggle_dark).props('flat round dense').classes('text-slate-700 dark:text-yellow-400')
                     ui.button('后台管理', icon='login', on_click=lambda: ui.navigate.to('/login')).props('flat dense').classes('font-bold text-xs text-slate-700 dark:text-slate-300')
-            
             with ui.element('div').classes('absolute left-4 bottom-4 z-40'):
                 text_color = '#e2e8f0' if dark_mode.value else '#334155'
                 pie_chart_ref = ui.echart({
-                    'backgroundColor': 'transparent', 
-                    'tooltip': {'trigger': 'item'}, 
-                    'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': text_color, 'fontSize': 11}}, 
+                    'backgroundColor': 'transparent',
+                    'tooltip': {'trigger': 'item'},
+                    'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': text_color, 'fontSize': 11}},
                     'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': 'transparent', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': 'auto', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]
                 }).classes('w-64 h-72')
-            
             ui.html('<div id="public-map-container" style="width:100%; height:100%;"></div>', sanitize=False).classes('w-full h-full')
 
         # --- 2. 列表区域 ---
         with ui.column().classes('w-full flex-grow relative gap-0 overflow-hidden flex flex-col bg-white/30 dark:bg-[#0f172a] backdrop-blur-sm'):
             with ui.row().classes('w-full px-6 py-2 border-b border-gray-200/50 dark:border-gray-800 items-center shrink-0'):
-                with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide') as tab_container: pass 
+                with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide') as tab_container: pass
             with ui.scroll_area().classes('w-full flex-grow p-4 md:p-6'):
                 grid_container = ui.grid().classes('w-full gap-4 md:gap-5 pb-20').style('grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))')
 
@@ -8338,7 +8319,7 @@ async def render_desktop_status_page():
     def render_tabs():
         tab_container.clear()
         groups = get_probe_groups()
-        global CURRENT_PROBE_TAB 
+        global CURRENT_PROBE_TAB
         if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
         with tab_container:
             with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-slate-600 dark:text-gray-500 bg-transparent') as tabs:
@@ -8354,28 +8335,25 @@ async def render_desktop_status_page():
         with grid_container:
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group') as card:
                 refs['card'] = card
-                
                 # 1. 顶栏
                 with ui.row().classes('w-full items-center mb-1 gap-2 flex-nowrap'):
                     flag = "🏳️"
                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
                     except: pass
-                    ui.label(flag).classes('text-2xl md:text-3xl flex-shrink-0 leading-none') 
+                    ui.label(flag).classes('text-2xl md:text-3xl flex-shrink-0 leading-none')
                     ui.label(s['name']).classes(
                         'text-base md:text-lg font-bold text-slate-800 dark:text-gray-100 '
                         'truncate flex-grow min-w-0 cursor-pointer hover:text-blue-500 transition leading-tight'
                     ).on('click', lambda _, s=s: open_pc_server_detail(s))
                     refs['status_icon'] = ui.icon('bolt').props('size=32px').classes('text-gray-400 flex-shrink-0')
-                
                 # 2. OS 信息
                 with ui.row().classes('w-full justify-between items-center px-1 mb-2'):
                     with ui.row().classes('items-center gap-1.5'):
-                        ui.icon('dns').classes('text-xs text-gray-400') 
+                        ui.icon('dns').classes('text-xs text-gray-400')
                         ui.label('OS').classes('text-xs text-slate-500 dark:text-gray-400 font-bold')
                     with ui.row().classes('items-center gap-1.5'):
                         refs['os_icon'] = ui.icon('computer').classes('text-xs text-slate-400')
                         refs['os_info'] = ui.label('Loading...').classes('text-xs font-mono font-bold text-slate-700 dark:text-gray-300 whitespace-nowrap')
-                
                 # 3. 分割线
                 ui.separator().classes('mb-3 opacity-50 dark:opacity-30')
 
@@ -8388,7 +8366,6 @@ async def render_desktop_status_page():
                         ui.icon('memory').classes('text-green-500 dark:text-green-400 text-xs'); refs['summary_ram'] = ui.label('--').classes(label_cls)
                     with ui.row().classes('items-center gap-1'):
                         ui.icon('storage').classes('text-purple-500 dark:text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes(label_cls)
-                
                 # 5. 进度条
                 with ui.column().classes('w-full gap-2 md:gap-3'):
                     def stat_row(label, color_cls, light_track_color):
@@ -8401,13 +8378,10 @@ async def render_desktop_status_page():
                                 pct = ui.label('0%').classes('text-xs font-mono font-bold text-slate-700 dark:text-white w-8 text-right')
                             sub = ui.label('').classes('text-[10px] text-slate-400 dark:text-gray-500 font-mono text-right w-full pr-1')
                         return bar, pct, sub
-                    
                     refs['cpu_bar'], refs['cpu_pct'], refs['cpu_sub'] = stat_row('CPU', 'bg-blue-500', 'blue-100')
                     refs['mem_bar'], refs['mem_pct'], refs['mem_sub'] = stat_row('内存', 'bg-green-500', 'green-100')
                     refs['disk_bar'], refs['disk_pct'], refs['disk_sub'] = stat_row('硬盘', 'bg-purple-500', 'purple-100')
-                
                 ui.separator().classes('bg-slate-200 dark:bg-white/5 my-1')
-                
                 # 6. 底部网格 (强制不换行)
                 with ui.column().classes('w-full gap-1'):
                     label_sub_cls = 'text-xs text-slate-400 dark:text-gray-500'
@@ -8425,7 +8399,6 @@ async def render_desktop_status_page():
                         with ui.row().classes('items-center gap-1'):
                             refs['uptime'] = ui.label('--').classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right')
                             refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
-                
                 # 7. Ping
                 with ui.row().classes('w-full justify-between items-center mt-1 pt-2 border-t border-slate-200 dark:border-white/5 text-[10px]'):
                     ui.label('延迟').classes('text-slate-500 dark:text-gray-500 font-bold')
@@ -8462,32 +8435,33 @@ async def render_desktop_status_page():
     sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
     for s in sorted_init_list:
         create_server_card(s)
-    
     render_tabs()
     apply_filter(CURRENT_PROBE_TAB)
 
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data};
-        window.regionStats = {region_stats_json}; 
-        window.mapNameMap = {name_map_json}; 
-        window.updateMapData = function(newData) {{ mapData = newData; }}; 
+        window.regionStats = {region_stats_json};
+        window.mapNameMap = {name_map_json};
+        window.updateMapData = function(newData) {{ mapData = newData; }};
         
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
             if (!chartDom || typeof echarts === 'undefined') {{ setTimeout(checkAndRender, 100); return; }}
+            
             fetch('https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json').then(r => r.json()).then(w => {{
                 echarts.registerMap('world', w);
                 var myChart = echarts.init(chartDom);
-                window.publicMapChart = myChart; 
+                window.publicMapChart = myChart;
                 
-                // 默认北京
-                var defaultPt = [116.4, 39.9]; 
+                // 1. 定义默认坐标 (北京)
+                var defaultPt = [116.4, 39.9];
+                // ✨✨✨ 修复核心：定义一个变量存储当前锁定的位置，默认为 defaultPt
+                var currentCenter = defaultPt;
 
                 function renderMap(center) {{
                     var regions = mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
                     var lines = mapData.points.map(pt => ({{ coords: [pt.value, center] }}));
-                    
                     var isDark = document.body.classList.contains('body--dark');
                     var areaColor = isDark ? '#1B2631' : '#e0e7ff';
                     var borderColor = isDark ? '#404a59' : '#a5b4fc';
@@ -8501,19 +8475,19 @@ async def render_desktop_status_page():
                             borderWidth: 0,
                             backgroundColor: 'transparent',
                             position: function (point, params, dom, rect, size) {{
-                                var x = point[0]; 
-                                var y = point[1]; 
+                                var x = point[0];
+                                var y = point[1];
                                 var boxWidth = size.contentSize[0];
                                 var boxHeight = size.contentSize[1];
                                 var viewHeight = size.viewSize[1];
-                                if (y > viewHeight * 0.6) {{ return [x - (boxWidth / 2), y - boxHeight - 10]; }} 
+                                if (y > viewHeight * 0.6) {{ return [x - (boxWidth / 2), y - boxHeight - 10]; }}
                                 else {{ return [x - (boxWidth / 2), y + 25]; }}
                             }},
                             formatter: function(params) {{
                                 var rawName = params.name;
                                 if (!rawName) return;
                                 var info = window.regionStats[rawName];
-                                if (!info && window.mapNameMap[rawName]) {{ var flag = window.mapNameMap[rawName]; info = window.regionStats[flag]; }} 
+                                if (!info && window.mapNameMap[rawName]) {{ var flag = window.mapNameMap[rawName]; info = window.regionStats[flag]; }}
                                 else if (!info) {{
                                     var mapKeys = Object.keys(window.mapNameMap);
                                     for (var i = 0; i < mapKeys.length; i++) {{
@@ -8529,45 +8503,45 @@ async def render_desktop_status_page():
                                 var shadow = isD ? '0 0 15px rgba(0,0,0,0.5)' : '0 10px 25px rgba(0,0,0,0.15)';
                                 var backdrop = 'blur(10px)';
                                 var listHtml = '';
-                                var displayList = info.list.slice(0, 5); 
+                                var displayList = info.list.slice(0, 5);
                                 displayList.forEach(function(item) {{
                                     var dotColor = (item.status === 'online') ? '#22c55e' : '#ef4444';
                                     var statText = (item.status === 'online') ? '线上' : '离线';
-                                    listHtml += '<div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:4px; color:'+textSub+';">' + 
-                                                '<div style="display:flex; align-items:center; gap:6px;">' +
-                                                '<span style="width:6px; height:6px; border-radius:50%; background:'+dotColor+';"></span>' +
-                                                '<span style="max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + item.name + '</span>' +
-                                                '</div>' +
-                                                '<span style="font-size:10px; color:'+(item.status==='online'?textSub:dotColor)+';">' + statText + '</span>' +
-                                                '</div>';
+                                    listHtml += '<div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:4px; color:'+textSub+';">' +
+                                        '<div style="display:flex; align-items:center; gap:6px;">' +
+                                        '<span style="width:6px; height:6px; border-radius:50%; background:'+dotColor+';"></span>' +
+                                        '<span style="max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + item.name + '</span>' +
+                                        '</div>' +
+                                        '<span style="font-size:10px; color:'+(item.status==='online'?textSub:dotColor)+';">' + statText + '</span>' +
+                                        '</div>';
                                 }});
                                 if (info.total > 5) {{ listHtml += '<div style="font-size:10px; color:'+textSub+'; margin-top:4px; text-align:center;">+' + (info.total - 5) + ' 更多...</div>'; }}
-                                return '<div style="background:'+bg+'; backdrop-filter:'+backdrop+'; -webkit-backdrop-filter:'+backdrop+'; border-radius:12px; padding:12px 16px; border:none; box-shadow:'+shadow+'; min-width:200px;">' + 
-                                       '<div style="font-weight:900; font-size:16px; margin-bottom:4px; color:'+textMain+'; display:flex; align-items:center; gap:6px;">' + 
-                                       '<span>' + info.flag + '</span>' + 
-                                       '<span>' + info.cn + '</span>' + 
-                                       '</div>' +
-                                       '<div style="font-size:11px; color:#94a3b8; margin-bottom:10px; font-family:monospace;">' +
-                                       '共 ' + info.total + ' 个伺服器, ' + info.online + ' 个在线, ' + (info.total - info.online) + ' 个离线' +
-                                       '</div>' +
-                                       '<div style="border-top:1px solid '+(isD?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.05)')+'; padding-top:8px;">' +
-                                       listHtml +
-                                       '</div>' +
-                                       '</div>';
+                                return '<div style="background:'+bg+'; backdrop-filter:'+backdrop+'; -webkit-backdrop-filter:'+backdrop+'; border-radius:12px; padding:12px 16px; border:none; box-shadow:'+shadow+'; min-width:200px;">' +
+                                    '<div style="font-weight:900; font-size:16px; margin-bottom:4px; color:'+textMain+'; display:flex; align-items:center; gap:6px;">' +
+                                    '<span>' + info.flag + '</span>' +
+                                    '<span>' + info.cn + '</span>' +
+                                    '</div>' +
+                                    '<div style="font-size:11px; color:#94a3b8; margin-bottom:10px; font-family:monospace;">' +
+                                    '共 ' + info.total + ' 个伺服器, ' + info.online + ' 个在线, ' + (info.total - info.online) + ' 个离线' +
+                                    '</div>' +
+                                    '<div style="border-top:1px solid '+(isD?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.05)')+'; padding-top:8px;">' +
+                                    listHtml +
+                                    '</div>' +
+                                    '</div>';
                             }}
                         }},
-                        geo: {{ 
-                            map: 'world', 
-                            roam: false, 
-                            zoom: 1.2, 
-                            aspectScale: 0.85, 
-                            scaleLimit: {{ min: 1.2, max: 10 }}, 
-                            center: [-10, 20], 
-                            label: {{ show: false }}, 
-                            itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }}, 
-                            tooltip: {{ show: true }}, 
-                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }}, label: {{ show: false }} }}, 
-                            regions: regions 
+                        geo: {{
+                            map: 'world',
+                            roam: false,
+                            zoom: 1.2,
+                            aspectScale: 0.85,
+                            scaleLimit: {{ min: 1.2, max: 10 }},
+                            center: [-10, 20],
+                            label: {{ show: false }},
+                            itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }},
+                            tooltip: {{ show: true }},
+                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }}, label: {{ show: false }} }},
+                            regions: regions
                         }},
                         series: [
                             {{ type: 'map', map: 'world', geoIndex: 0, data: mapData.regions.map(n => ({{ name: n, value: 1 }})), itemStyle: {{ opacity: 0 }} }},
@@ -8578,16 +8552,24 @@ async def render_desktop_status_page():
                     }};
                     myChart.setOption(option);
                 }}
-                
-                if (navigator.geolocation) {{ 
+
+                // 2. 获取位置并更新 currentCenter
+                if (navigator.geolocation) {{
                     navigator.geolocation.getCurrentPosition(
-                        p => renderMap([p.coords.longitude, p.coords.latitude]), // 成功
-                        e => renderMap(defaultPt) // 失败
-                    ); 
-                }} else {{ 
-                    renderMap(defaultPt); // 不支持
+                        p => {{
+                            // ✨✨✨ 获取成功：更新变量，锁定用户位置
+                            currentCenter = [p.coords.longitude, p.coords.latitude];
+                            renderMap(currentCenter);
+                        }},
+                        e => {{
+                            // 获取失败：使用默认值 (变量初始值即为默认值)
+                            renderMap(currentCenter); 
+                        }}
+                    );
+                }} else {{
+                    renderMap(currentCenter);
                 }}
-                
+
                 window.addEventListener('resize', () => myChart.resize());
                 
                 var wasDark = document.body.classList.contains('body--dark');
@@ -8595,7 +8577,8 @@ async def render_desktop_status_page():
                     var isDark = document.body.classList.contains('body--dark');
                     if (wasDark !== isDark) {{
                         wasDark = isDark;
-                        renderMap(defaultPt);
+                        // ✨✨✨ 修复核心：切换模式时，使用 currentCenter 而不是 defaultPt
+                        renderMap(currentCenter);
                     }}
                 }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
             }});
@@ -8612,45 +8595,39 @@ async def render_desktop_status_page():
                 render_tabs()
                 sync_cards_pool()
                 apply_filter(CURRENT_PROBE_TAB)
-                new_map, new_pie, new_cnt, new_stats, new_map_names = prepare_map_data()
-                if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
-                if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
-                
-                ui.run_javascript(f'''
-                    if(window.updateMapData){{
-                        window.updateMapData({new_map});
-                        window.regionStats = {new_stats};
-                        window.mapNameMap = {new_map_names};
-                    }}
-                ''')
+            new_map, new_pie, new_cnt, new_stats, new_map_names = prepare_map_data()
+            if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
+            if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
+            ui.run_javascript(f'''
+            if(window.updateMapData){{
+                window.updateMapData({new_map});
+                window.regionStats = {new_stats};
+                window.mapNameMap = {new_map_names};
+            }}
+            ''')
 
             real_online_count = 0
             for url in list(RENDERED_CARDS.keys()):
                 item = RENDERED_CARDS.get(url)
                 if not item: continue
                 refs = item['refs']
-                server_data = item['data'] 
-                
+                server_data = item['data']
                 # ✨ 加入超时控制，防止单台服务器卡死循环
                 res = None
                 try:
                     res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
                 except Exception:
-                    res = None 
-                
+                    res = None
                 if res and res.get('status') == 'online': real_online_count += 1
                 if not item['card'].visible: continue
-                
                 if res and res.get('status') == 'online':
                     refs['card'].classes(remove='offline-card')
                     refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
-                    
                     cache = PROBE_DATA_CACHE.get(url, {})
                     static = cache.get('static', {})
                     os_str = static.get('os', 'Linux')
                     arch_raw = static.get('arch', '')
-                    
                     if 'aarch64' in arch_raw.lower() or 'arm' in arch_raw.lower(): display_arch = "ARM"
                     elif 'x86_64' in arch_raw.lower() or 'amd64' in arch_raw.lower(): display_arch = "AMD"
                     else: display_arch = arch_raw
@@ -8658,7 +8635,6 @@ async def render_desktop_status_page():
                     import re
                     os_lower = os_str.lower()
                     icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
-                    
                     simple_os = os_str
                     simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
                     simple_os = re.sub(r' LTS', '', simple_os, flags=re.I)
@@ -8667,55 +8643,45 @@ async def render_desktop_status_page():
                     if match: simple_os = f"{match.group(1)} {match.group(2)}"
 
                     if 'ubuntu' in os_lower: icon_name = 'fa-brands fa-ubuntu'; icon_color = 'text-orange-500'
-                    elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500' 
+                    elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500'
                     elif 'centos' in os_lower: icon_name = 'fa-brands fa-centos'; icon_color = 'text-purple-500'
                     elif 'windows' in os_lower: icon_name = 'fa-brands fa-windows'; icon_color = 'text-blue-500'
                     elif 'apple' in os_lower or 'macos' in os_lower: icon_name = 'fa-brands fa-apple'; icon_color = 'text-gray-300'
-                    
                     refs['os_icon'].set_name(icon_name)
                     refs['os_icon'].classes(replace=icon_color)
                     refs['os_info'].set_text(f"{simple_os} / {display_arch}")
-                    
                     refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
                     refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
                     refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
-                    
                     cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
                     mem = float(res.get('mem_usage', 0)); mem_total = float(res.get('mem_total', 0)); refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%'); refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
                     disk = float(res.get('disk_usage', 0)); disk_total = float(res.get('disk_total', 0)); refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%'); refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
-                    
                     refs['net_up'].set_text(f"↑ {fmt_speed(res.get('net_speed_out', 0))}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(res.get('net_speed_in', 0))}/s")
-                    
                     refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}"); refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
                     refs['uptime'].set_text(str(res.get('uptime', '-')))
                     refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-orange-500')
                     pings = res.get('pings', {})
                     c1, t1 = get_ping_color_safe(pings.get('电信', 0)); c2, t2 = get_ping_color_safe(pings.get('联通', 0)); c3, t3 = get_ping_color_safe(pings.get('移动', 0))
                     refs['ping_ct'].set_content(f'电信: <span class="{c1}">{t1}</span>'); refs['ping_cu'].set_content(f'联通: <span class="{c2}">{t2}</span>'); refs['ping_cm'].set_content(f'移动: <span class="{c3}">{t3}</span>')
-                
                 elif res and res.get('status') == 'warning':
                     refs['card'].classes(add='offline-card')
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
-                    
                     cpu = float(res.get('cpu_usage', 0)); refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{int(cpu)}%')
                     refs['uptime'].set_text('Agent Missing'); refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
-                
                 else:
                     refs['card'].classes(add='offline-card')
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
-                    
                     refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
                     last_time_str = "Down"
                     if url in PROBE_DATA_CACHE:
                         cached_info = PROBE_DATA_CACHE[url]
                         if 'uptime' in cached_info: last_time_str = f"停于: {cached_info['uptime']}"
                     refs['uptime'].set_text(last_time_str)
-            
             if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
         except Exception as e:
-            print(f"Loop Update Error: {e}") 
+            print(f"Loop Update Error: {e}")
         ui.timer(2.0, loop_update, once=True)
     ui.timer(0.1, loop_update, once=True)
 
