@@ -8558,7 +8558,7 @@ async def render_desktop_status_page():
                         }},
                         geo: {{ 
                             map: 'world', 
-                            roam: 'scale', 
+                            roam: false, 
                             zoom: 1.2, 
                             aspectScale: 0.85, 
                             scaleLimit: {{ min: 1.2, max: 10 }}, 
