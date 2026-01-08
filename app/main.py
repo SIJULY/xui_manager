@@ -4277,11 +4277,12 @@ async def render_probe_page():
                     ui.label('探针管理与设置').classes('text-2xl font-extrabold text-slate-800 tracking-tight')
                     ui.label('Probe Configuration & Management').classes('text-xs font-bold text-gray-400 uppercase tracking-widest')
 
-            # --- 核心网格布局 (左右等高) ---
-            with ui.grid().classes('w-full grid-cols-1 lg:grid-cols-3 gap-6 items-stretch'):
+            # --- 核心网格布局 (修改点：左右 4:3 比例) ---
+            # lg:grid-cols-7 将网格分为 7 份
+            with ui.grid().classes('w-full grid-cols-1 lg:grid-cols-7 gap-6 items-stretch'):
                 
-                # ======================= 左侧：参数设置区 (占 2/3) =======================
-                with ui.column().classes('lg:col-span-2 w-full gap-6'):
+                # ======================= 左侧：参数设置区 (占 4/7) =======================
+                with ui.column().classes('lg:col-span-4 w-full gap-6'):
                     
                     # --- 卡片 1: 基础连接设置 ---
                     with ui.card().classes('w-full p-6 bg-white border border-gray-200 shadow-sm rounded-xl'):
@@ -4365,10 +4366,10 @@ async def render_probe_page():
                         with ui.row().classes('w-full justify-end mt-4'):
                             ui.button('保存通知设置', icon='save', on_click=save_notify_conf).props('unelevated color=purple-7').classes('font-bold')
 
-                # ======================= 右侧：快捷操作区 (占 1/3) =======================
-                with ui.column().classes('lg:col-span-1 w-full gap-6 h-full'):
+                # ======================= 右侧：快捷操作区 (占 3/7) =======================
+                with ui.column().classes('lg:col-span-3 w-full gap-6 h-full'):
                     
-                    # --- 卡片 A: 快捷操作 (✨✨✨ 已按要求修改按钮 ✨✨✨) ---
+                    # --- 卡片 A: 快捷操作 ---
                     with ui.card().classes('w-full p-6 bg-white border border-gray-200 shadow-sm rounded-xl flex-shrink-0'):
                         ui.label('快捷操作').classes('text-lg font-bold text-slate-700 mb-4 border-l-4 border-blue-500 pl-2')
                         
@@ -4393,11 +4394,11 @@ async def render_probe_page():
                             
                             # 2. 视图管理按钮组 (横向排列)
                             with ui.row().classes('w-full gap-2'):
-                                # ✨ 分组管理 (蓝色，替换了原来的“新建”和“管理”)
+                                # ✨ 分组管理
                                 ui.button('分组管理', icon='settings', on_click=lambda: open_unified_group_manager('manage')) \
                                     .classes('flex-1 bg-blue-50 text-blue-700 border border-blue-200 shadow-sm hover:bg-blue-100 font-bold')
 
-                                # 排序视图 (灰色)
+                                # 排序视图
                                 ui.button('排序', icon='sort', on_click=open_group_sort_dialog) \
                                     .classes('flex-1 bg-gray-50 text-gray-700 border border-gray-200 shadow-sm hover:bg-gray-100 font-bold')
                             
