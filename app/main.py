@@ -7909,7 +7909,7 @@ def open_pc_server_detail(server_conf):
                 ui.button(icon='close', on_click=d.close).props('flat round dense color=grey-5')
 
             # --- 内容区 ---
-            with ui.scroll_area().classes('w-full flex-grow p-6').style('height: 60vh;'):
+            with ui.scroll_area().classes('w-full flex-grow p-6').style('height: 65vh;'):
                 refs = {}
                 
                 # 第一行：左右分栏
@@ -8480,8 +8480,10 @@ async def render_desktop_status_page():
                 echarts.registerMap('world', w);
                 var myChart = echarts.init(chartDom);
                 window.publicMapChart = myChart; 
-                var centerPt = [116.4, 39.9]; 
                 
+                // 默认北京
+                var defaultPt = [116.4, 39.9]; 
+
                 function renderMap(center) {{
                     var regions = mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
                     var lines = mapData.points.map(pt => ({{ coords: [pt.value, center] }}));
@@ -8556,7 +8558,7 @@ async def render_desktop_status_page():
                         }},
                         geo: {{ 
                             map: 'world', 
-                            roam: true, 
+                            roam: 'scale', 
                             zoom: 1.2, 
                             aspectScale: 0.85, 
                             scaleLimit: {{ min: 1.2, max: 10 }}, 
@@ -8576,21 +8578,36 @@ async def render_desktop_status_page():
                     }};
                     myChart.setOption(option);
                 }}
-                if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => renderMap([p.coords.longitude, p.coords.latitude]), e => renderMap(centerPt)); }} else {{ renderMap(centerPt); }}
+                
+                if (navigator.geolocation) {{ 
+                    navigator.geolocation.getCurrentPosition(
+                        p => renderMap([p.coords.longitude, p.coords.latitude]), // 成功
+                        e => renderMap(defaultPt) // 失败
+                    ); 
+                }} else {{ 
+                    renderMap(defaultPt); // 不支持
+                }}
+                
                 window.addEventListener('resize', () => myChart.resize());
-                new MutationObserver(function(mutations) {{ renderMap(centerPt); }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
+                
+                var wasDark = document.body.classList.contains('body--dark');
+                new MutationObserver(function(mutations) {{
+                    var isDark = document.body.classList.contains('body--dark');
+                    if (wasDark !== isDark) {{
+                        wasDark = isDark;
+                        renderMap(defaultPt);
+                    }}
+                }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
             }});
         }}
         checkAndRender();
     }})();
     ''')
 
-    # ✨✨✨ [重点修改] 异步循环核心 ✨✨✨
     async def loop_update():
         nonlocal local_ui_version
         try:
             if GLOBAL_UI_VERSION != local_ui_version:
-                print(f"🔄 [HotReload] 结构变化，执行差量更新...")
                 local_ui_version = GLOBAL_UI_VERSION
                 render_tabs()
                 sync_cards_pool()
@@ -8614,12 +8631,12 @@ async def render_desktop_status_page():
                 refs = item['refs']
                 server_data = item['data'] 
                 
-                # ✨✨✨ 关键修复：加入 asyncio.wait_for 防止单个服务器卡死整个循环 ✨✨✨
+                # ✨ 加入超时控制，防止单台服务器卡死循环
                 res = None
                 try:
                     res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
                 except Exception:
-                    res = None # 超时或报错视为离线，继续下一个
+                    res = None 
                 
                 if res and res.get('status') == 'online': real_online_count += 1
                 if not item['card'].visible: continue
@@ -8629,7 +8646,6 @@ async def render_desktop_status_page():
                     refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
                     
-                    # OS 信息更新
                     cache = PROBE_DATA_CACHE.get(url, {})
                     static = cache.get('static', {})
                     os_str = static.get('os', 'Linux')
