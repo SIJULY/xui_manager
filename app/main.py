@@ -8255,14 +8255,17 @@ async def render_desktop_status_page():
     
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
     
-    # [修改 1] 网速显示去小数
     def fmt_speed(b):
         if b < 1024: return f"{int(b)} B"
         if b < 1024**2: return f"{int(b/1024)} K"
         return f"{int(b/1024**2)} M"
 
     def prepare_map_data():
-        server_points = []; active_regions = set(); seen_flags = set()
+        # 分离城市点（用于飞线）和国旗点（用于显示国旗）
+        city_points_map = {} 
+        flag_points_map = {} 
+        
+        active_regions = set()
         region_stats = {} 
         name_to_flag_map = {} 
         
@@ -8286,14 +8289,22 @@ async def render_desktop_status_page():
                     coords = get_coords_from_name(s.get('name', ''))
                     if coords: lat, lon = coords[0], coords[1]
             
-            if lat and lon:
-                if flag_icon not in seen_flags: 
-                    seen_flags.add(flag_icon)
-                    server_points.append({'name': flag_icon, 'value': [lon, lat]})
-            
             map_name_en = get_echarts_region_name(s.get('name', ''))
             if not map_name_en: map_name_en = s.get('_detected_region', '')
             if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
+
+            if lat and lon:
+                coord_key = f"{lat},{lon}"
+                if coord_key not in city_points_map:
+                    city_points_map[coord_key] = {'name': s['name'], 'value': [lon, lat]}
+                
+                # 国旗点：每个国家只存一个，name 直接设为 Emoji
+                if flag_icon not in flag_points_map:
+                    flag_points_map[flag_icon] = {
+                        'name': flag_icon, # ✨ 核心：name就是国旗图标
+                        'value': [lon, lat],
+                        'country': map_name_en 
+                    }
             
             if map_name_en:
                 active_regions.add(map_name_en)
@@ -8315,7 +8326,10 @@ async def render_desktop_status_page():
         others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
         if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
         
-        return (json.dumps({'points': server_points, 'regions': list(active_regions)}, ensure_ascii=False), 
+        city_list = list(city_points_map.values())
+        flag_list = list(flag_points_map.values())
+
+        return (json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions)}, ensure_ascii=False), 
                 pie_data, len(active_regions), 
                 json.dumps(region_stats, ensure_ascii=False),
                 json.dumps(name_to_flag_map, ensure_ascii=False))
@@ -8393,33 +8407,26 @@ async def render_desktop_status_page():
                     ui.tab(g).on('click', lambda _, g=g: apply_filter(g))
                 tabs.set_value(CURRENT_PROBE_TAB)
 
-    # [修改 4] 独立的卡片更新循环（静默更新）
     async def card_autoupdate_loop(url):
         while True:
-            # 随机休眠 2-3 秒，错峰刷新
             await asyncio.sleep(random.uniform(2.0, 3.0))
             
-            # 检查卡片是否存在且可见
             item = RENDERED_CARDS.get(url)
-            if not item: break # 卡片已删除，退出循环
+            if not item: break 
             if not item['card'].visible: continue 
 
             refs = item['refs']
             server_data = item['data']
             cache_vals = item.get('cache', {}) 
 
-            # 获取数据
             res = None
             try:
                 res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
             except Exception:
                 res = None
 
-            # [修改 3] 数据无变化检测 (10秒内数据无变动则不重绘)
             has_changed = False
-            
             if res and res.get('status') == 'online':
-                # 检查关键数据是否有变化
                 if (cache_vals.get('status') != 'online' or 
                     abs(cache_vals.get('cpu', -1) - float(res.get('cpu_usage', 0))) > 0.1 or
                     abs(cache_vals.get('mem', -1) - float(res.get('mem_usage', 0))) > 0.1 or
@@ -8429,24 +8436,19 @@ async def render_desktop_status_page():
             elif res and res.get('status') != cache_vals.get('status'):
                 has_changed = True 
             
-            # 如果数据完全没变，直接跳过 UI 更新
             if not has_changed: continue
 
-            # --- 开始 UI 更新 ---
             if res and res.get('status') == 'online':
-                # Status Icon
                 if cache_vals.get('status') != 'online':
                     refs['card'].classes(remove='offline-card')
                     refs['status_icon'].set_name('bolt')
                     refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
                     cache_vals['status'] = 'online'
 
-                # --- 补全缺失数据 1: OS 信息 ---
                 cache = PROBE_DATA_CACHE.get(url, {})
                 static = cache.get('static', {})
                 os_str = static.get('os', 'Linux')
                 arch_raw = static.get('arch', '')
-                
                 if 'aarch64' in arch_raw.lower() or 'arm' in arch_raw.lower(): display_arch = "ARM"
                 elif 'x86_64' in arch_raw.lower() or 'amd64' in arch_raw.lower(): display_arch = "AMD"
                 else: display_arch = arch_raw
@@ -8454,7 +8456,6 @@ async def render_desktop_status_page():
                 import re
                 os_lower = os_str.lower()
                 icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
-                
                 simple_os = os_str
                 simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
                 simple_os = re.sub(r' LTS', '', simple_os, flags=re.I)
@@ -8472,23 +8473,19 @@ async def render_desktop_status_page():
                 refs['os_icon'].classes(replace=icon_color)
                 refs['os_info'].set_text(f"{simple_os} / {display_arch}")
                 
-                # --- 补全缺失数据 2: 硬件汇总 ---
                 refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
                 refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
                 refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
                 
-                # --- 补全缺失数据 3: 总流量 ---
                 refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}")
                 refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
 
-                # CPU
                 cpu = float(res.get('cpu_usage', 0))
                 if cache_vals.get('cpu') != cpu:
                     refs['cpu_bar'].style(f'width: {cpu}%')
                     refs['cpu_pct'].set_text(f'{cpu:.1f}%')
                     cache_vals['cpu'] = cpu
                 
-                # Memory
                 mem = float(res.get('mem_usage', 0))
                 if cache_vals.get('mem') != mem:
                     mem_total = float(res.get('mem_total', 0))
@@ -8497,7 +8494,6 @@ async def render_desktop_status_page():
                     refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
                     cache_vals['mem'] = mem
 
-                # Disk
                 disk = float(res.get('disk_usage', 0))
                 if cache_vals.get('disk') != disk:
                     disk_total = float(res.get('disk_total', 0))
@@ -8506,7 +8502,6 @@ async def render_desktop_status_page():
                     refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
                     cache_vals['disk'] = disk
 
-                # Network
                 n_up = res.get('net_speed_out', 0)
                 n_down = res.get('net_speed_in', 0)
                 if cache_vals.get('net_up') != n_up:
@@ -8516,22 +8511,26 @@ async def render_desktop_status_page():
                         refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
                         cache_vals['net_down'] = n_down
 
-                # Uptime
                 up = str(res.get('uptime', '-'))
                 if cache_vals.get('uptime') != up:
-                    refs['uptime'].set_text(up)
+                    colored_up = re.sub(
+                        r'(\d+)(\s*(?:days?|天))', 
+                        r'<span class="text-green-500 font-bold text-sm">\1</span>\2', 
+                        up, 
+                        flags=re.IGNORECASE
+                    )
+                    refs['uptime'].set_content(colored_up)
                     cache_vals['uptime'] = up
                 
                 refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-orange-500')
             
             else:
-                # Offline / Warning handling
                 if cache_vals.get('status') != 'offline':
                     refs['card'].classes(add='offline-card')
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
-                    refs['uptime'].set_text("Down")
+                    refs['uptime'].set_content("Down")
                     cache_vals['status'] = 'offline'
 
 
@@ -8539,11 +8538,9 @@ async def render_desktop_status_page():
         url = s['url']
         refs = {}
         with grid_container:
-            # 补上 as card, 并添加 content isolation
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group').style('contain: content;') as card:
                 refs['card'] = card
                 
-                # 初始化缓存数据，用于 Diffing
                 item_cache = {
                     'status': None, 'cpu': -1, 'mem': -1, 'disk': -1, 
                     'net_in': -1, 'net_out': -1, 'uptime': ''
@@ -8572,7 +8569,7 @@ async def render_desktop_status_page():
                 
                 ui.separator().classes('mb-3 opacity-50 dark:opacity-30')
 
-                # 4. 硬件信息 (摘要)
+                # 4. 硬件信息
                 with ui.row().classes('w-full justify-between px-1 mb-1 md:mb-2'):
                     label_cls = 'text-xs font-mono text-slate-500 dark:text-gray-400 font-bold'
                     with ui.row().classes('items-center gap-1'):
@@ -8601,7 +8598,7 @@ async def render_desktop_status_page():
                 
                 ui.separator().classes('bg-slate-200 dark:bg-white/5 my-1')
                 
-                # 6. 底部网格 (强制不换行)
+                # 6. 底部网格
                 with ui.column().classes('w-full gap-1'):
                     label_sub_cls = 'text-xs text-slate-400 dark:text-gray-500'
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
@@ -8616,14 +8613,11 @@ async def render_desktop_status_page():
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('在线').classes(label_sub_cls)
                         with ui.row().classes('items-center gap-1'):
-                            refs['uptime'] = ui.label('--').classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right')
+                            # [修改] 使用 ui.html 并加入 sanitize=False
+                            refs['uptime'] = ui.html('--', sanitize=False).classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right')
                             refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
                 
-                # [修改 2] 删除延迟 (Ping) 相关的 UI 构建
-                # (此处原有的 Ping Row 代码已删除)
-
         RENDERED_CARDS[url] = {'card': card, 'refs': refs, 'data': s, 'cache': item_cache}
-        # [修改 4] 立即启动独立的后台刷新任务
         asyncio.create_task(card_autoupdate_loop(url))
 
     def apply_filter(group_name):
@@ -8662,10 +8656,53 @@ async def render_desktop_status_page():
         var mapData = {chart_data};
         window.regionStats = {region_stats_json}; 
         window.mapNameMap = {name_map_json}; 
-        window.updateMapData = function(newData) {{ mapData = newData; }}; 
         
-        // ✨ 新增：全局锁定坐标变量
-        window.fixedCenter = null;
+        // --- 核心修复：更新数据时也要触发国旗坐标校正 ---
+        window.updateMapData = function(newData) {{ 
+            mapData = newData;
+            fixFlags(); 
+        }}; 
+        
+        // 1. 初始化飞线终点 (Home Point)
+        if (!window.FLY_HOME_PT) {{
+            window.FLY_HOME_PT = null; 
+        }}
+
+        var defaultPt = [116.4, 39.9]; 
+
+        var mapState = 'A'; 
+        var focusedCenter = null;
+        
+        // [修改] 放大倍数设为 6.0
+        var defaultZoom = 1.0; 
+        var focusedZoom = 6.0;
+        
+        var defaultLeft = '45%';
+        
+        var isDragging = false;
+        var hasPanned = false; 
+        var downX = 0, downY = 0;
+        var lastInteraction = 0; 
+        
+        var manualCentroids = {{
+            'France': [2.21, 46.22],
+            'United States': [-95.71, 37.09],
+            'United Kingdom': [-3.43, 55.37],
+            'Russia': [105.31, 61.52],
+            'Netherlands': [5.29, 52.13],
+            'Portugal': [-8.22, 39.39],
+            'Spain': [-3.74, 40.46]
+        }};
+        
+        function fixFlags() {{
+            if (mapData.flags) {{
+                mapData.flags.forEach(function(f) {{
+                    if (f.country && manualCentroids[f.country]) {{
+                        f.value = manualCentroids[f.country];
+                    }}
+                }});
+            }}
+        }}
 
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
@@ -8675,25 +8712,46 @@ async def render_desktop_status_page():
                 var myChart = echarts.init(chartDom);
                 window.publicMapChart = myChart; 
                 
-                // 默认北京
-                var defaultPt = [116.4, 39.9]; 
+                function getRegionCenter(name) {{
+                    if (manualCentroids[name]) return manualCentroids[name];
+                    
+                    var feat = w.features.find(f => f.properties.name === name);
+                    if (!feat) return null;
+                    var minX = 180, maxX = -180, minY = 90, maxY = -90;
+                    function scan(coords) {{
+                        if (typeof coords[0] === 'number') {{
+                            if (coords[0] < minX) minX = coords[0];
+                            if (coords[0] > maxX) maxX = coords[0];
+                            if (coords[1] < minY) minY = coords[1];
+                            if (coords[1] > maxY) maxY = coords[1];
+                        }} else {{
+                            coords.forEach(scan);
+                        }}
+                    }}
+                    scan(feat.geometry.coordinates);
+                    return [(minX + maxX)/2, (minY + maxY)/2];
+                }}
 
-                function renderMap(center) {{
-                    // ✨ 核心逻辑：如果全局已锁定，强制使用锁定值
-                    if (window.fixedCenter) {{
-                        center = window.fixedCenter;
-                    }} else {{
-                        // 第一次渲染，锁定它！
-                        window.fixedCenter = center;
+                fixFlags();
+
+                function renderMap(viewCenter) {{
+                    var flyDest = window.FLY_HOME_PT || viewCenter;
+                    if (!window.FLY_HOME_PT && mapState === 'A') {{
+                        flyDest = viewCenter;
+                    }} else if (window.FLY_HOME_PT) {{
+                        flyDest = window.FLY_HOME_PT;
                     }}
 
                     var regions = mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
-                    var lines = mapData.points.map(pt => ({{ coords: [pt.value, center] }}));
+                    
+                    var lines = mapData.cities.map(pt => ({{ coords: [pt.value, flyDest] }}));
                     
                     var isDark = document.body.classList.contains('body--dark');
                     var areaColor = isDark ? '#1B2631' : '#e0e7ff';
                     var borderColor = isDark ? '#404a59' : '#a5b4fc';
                     
+                    var currentLeft = (mapState === 'B') ? 'center' : defaultLeft;
+
                     var option = {{
                         backgroundColor: 'transparent',
                         tooltip: {{
@@ -8760,11 +8818,14 @@ async def render_desktop_status_page():
                         }},
                         geo: {{ 
                             map: 'world', 
-                            roam: true, 
-                            zoom: 1.2, 
+                            roam: mapState === 'B' ? 'move' : false, 
+                            zoom: mapState === 'B' ? focusedZoom : defaultZoom,
                             aspectScale: 0.85, 
-                            scaleLimit: {{ min: 1.2, max: 10 }}, 
-                            center: [-10, 20], 
+                            scaleLimit: {{ min: 0.5, max: 10 }}, 
+                            center: viewCenter, 
+                            left: currentLeft,
+                            top: '-15%', 
+                            bottom: '15%',
                             label: {{ show: false }}, 
                             itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }}, 
                             tooltip: {{ show: true }}, 
@@ -8774,33 +8835,106 @@ async def render_desktop_status_page():
                         series: [
                             {{ type: 'map', map: 'world', geoIndex: 0, data: mapData.regions.map(n => ({{ name: n, value: 1 }})), itemStyle: {{ opacity: 0 }} }},
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -2] }}, data: mapData.points }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 4, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: center }}] }}
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: false }}, data: mapData.cities }},
+                            // [✨ 最终修正] 使用 scatter, symbolSize=0 (彻底隐藏点), 显示 Label (国旗)
+                            // 这样既没有“双重圆点”的视觉干扰，国旗又能 100% 显示
+                            {{ type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 24, offset: [0, -5] }}, data: mapData.flags }},
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: flyDest }}] }}
                         ]
                     }};
                     myChart.setOption(option);
                 }}
                 
-                if (navigator.geolocation) {{ 
-                    navigator.geolocation.getCurrentPosition(
-                        p => renderMap([p.coords.longitude, p.coords.latitude]), // 成功
-                        e => renderMap(defaultPt) // 失败
-                    ); 
-                }} else {{ 
-                    renderMap(defaultPt); // 不支持
+                if (!window.FLY_HOME_PT) {{
+                    if (navigator.geolocation) {{ 
+                        navigator.geolocation.getCurrentPosition(
+                            p => {{
+                                window.FLY_HOME_PT = [p.coords.longitude, p.coords.latitude];
+                                renderMap(defaultPt); 
+                            }}, 
+                            e => {{
+                                window.FLY_HOME_PT = defaultPt;
+                                renderMap(defaultPt);
+                            }}
+                        ); 
+                    }} else {{ 
+                        window.FLY_HOME_PT = defaultPt;
+                        renderMap(defaultPt);
+                    }}
+                }} else {{
+                     var restoreCenter = (mapState === 'B' && focusedCenter) ? focusedCenter : defaultPt;
+                     renderMap(restoreCenter);
                 }}
+
+                chartDom.addEventListener('wheel', function(e) {{
+                    if (mapState === 'B') {{
+                        mapState = 'A';
+                        focusedCenter = null;
+                        hasPanned = false;
+                        renderMap(defaultPt);
+                    }}
+                }});
+
+                myChart.getZr().on('mousedown', function(e) {{
+                    isDragging = false;
+                    downX = e.offsetX;
+                    downY = e.offsetY;
+                }});
+
+                myChart.getZr().on('mouseup', function(e) {{
+                    var dist = Math.sqrt(Math.pow(e.offsetX - downX, 2) + Math.pow(e.offsetY - downY, 2));
+                    if (dist > 5) {{
+                        isDragging = true;
+                        if (mapState === 'B') {{
+                            hasPanned = true; 
+                        }}
+                    }}
+                }});
+
+                myChart.getZr().on('click', function(e) {{
+                    if (isDragging) return; 
+                    if (Date.now() - lastInteraction < 200) return; 
+
+                    if (mapState === 'B') {{
+                        // B状态下点击任何地方 -> 不再返回 A (用户要求)
+                        // 仅保留拖动功能，滚轮返回 A
+                    }}
+                    lastInteraction = Date.now();
+                }});
+
+                myChart.on('click', function(params) {{
+                    var targetCenter = null;
+
+                    if ((params.componentType === 'series' && params.seriesType === 'effectScatter') || 
+                        (params.componentType === 'series' && params.seriesType === 'scatter')) {{
+                         if (params.data && params.data.value) {{
+                             targetCenter = params.data.value.slice(0, 2);
+                         }}
+                    }} 
+                    else if (params.componentType === 'geo' || params.componentType === 'series') {{
+                         if (mapData.regions.includes(params.name)) {{
+                             targetCenter = getRegionCenter(params.name);
+                         }}
+                    }}
+
+                    if (targetCenter) {{
+                        mapState = 'B';
+                        focusedCenter = targetCenter;
+                        hasPanned = false;
+                        renderMap(focusedCenter);
+                        lastInteraction = Date.now();
+                    }}
+                }});
                 
                 window.addEventListener('resize', () => myChart.resize());
                 
-                // ✨✨✨ 核心修复：精准监听 body--dark 变化，防止微小抖动触发重绘 ✨✨✨
                 var wasDark = document.body.classList.contains('body--dark');
                 new MutationObserver(function(mutations) {{
                     var isDark = document.body.classList.contains('body--dark');
-                    // 只有当“暗色状态”真正改变时，才重绘
                     if (wasDark !== isDark) {{
                         wasDark = isDark;
-                        // 传入当前锁定的坐标，或者默认值 (renderMap 内部会优先取 fixedCenter)
-                        renderMap(window.fixedCenter || defaultPt);
+                        var currentView = (mapState === 'B' && focusedCenter) ? focusedCenter : defaultPt;
+                        renderMap(currentView);
                     }}
                 }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
             }});
@@ -8810,7 +8944,6 @@ async def render_desktop_status_page():
     ''')
 
     async def loop_update():
-        # [修改 3] 这个循环现在只负责更新头部总览、地图数据、图表数据，不再负责更新单个卡片
         nonlocal local_ui_version
         try:
             if GLOBAL_UI_VERSION != local_ui_version:
@@ -8830,7 +8963,6 @@ async def render_desktop_status_page():
                     }}
                 ''')
 
-            # 简单的统计一下在线数，频率低一点也没关系
             real_online_count = 0
             for s in SERVERS_CACHE:
                 if s.get('_status') == 'online': real_online_count += 1
@@ -8839,7 +8971,6 @@ async def render_desktop_status_page():
         except Exception as e:
             print(f"Loop Update Error: {e}") 
         
-        # 头部和地图数据不需要那么频繁，5秒一次即可
         ui.timer(5.0, loop_update, once=True)
 
     ui.timer(0.1, loop_update, once=True)
