@@ -4393,8 +4393,8 @@ async def render_probe_page():
                             
                             # 2. 视图管理按钮组 (横向排列)
                             with ui.row().classes('w-full gap-2'):
-                                # ✨ 自定义分组管理 (蓝色，替换了原来的“新建”和“管理”)
-                                ui.button('自定义分组管理', icon='settings', on_click=lambda: open_unified_group_manager('manage')) \
+                                # ✨ 分组管理 (蓝色，替换了原来的“新建”和“管理”)
+                                ui.button('分组管理', icon='settings', on_click=lambda: open_unified_group_manager('manage')) \
                                     .classes('flex-1 bg-blue-50 text-blue-700 border border-blue-200 shadow-sm hover:bg-blue-100 font-bold')
 
                                 # 排序视图 (灰色)
