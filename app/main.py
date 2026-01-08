@@ -5734,7 +5734,8 @@ async def render_single_server_view(server_conf, force_refresh=False):
             for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
 
         # 2.3 滚动内容区
-        with ui.scroll_area().classes('w-full flex-grow bg-white'):
+        # --- 将原本的 bg-white 改为 bg-gray-50，让白色3D卡片能显现出来 ---
+        with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-3'): 
             @ui.refreshable
             async def render_node_list():
                 xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False) if has_xui_config else []
@@ -5748,36 +5749,68 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 else:
                     for n in all_nodes:
                         is_custom = n.get('_is_custom', False)
-                        with ui.element('div').classes('grid w-full gap-4 py-3 px-4 border-b border-gray-100 last:border-0 hover:bg-blue-50/50 transition items-center group').style(SINGLE_COLS_NO_PING):
+                        
+                        # ✨✨✨ 3D 效果核心样式 ✨✨✨
+                        row_3d_cls = (
+                            'grid w-full gap-4 py-3 px-4 mb-2 items-center group ' # 布局与间距
+                            'bg-white rounded-xl border border-gray-200 border-b-[3px] ' # 3D 基础结构 (底部加厚)
+                            'shadow-sm transition-all duration-150 ease-out ' # 动画过渡
+                            'hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] ' # 悬停：上浮 + 蓝边
+                            'active:border-b active:translate-y-[2px] active:shadow-none ' # 点击：下沉 + 阴影消失
+                            'cursor-default'
+                        )
+
+                        # 注意：这里 style(SINGLE_COLS_NO_PING) 必须保留以对齐表头
+                        with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
+                            
+                            # 1. 备注名
                             ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left text-slate-700 text-sm')
                             
+                            # 2. 类型标签
                             source_tag = "独立" if is_custom else "面板"
                             source_cls = "bg-purple-100 text-purple-700" if is_custom else "bg-gray-100 text-gray-600"
-                            ui.label(source_tag).classes(f'text-[10px] {source_cls} font-bold px-2 py-0.5 rounded-full w-fit mx-auto')
+                            ui.label(source_tag).classes(f'text-[10px] {source_cls} font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
                             
+                            # 3. 流量
                             traffic = format_bytes(n.get('up', 0) + n.get('down', 0)) if not is_custom else "--"
-                            ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono')
-                            ui.label(n.get('protocol', 'unk')).classes('uppercase text-xs font-bold w-full text-center text-slate-400')
+                            ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono font-bold')
+                            
+                            # 4. 协议
+                            proto = n.get('protocol', 'unk').upper()
+                            ui.label(proto).classes('text-[10px] font-black bg-slate-100 text-slate-500 px-1 rounded w-fit mx-auto')
+                            
+                            # 5. 端口
                             ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
                             
+                            # 6. 状态圆点
                             is_enable = n.get('enable', True)
                             with ui.row().classes('w-full justify-center items-center gap-1'):
                                 color = "green" if (is_custom or is_enable) else "red"
                                 text = "已安装" if is_custom else ("运行中" if is_enable else "已停止")
-                                ui.icon('circle', size='8px', color=color)
+                                # 给圆点也加个光晕效果
+                                ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]')
                                 ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
                             
-                            with ui.row().classes('gap-1 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
+                            # 7. 操作按钮 (悬停时显示)
+                            with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
                                 link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
-                                if link: ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-600 hover:bg-gray-100')
+                                
+                                # 按钮统一样式：圆形、扁平、微动效
+                                btn_props = 'flat dense size=sm round'
+                                
+                                if link: 
+                                    ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
+                                
                                 if is_custom:
-                                    ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props('flat dense size=sm round').tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
-                                    ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props('flat dense size=sm round').tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
+                                    ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
+                                    ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
                                 else:
                                     async def on_edit_success(): ui.notify('修改成功'); await reload_and_refresh_ui()
-                                    ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props('flat dense size=sm round').classes('text-blue-600 hover:bg-blue-50')
+                                    ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
+                                    
                                     async def on_del_success(): ui.notify('删除成功'); await reload_and_refresh_ui()
-                                    ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props('flat dense size=sm round').classes('text-red-500 hover:bg-red-50')
+                                    ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props(btn_props).classes('text-red-500 hover:bg-red-50')
+            
             await render_node_list()
             if has_xui_config: asyncio.create_task(reload_and_refresh_ui())
 
