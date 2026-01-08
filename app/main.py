@@ -450,6 +450,16 @@ XHTTP_INSTALL_SCRIPT_TEMPLATE = r"""
 export DEBIAN_FRONTEND=noninteractive
 export PATH=$PATH:/usr/local/bin
 
+# ================= 修复补丁开始 =================
+# 在执行任何检查前，强制先安装 netstat 和 lsof
+if [ -f /etc/debian_version ]; then
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y net-tools lsof >/dev/null 2>&1
+elif [ -f /etc/redhat-release ]; then
+    yum install -y net-tools lsof >/dev/null 2>&1
+fi
+# ================= 修复补丁结束 =================
+
 # 定义日志函数
 log() { echo -e "\033[32m[DEBUG]\033[0m $1"; }
 err() { echo -e "\033[31m[ERROR]\033[0m $1"; }
@@ -624,8 +634,10 @@ def parse_vless_link_to_node(link, remark_override=None):
     try:
         if not link.startswith("vless://"): return None
         
-        # 1. 基础解析
+        # 局部引入依赖，防止报错
         import urllib.parse
+        
+        # 1. 基础解析：移除协议头
         main_part = link.replace("vless://", "")
         
         # 处理 fragment (#备注)
@@ -634,29 +646,43 @@ def parse_vless_link_to_node(link, remark_override=None):
             main_part, remark = main_part.split("#", 1)
             remark = urllib.parse.unquote(remark)
         
-        if remark_override: remark = remark_override
+        # 如果传入了强制备注（用户输入的），覆盖原备注
+        if remark_override: 
+            remark = remark_override
 
-        # 处理 query parameters
+        # 处理 query parameters (?)
         params = {}
         if "?" in main_part:
             main_part, query_str = main_part.split("?", 1)
             params = dict(urllib.parse.parse_qsl(query_str))
         
         # 处理 user@host:port
-        user_info, host_port = main_part.split("@", 1)
-        uuid = user_info
-        
+        if "@" in main_part:
+            user_info, host_port = main_part.split("@", 1)
+            uuid = user_info
+        else:
+            return None # 格式不正确
+
         if ":" in host_port:
-            # Handle IPv6 brackets if needed, simplistic here
+            # 使用 rsplit 确保正确处理 host:port
             host, port = host_port.rsplit(":", 1)
         else:
             host = host_port
             port = 443
 
+        # ================= 核心修复：更新原始链接中的备注 =================
+        final_link = link
+        if remark_override:
+            # 1. 如果原链接里有 #，先去掉旧的
+            if "#" in final_link:
+                final_link = final_link.split("#")[0]
+            # 2. 拼接新的备注 (进行 URL 编码)
+            final_link = f"{final_link}#{urllib.parse.quote(remark)}"
+        # ==========================================================
+
         # 2. 构建符合 Panel 格式的 Node 字典
-        # 注意：这是模拟 X-UI 的数据结构，用于前端渲染
         node = {
-            "id": uuid, # 使用 UUID 作为 ID
+            "id": uuid, 
             "remark": remark,
             "port": int(port),
             "protocol": "vless",
@@ -674,17 +700,19 @@ def parse_vless_link_to_node(link, remark_override=None):
                 },
                 "realitySettings": {
                     "serverName": params.get("sni", ""),
-                    "shortId": params.get("sid", ""), # 链接中可能不直接体现
-                    "publicKey": params.get("pbk", "") # VLESS链接通常不带pbk在param里，这里简化展示
+                    "shortId": params.get("sid", ""), 
+                    "publicKey": params.get("pbk", "") 
                 }
             },
             "enable": True,
-            "_is_custom": True, # ✨ 标记为自定义节点
-            "_raw_link": link   # 保存原始链接方便复制
+            "_is_custom": True, 
+            "_raw_link": final_link  # 使用更新后的链接
         }
         return node
+
     except Exception as e:
-        logger.error(f"解析 VLESS 链接失败: {e}")
+        # 必须要有 except 块来捕获潜在错误
+        print(f"[Error] 解析 VLESS 链接失败: {e}")
         return None
 
 # ================= [V75 自定义域名版] 部署弹窗 (自定义使用 CF API 根域名) =================
@@ -8682,7 +8710,7 @@ async def render_desktop_status_page():
             if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
         except Exception as e:
             print(f"Loop Update Error: {e}")
-        ui.timer(2.0, loop_update, once=True)
+        ui.timer(5.0, loop_update, once=True)
     ui.timer(0.1, loop_update, once=True)
 
 # ================= 手机端专用：实时动效 Dashboard 最终完整版 (V52) =================
