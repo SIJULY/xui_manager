@@ -8559,13 +8559,17 @@ async def render_desktop_status_page():
             
             else:
                 if cache_vals.get('status') != 'offline':
+                    # 1. 变红、变离线样式 (保留)
                     refs['card'].classes(add='offline-card')
                     refs['status_icon'].set_name('flash_off')
                     refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
                     refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
-                    refs['uptime'].set_content("Down")
+                    
+                    # 2. 【关键】不要覆盖 Uptime，让它保持最后一次在线时的文字
+                    # refs['uptime'].set_content("Down") # <--- 已注释掉此行
+                    
+                    # 3. 标记状态缓存为 offline，防止重复刷新 UI
                     cache_vals['status'] = 'offline'
-
 
     def create_server_card(s):
         url = s['url']
