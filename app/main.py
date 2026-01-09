@@ -4111,7 +4111,7 @@ def open_group_sort_dialog():
         async def save():
             ADMIN_CONFIG['probe_custom_groups'] = temp_list
             await save_admin_config()
-            safe_notify("✅ 视图顺序已更新", "positive")
+            safe_notify("✅ 分组顺序已更新", "positive")
             d.close()
 
         with ui.row().classes('w-full p-4 border-t bg-white'):
@@ -4120,7 +4120,7 @@ def open_group_sort_dialog():
     d.open()
 import traceback # 引入用于打印报错堆栈
 
-# ================= 探针视图一体化管理器  =================
+# ================= 探针自定义分组一体化管理器  =================
 def open_unified_group_manager(mode='manage'):
     # 1. 数据准备与状态初始化
     if 'probe_custom_groups' not in ADMIN_CONFIG: 
@@ -4146,7 +4146,7 @@ def open_unified_group_manager(mode='manage'):
             ui.label('视图列表:').classes('font-bold text-gray-500 mr-2 text-xs')
             
             # 新建按钮 (绿色)
-            ui.button('➕ 新建视图', on_click=lambda: load_group_data(None)).props('unelevated color=green text-color=white size=sm')
+            ui.button('➕ 新建分组', on_click=lambda: load_group_data(None)).props('unelevated color=green text-color=white size=sm')
             
             ui.separator().props('vertical').classes('mx-2 h-6')
 
