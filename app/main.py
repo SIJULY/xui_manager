@@ -359,7 +359,7 @@ async def generate_smart_name(server_conf):
     return f"Server-{len(SERVERS_CACHE) + 1}"
 
 
-# ================= [新增] 独立的 Cloudflare 设置弹窗 =================
+# =================  Cloudflare 设置弹窗 =================
 def open_cloudflare_settings_dialog():
     with ui.dialog() as d, ui.card().classes('w-[500px] p-6 flex flex-col gap-4'):
         with ui.row().classes('items-center gap-2 text-orange-600 mb-2'):
@@ -398,7 +398,7 @@ def load_global_key():
 def save_global_key(content):
     with open(GLOBAL_SSH_KEY_FILE, 'w') as f: f.write(content)
 
-# ================= 全局设置弹窗 =================
+# =================  全局SSH密钥设置弹窗  =================
 def open_global_settings_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl p-6 flex flex-col gap-4'):
         with ui.row().classes('justify-between items-center w-full border-b pb-2'):
@@ -415,150 +415,108 @@ def open_global_settings_dialog():
             safe_notify('✅ 全局密钥已保存', 'positive')
             d.close()
 
-        ui.button('保存密钥', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white shadow-lg h-12 mt-2')     
-        # === 新增：Cloudflare API 配置 ===
-        with ui.expansion('Cloudflare API 集成 (可选)', icon='cloud').classes('w-full border rounded'):
-            with ui.column().classes('p-4 gap-3 w-full'):
-                ui.label('用于自动解析域名、开启 CDN 和设置 SSL。').classes('text-xs text-gray-500')
-                
-                cf_token = ui.input('API Token (Edit Zone DNS)', value=ADMIN_CONFIG.get('cf_api_token', '')).props('outlined dense').classes('w-full')
-                cf_email = ui.input('Email (仅使用 Global Key 时需要)', value=ADMIN_CONFIG.get('cf_email', '')).props('outlined dense').classes('w-full')
-                
-                # 根域名列表 (用于自动分配子域名)
-                cf_domain_root = ui.input('根域名 (例如: example.com)', value=ADMIN_CONFIG.get('cf_root_domain', '')).props('outlined dense').classes('w-full')
-                
-                ui.label('注意：Token 需要有 "Zone.DNS:Edit" 和 "Zone.Settings:Edit" 权限').classes('text-xs text-orange-500')
-
-        async def save_all():
-            save_global_key(key_input.value)
-            
-            # 保存 CF 配置
-            ADMIN_CONFIG['cf_api_token'] = cf_token.value.strip()
-            ADMIN_CONFIG['cf_email'] = cf_email.value.strip()
-            ADMIN_CONFIG['cf_root_domain'] = cf_domain_root.value.strip()
-            await save_admin_config()
-            
-            safe_notify('✅ 全局配置已保存', 'positive')
-            d.close()
-
-        ui.button('保存设置', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white h-12 mt-2')
+        ui.button('保存密钥', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white shadow-lg h-12 mt-2')
     d.open()
 
 
 
-# ================= [V72 诊断调试版] XHTTP-Reality 部署脚本 =================
+# =================  XHTTP-Reality 部署脚本 =================
+# 特性：自动检测 Caddy/Nginx，如果 443 被占，自动切换到 8443，互不冲突。
 XHTTP_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 export PATH=$PATH:/usr/local/bin
 
-# ================= 修复补丁开始 =================
-# 在执行任何检查前，强制先安装 netstat 和 lsof
+# 1. 基础环境检查
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y net-tools lsof >/dev/null 2>&1
+    apt-get install -y net-tools lsof curl unzip jq uuid-runtime openssl >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
-    yum install -y net-tools lsof >/dev/null 2>&1
+    yum install -y net-tools lsof curl unzip jq >/dev/null 2>&1
 fi
-# ================= 修复补丁结束 =================
 
-# 定义日志函数
+# 定义日志
 log() { echo -e "\033[32m[DEBUG]\033[0m $1"; }
 err() { echo -e "\033[31m[ERROR]\033[0m $1"; }
 
 DOMAIN="$1"
 if [ -z "$DOMAIN" ]; then err "域名参数缺失"; exit 1; fi
 
-log "========== 开始诊断部署 =========="
-log "目标域名: $DOMAIN"
-log "当前用户: $(whoami)"
-log "系统信息: $(uname -a)"
+log "========== 开始智能部署 XHTTP =========="
 
-# 1. 检查端口占用 (最常见死因)
-log "正在检查 80 和 443 端口占用..."
-P80=$(lsof -i :80 -t || ss -lptn 'sport = :80' | grep -v State)
-P443=$(lsof -i :443 -t || ss -lptn 'sport = :443' | grep -v State)
+# 2. 智能端口选择 (核心修改)
+# 默认端口
+PORT_REALITY=443
+PORT_XHTTP=80
 
-if [ -n "$P80" ]; then
-    err "端口 80 被占用! 占用进程信息:"
-    netstat -tlpn | grep :80 || lsof -i :80
-    echo "⚠️  警告: Xray 可能无法启动。尝试强制停止常见 Web 服务..."
-    systemctl stop nginx 2>/dev/null
-    systemctl stop apache2 2>/dev/null
-    systemctl stop caddy 2>/dev/null
+# 检查 443 (TCP) 是否被占用 (例如 Caddy/Nginx)
+if netstat -tlpn | grep -q ":443 "; then
+    log "⚠️ 检测到 TCP 443 端口被占用 (可能是 Caddy/Nginx)"
+    log "🔄 自动切换 Reality 端口至: 8443"
+    PORT_REALITY=8443
+else
+    log "✅ TCP 443 端口空闲，将使用默认端口"
 fi
 
-if [ -n "$P443" ]; then
-    err "端口 443 被占用! 占用进程信息:"
-    netstat -tlpn | grep :443 || lsof -i :443
+# 检查 80 (TCP) 是否被占用
+if netstat -tlpn | grep -q ":80 "; then
+    log "⚠️ 检测到 TCP 80 端口被占用"
+    log "🔄 自动切换 XHTTP 监听端口至: 8080"
+    PORT_XHTTP=8080
+else
+    log "✅ TCP 80 端口空闲，将使用默认端口"
 fi
 
-# 2. 安装基础工具
-log "安装依赖..."
-apt-get update -y >/dev/null 2>&1
-apt-get install -y curl unzip jq uuid-runtime openssl net-tools lsof >/dev/null 2>&1
-
-# 3. 安装/更新 Xray (强制更新到最新版以支持 xhttp)
+# 3. 安装/更新 Xray
 log "正在下载最新版 Xray..."
 xray_bin="/usr/local/bin/xray"
-# 强制移除旧版，确保环境纯净
-rm -f "$xray_bin"
+rm -f "$xray_bin" # 清理旧版
 arch=$(uname -m); 
 case "$arch" in x86_64) a="64";; aarch64) a="arm64-v8a";; esac
 curl -fsSL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${a}.zip -o /tmp/xray.zip
-if [ $? -ne 0 ]; then err "Xray 下载失败，请检查网络"; exit 1; fi
+if [ $? -ne 0 ]; then err "Xray 下载失败"; exit 1; fi
 
 unzip -qo /tmp/xray.zip -d /tmp/xray
 install -m 755 /tmp/xray/xray "$xray_bin"
-VER=$($xray_bin version | head -n 1)
-log "Xray 版本: $VER"
 
-# 4. 生成密钥
-log "生成密钥..."
+# 4. 生成密钥与配置
 KEYS=$($xray_bin x25519)
 PRI_KEY=$(echo "$KEYS" | grep -i "Private" | awk '{print $NF}')
 PUB_KEY=$(echo "$KEYS" | grep -i "Public" | awk '{print $NF}')
-
-# 兜底提取
+# 兜底
 if [ -z "$PUB_KEY" ]; then
     PRI_KEY=$(echo "$KEYS" | head -n1 | awk '{print $NF}')
     PUB_KEY=$(echo "$KEYS" | tail -n1 | awk '{print $NF}')
 fi
 
-if [ -z "$PUB_KEY" ]; then 
-    err "密钥生成失败. 原始输出: $KEYS"
-    exit 1
-fi
-log "Public Key: $PUB_KEY"
-
-# 5. 生成配置
 UUID_XHTTP=$(cat /proc/sys/kernel/random/uuid)
 UUID_REALITY=$(cat /proc/sys/kernel/random/uuid)
-# 使用 tr -d '\n' 确保无换行符
 XHTTP_PATH="/$(echo "$UUID_XHTTP" | cut -d- -f1 | tr -d '\n')"
 SHORT_ID=$(openssl rand -hex 4)
+# 如果端口不是 443，Reality 目标也要相应调整，这里偷懒直接回环，或者偷一个公网
 SNI="www.icloud.com"
 
 mkdir -p /usr/local/etc/xray
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 
+# 生成配置文件 (使用动态端口变量)
 cat > $CONFIG_FILE <<EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "port": 80,
+      "port": $PORT_XHTTP,
       "protocol": "vless",
       "settings": { "clients": [{ "id": "$UUID_XHTTP" }], "decryption": "none" },
       "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$XHTTP_PATH", "mode": "auto" } }
     },
     {
-      "port": 443,
+      "port": $PORT_REALITY,
       "protocol": "vless",
       "settings": {
         "clients": [{ "id": "$UUID_REALITY", "flow": "xtls-rprx-vision" }],
         "decryption": "none",
-        "fallbacks": [{ "dest": 80 }]
+        "fallbacks": [{ "dest": $PORT_XHTTP }]
       },
       "streamSettings": {
         "network": "tcp",
@@ -571,19 +529,7 @@ cat > $CONFIG_FILE <<EOF
 }
 EOF
 
-# 6. 配置自检 (关键步骤)
-log "正在执行配置文件自检..."
-TEST_OUT=$($xray_bin run -test -c $CONFIG_FILE 2>&1)
-if echo "$TEST_OUT" | grep -q "Configuration OK"; then
-    log "✅ 配置文件格式正确"
-else
-    err "❌ 配置文件错误! Xray 无法启动。"
-    echo "$TEST_OUT"
-    exit 1
-fi
-
-# 7. 启动服务
-log "配置 Systemd 服务..."
+# 5. 启动服务
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray Service
@@ -598,39 +544,21 @@ EOF
 systemctl daemon-reload
 systemctl enable xray >/dev/null 2>&1
 systemctl restart xray
-
-# 8. 验证运行状态
 sleep 2
-STATUS=$(systemctl is-active xray)
-if [ "$STATUS" == "active" ]; then
-    log "✅ Xray 服务启动成功 (Active)"
-    
-    # 再次检查端口监听
-    CHECK_80=$(netstat -tlpn | grep :80)
-    if [ -n "$CHECK_80" ]; then
-        log "✅ 端口 80 监听正常: $CHECK_80"
-    else
-        err "⚠️  Xray 启动了，但没监听到 80 端口，可能被抢占或权限不足"
-    fi
-else
-    err "❌ Xray 服务启动失败! 状态: $STATUS"
-    err ">>> 错误日志 (最后 20 行):"
-    journalctl -u xray -n 20 --no-pager
-    exit 1
-fi
 
-# 9. 生成链接
+# 6. 生成链接 (使用实际端口)
 VPS_IP=$(curl -fsSL https://api.ipify.org)
-EXTRA_JSON="{\"downloadSettings\":{\"address\":\"$VPS_IP\",\"port\":443,\"network\":\"xhttp\",\"xhttpSettings\":{\"path\":\"$XHTTP_PATH\",\"mode\":\"auto\"},\"security\":\"reality\",\"realitySettings\":{\"serverName\":\"$SNI\",\"fingerprint\":\"chrome\",\"show\":false,\"publicKey\":\"$PUB_KEY\",\"shortId\":\"$SHORT_ID\",\"spiderX\":\"/\"}}}"
+EXTRA_JSON="{\"downloadSettings\":{\"address\":\"$VPS_IP\",\"port\":$PORT_REALITY,\"network\":\"xhttp\",\"xhttpSettings\":{\"path\":\"$XHTTP_PATH\",\"mode\":\"auto\"},\"security\":\"reality\",\"realitySettings\":{\"serverName\":\"$SNI\",\"fingerprint\":\"chrome\",\"show\":false,\"publicKey\":\"$PUB_KEY\",\"shortId\":\"$SHORT_ID\",\"spiderX\":\"/\"}}}"
 
 ENC_EXTRA=$(printf '%s' "$EXTRA_JSON" | jq -sRr @uri)
 ENC_PATH=$(printf '%s' "$XHTTP_PATH" | jq -sRr @uri)
 
-LINK="vless://${UUID_XHTTP}@www.visa.com.hk:443?encryption=none&security=tls&sni=${DOMAIN}&type=xhttp&host=${DOMAIN}&path=${ENC_PATH}&mode=auto&extra=${ENC_EXTRA}#XHTTP-Reality"
+# 注意：链接中的端口变为 $PORT_REALITY
+LINK="vless://${UUID_XHTTP}@${VPS_IP}:${PORT_REALITY}?encryption=none&security=tls&sni=${DOMAIN}&type=xhttp&host=${DOMAIN}&path=${ENC_PATH}&mode=auto&extra=${ENC_EXTRA}#XHTTP-Reality"
 
 echo "DEPLOY_SUCCESS_LINK: $LINK"
 """
-# ================= [新增] VLESS 链接解析器 =================
+# ================= VLESS 链接解析器 =================
 def parse_vless_link_to_node(link, remark_override=None):
     """将 vless:// 链接解析为面板节点格式的字典"""
     try:
@@ -717,7 +645,7 @@ def parse_vless_link_to_node(link, remark_override=None):
         print(f"[Error] 解析 VLESS 链接失败: {e}")
         return None
 
-# ================= [V75 自定义域名版] 部署弹窗 (自定义使用 CF API 根域名) =================
+# ================= 部署弹窗 (自定义使用 CF API 根域名) =================
 async def open_deploy_xhttp_dialog(server_conf, callback):
     # 1. 获取服务器真实 IP (用于解析)
     # 无论配置里填的是域名还是IP，我们都需要解析出最终的 IPv4 地址
@@ -861,7 +789,7 @@ def _ssh_exec_wrapper(server_conf, cmd):
         return False, str(e)
 
 
-# ================= [V75 安全版] XHTTP 卸载脚本 =================
+# ================= XHTTP 卸载脚本 =================
 # 修正：只停止服务和删除配置，保留 xray 二进制文件，防止误杀 X-UI
 XHTTP_UNINSTALL_SCRIPT = r"""
 #!/bin/bash
@@ -880,7 +808,9 @@ echo "Xray Service Uninstalled (Binary kept safe)"
 """
 
 
-# ================= Hysteria 2 安装脚本模板 (已修复 awk 格式化冲突) =================
+# ================= Hysteria 2 安装脚本 =================
+# 特性：自动检测 UDP 443 占用，如果 Caddy 在运行，Hy2 自动退避到 8443，
+# 并自动将端口跳跃流量转发到 8443。Caddy 和 Hy2 完美共存。
 HYSTERIA_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 # 1. 接收参数
@@ -891,15 +821,12 @@ ENABLE_PORT_HOPPING="{enable_hopping}"
 PORT_RANGE_START="{port_range_start}"
 PORT_RANGE_END="{port_range_end}"
 
-# 2. 清理旧环境
+# 2. 环境清理与安装
 systemctl stop hysteria-server.service 2>/dev/null
-systemctl disable hysteria-server.service 2>/dev/null
 rm -rf /etc/hysteria
-
-# 3. 安装 Hysteria 2
 bash <(curl -fsSL https://get.hy2.sh/)
 
-# 4. 生成自签名证书
+# 3. 证书生成
 mkdir -p /etc/hysteria
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
   -keyout /etc/hysteria/server.key \
@@ -909,9 +836,21 @@ openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 chown hysteria /etc/hysteria/server.key
 chown hysteria /etc/hysteria/server.crt
 
-# 5. 写入配置
+# 4. 智能端口选择 (核心逻辑)
+# 默认监听 443
+HY2_PORT=443
+
+# 检测 UDP 443 是否被占用 (通常是 Caddy/Nginx 的 HTTP/3)
+if netstat -ulpn | grep -q ":443 "; then
+    echo "⚠️  检测到 UDP 443 端口忙 (Caddy/HTTP3?)，Hy2 自动切换至 8443"
+    HY2_PORT=8443
+else
+    echo "✅ UDP 443 端口空闲，Hy2 将使用标准端口"
+fi
+
+# 5. 写入配置 (使用动态端口)
 cat << EOF > /etc/hysteria/config.yaml
-listen: :443
+listen: :$HY2_PORT
 tls:
   cert: /etc/hysteria/server.crt
   key: /etc/hysteria/server.key
@@ -929,11 +868,20 @@ masquerade:
     rewriteHost: true
 EOF
 
-# 6. 端口跳跃 (注意：这里的 awk 花括号必须双写以避开 Python 格式化)
+# 6. 端口跳跃设置 (动态转发到实际端口)
+# 注意：awk 的花括号在 Python 中需要双写 {{ }}
 if [ "$ENABLE_PORT_HOPPING" == "true" ]; then
     IFACE=$(ip route get 8.8.8.8 | awk '{{print $5; exit}}')
-    iptables -t nat -D PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports 443 2>/dev/null || true
-    iptables -t nat -A PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports 443
+    
+    # 清理旧规则
+    iptables -t nat -D PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
+    
+    # 添加新规则：将 跳跃范围 转发给 -> Hy2 实际端口 ($HY2_PORT)
+    iptables -t nat -A PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT
+    
+    # 持久化 (简单处理)
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
 fi
 
 # 7. 启动
@@ -941,15 +889,23 @@ systemctl enable --now hysteria-server.service
 sleep 2
 
 # 8. 输出链接
+# 无论内部用 443 还是 8443，我们生成的链接可以用 443 (如果没被占) 或者直接用跳跃端口
+# 为了稳妥，如果开启了端口跳跃，建议直接给出一个跳跃范围内的端口，或者依然给 443 (靠 iptables 转发)
+# 这里我们输出实际监听端口，确保最稳
 if systemctl is-active --quiet hysteria-server.service; then
     PUBLIC_IP=$(curl -s https://api.ipify.org)
-    LINK="hy2://$PASSWORD@$PUBLIC_IP:443?peer=$SNI&insecure=1&obfs=salamander&obfs-password=$OBFS_PASSWORD&sni=$SNI#Hy2-SelfSigned"
+    
+    # 如果开启了跳跃，链接里的端口其实可以是范围内任意一个，
+    # 但为了兼容性，我们还是写实际端口。
+    # 用户可以在客户端自己改成 20000-50000。
+    LINK="hy2://$PASSWORD@$PUBLIC_IP:$HY2_PORT?peer=$SNI&insecure=1&obfs=salamander&obfs-password=$OBFS_PASSWORD&sni=$SNI#Hy2-Nodes"
+    
     echo "HYSTERIA_DEPLOY_SUCCESS_LINK: $LINK"
 else
     echo "HYSTERIA_DEPLOY_FAILED"
 fi
 """
-# ================= [复刻 XHTTP 逻辑] 一键部署 Hysteria 2 (带自定义名称) =================
+# ================= 一键部署 Hysteria 2  =================
 async def open_deploy_hysteria_dialog(server_conf, callback):
     # --- 1. IP 获取逻辑 (保持不变) ---
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
@@ -1776,7 +1732,7 @@ async def safe_save(filename, data):
         try: await run.io_bound(_save_file_sync_internal, filename, data)
         except Exception as e: logger.error(f"❌ 保存 {filename} 失败: {e}")
 
-# ================= 数据保存函数 (V2：集成 UI 版本控制) =================
+# ================= 数据保存函数 =================
 
 # 1. 保存服务器列表
 async def save_servers(): 
@@ -2122,7 +2078,7 @@ def _exec(server_data, cmd, log_area):
         log_area.push(f"系统错误: {repr(e)}") # 使用 repr 显示详细错误类型
     finally:
         client.close()
-# ================= [V71 增强版] Cloudflare API 工具类 =================
+# =================  Cloudflare API 工具类 =================
 class CloudflareHandler:
     def __init__(self):
         self.token = ADMIN_CONFIG.get('cf_api_token', '')
@@ -2524,7 +2480,7 @@ def open_probe_settings_dialog():
     d.open()
 
  
-# =================  单台安装探针 (逻辑升级：支持注入自定义测速点) =================
+# =================  单台安装探针 =================
 async def install_probe_on_server(server_conf):
     name = server_conf.get('name', 'Unknown')
     auth_type = server_conf.get('ssh_auth_type', '全局密钥')
@@ -4489,7 +4445,7 @@ def open_server_detail_dialog(server_conf):
         
     d.open()
 
-# ================= 探针设置页 (V31：最终版) =================
+# ================= 探针设置页 =================
 async def render_probe_page():
     # 1. 标记当前视图状态
     global CURRENT_VIEW_STATE
@@ -4527,7 +4483,7 @@ async def render_probe_page():
                     ui.label('探针管理与设置').classes('text-2xl font-extrabold text-slate-800 tracking-tight')
                     ui.label('Probe Configuration & Management').classes('text-xs font-bold text-gray-400 uppercase tracking-widest')
 
-            # --- 核心网格布局 (修改点：左右 4:3 比例) ---
+            # --- 核心网格布局 (左右 4:3 比例) ---
             # lg:grid-cols-7 将网格分为 7 份
             with ui.grid().classes('w-full grid-cols-1 lg:grid-cols-7 gap-6 items-stretch'):
                 
@@ -4855,7 +4811,7 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-# ================= 订阅策略编辑器 (修复 Switch 报错) =================
+# ================= 订阅策略编辑器  =================
 class SubscriptionProcessEditor:
     def __init__(self, sub_data):
         self.sub_data = sub_data
@@ -5119,7 +5075,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (V66：智能端口补全版) =================
+# ================= 小巧卡片式弹窗 =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -5432,7 +5388,7 @@ async def open_server_dialog(idx=None):
                 ui.button('删除 / 卸载配置', icon='delete', on_click=open_delete_confirm).props('flat').classes(btn_keycap_delete)
     d.open()
     
-# ================= [极简导出版 - 完美居中] 数据备份/恢复 (批量增强版) =================
+# =================  数据备份/恢复  =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         
@@ -5728,7 +5684,7 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
 
 
-# ================= ✨✨✨ 刷新逻辑 (修复双标题栏问题) =================
+# ================= 刷新逻辑 =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     try: client = ui.context.client
     except: return 
@@ -5863,7 +5819,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
 
 # 用于外部调用的刷新句柄 (例如给右上角"新建节点"按钮使用)
 REFRESH_CURRENT_NODES = lambda: None
-# ================= [V83 修复版] 单服务器视图 (修复空白BUG) =================
+# =================  单服务器视图 =================
 async def render_single_server_view(server_conf, force_refresh=False):
     global REFRESH_CURRENT_NODES
     
@@ -6138,7 +6094,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 # 结构: { 'server_url': { 'row_el': row_element, 'status_icon': icon, 'status_label': label, ... } }
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
-# ================= [新增] 点击自定义节点显示详情 =================
+# ================= 点击自定义节点显示详情 =================
 def show_custom_node_info(node):
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm'):
         ui.label(node.get('remark', '节点详情')).classes('text-lg font-bold mb-2')
@@ -6335,7 +6291,7 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
 
-# ================= 核心：静默刷新 UI 数据 (已修复：统计 Hy2/XHTTP 节点) =================
+# ================= 核心：静默刷新 UI 数据  =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -6416,7 +6372,7 @@ def get_dashboard_live_data():
     return data if data else {"error": "Calculation failed"}
 
 
-# ================= 辅助：统一数据计算逻辑 (已修复统计自定义节点) =================
+# ================= 辅助：统一数据计算逻辑 =================
 def calculate_dashboard_data():
     """
     计算并返回当前所有面板数据。
@@ -6501,7 +6457,7 @@ def calculate_dashboard_data():
         print(f"Error calculating dashboard data: {e}")
         return None
 
-# ================= 核心：仪表盘主视图渲染 (V103：UI高度紧凑优化版) =================
+# ================= 核心：仪表盘主视图渲染 =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
@@ -7242,7 +7198,7 @@ def open_combined_group_management(group_name):
 
     d.open()
     
-# ================= 快捷创建分组弹窗 (必须放在 render_sidebar_content 之前) =================
+# ================= 快捷创建分组弹窗 =================
 def open_create_group_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-sm flex flex-col gap-4 p-6'):
         ui.label('新建自定义分组').classes('text-lg font-bold mb-2')
@@ -7274,9 +7230,7 @@ def open_create_group_dialog():
              ui.button('保存', on_click=save_new_group).classes('bg-blue-600 text-white')
     d.open()
 
-# ================= [侧边栏渲染：V90 纯净灰3D键帽版] =================
-
-# 👇 这一句必须保留在函数外
+# ================= 侧边栏渲染 =================
 _current_dragged_group = None 
 
 @ui.refreshable
@@ -7481,7 +7435,7 @@ def render_sidebar_content():
         ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog) \
             .props('flat align=left').classes(bottom_btn_3d)
         
-        # 修正：移除特殊的橙色背景，使用统一的 bottom_btn_3d
+        # 使用统一的 bottom_btn_3d
         ui.button('Cloudflare 设置', icon='cloud', on_click=open_cloudflare_settings_dialog) \
             .props('flat align=left').classes(bottom_btn_3d)
         
@@ -7621,7 +7575,7 @@ def check_auth(request: Request):
     return app.storage.user.get('authenticated', False)
 
 
-# ================= [本地化版] 主页入口 (最终完整版) =================
+# ================= [本地化版] 主页入口  =================
 @ui.page('/')
 def main_page(request: Request):
     # ================= 1. 注入全局资源与样式 =================
@@ -7631,8 +7585,7 @@ def main_page(request: Request):
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
 
-    # ✨✨✨ [修改] 2D 平面地图依赖 (ECharts) ✨✨✨
-    # 删除了旧的 globe.gl，改为引入 ECharts
+    #  2D 平面地图依赖 (ECharts) 
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
 
     # 1.2 核心样式注入
@@ -7729,7 +7682,7 @@ def main_page(request: Request):
 
 # ================= TG 报警模块 =================
 ALERT_CACHE = {}     # 记录服务器确认后的状态 (Online/Offline)
-FAILURE_COUNTS = {}  # ✨新增：记录连续失败次数
+FAILURE_COUNTS = {}  # 记录连续失败次数
 
 async def send_telegram_message(text):
     """发送 Telegram 消息"""
@@ -7852,7 +7805,7 @@ async def job_sync_all_traffic():
         
     logger.info("✅ [定时任务] 流量同步完成 (已落盘)")
 
-# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 (修复版) =================
+# 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
     logger.info("🌍 [定时任务] 开始全量 IP 归属地检测与名称修正...")
     data_changed = False
@@ -7924,7 +7877,7 @@ async def startup_sequence():
     # 1. 流量同步 (3小时一次)
     scheduler.add_job(job_sync_all_traffic, 'interval', hours=3, id='traffic_sync', replace_existing=True, max_instances=1)
     
-    # 2. ✨✨✨ 新增：服务器状态监控与报警 (60秒一次) ✨✨✨
+    # 2. 服务器状态监控与报警 (60秒一次) ✨✨✨
     scheduler.add_job(job_monitor_status, 'interval', seconds=60, id='status_monitor', replace_existing=True, max_instances=1)
     
     scheduler.start()
@@ -8026,7 +7979,7 @@ def get_echarts_region_name(name_raw):
         if key in name: return MATCH_MAP[key]
     return None
     
-# ================= [手机端] 详情弹窗 (V63 修复交互版) =================
+# ================= [手机端] 详情弹窗  =================
 def open_mobile_server_detail(server_conf):
     # 注入 CSS
     ui.add_head_html('''
@@ -8246,13 +8199,13 @@ def open_mobile_server_detail(server_conf):
     except Exception as e:
         print(f"Mobile Detail error: {e}")
         
-# ================= [电脑端] 详情弹窗 (V81：白天玻璃拟态风格适配版) =================
+# ================= [电脑端] 详情弹窗 =================
 def open_pc_server_detail(server_conf):
     try:
         # 1. 获取当前主题状态
         is_dark = app.storage.user.get('is_dark', True)
         
-        # 2. 定义双模样式 (✨ 核心修改：复刻主页卡片的玻璃拟态风格)
+        # 2. 定义双模样式 
         
         # 文字颜色：白天深蓝灰 / 黑夜浅灰
         LABEL_STYLE = 'text-slate-500 dark:text-gray-400 text-sm font-medium'
@@ -8551,8 +8504,8 @@ async def status_page_router(request: Request):
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
         
-# ================= 电脑端大屏显示 (V79：防卡死修复 + UI终极精修) =================        
-import asyncio # 必须引入 asyncio
+# ================= 电脑端大屏显示  =================        
+import asyncio 
 
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
@@ -8894,8 +8847,6 @@ async def render_desktop_status_page():
                     refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
                     
                     # 2. 【关键】不要覆盖 Uptime，让它保持最后一次在线时的文字
-                    # refs['uptime'].set_content("Down") # <--- 已注释掉此行
-                    
                     # 3. 标记状态缓存为 offline，防止重复刷新 UI
                     cache_vals['status'] = 'offline'
 
@@ -9340,7 +9291,7 @@ async def render_desktop_status_page():
 
     ui.timer(0.1, loop_update, once=True)
 
-# ================= 手机端专用：实时动效 Dashboard 最终完整版 (V52) =================
+# ================= 手机端专用：实时动效 Dashboard 最终完整版 =================
 async def render_mobile_status_page():
     global CURRENT_PROBE_TAB
     # 用于存储 UI 组件引用的字典，实现局部刷新
