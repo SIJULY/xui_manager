@@ -444,6 +444,8 @@ def open_global_settings_dialog():
         ui.button('保存设置', icon='save', on_click=save_all).classes('w-full bg-slate-900 text-white h-12 mt-2')
     d.open()
 
+
+
 # ================= [V72 诊断调试版] XHTTP-Reality 部署脚本 =================
 XHTTP_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
@@ -877,7 +879,211 @@ rm -rf /usr/local/etc/xray
 echo "Xray Service Uninstalled (Binary kept safe)"
 """
 
+
+# ================= Hysteria 2 安装脚本模板 (已修复 awk 格式化冲突) =================
+HYSTERIA_INSTALL_SCRIPT_TEMPLATE = r"""
+#!/bin/bash
+# 1. 接收参数
+PASSWORD="{password}"
+OBFS_PASSWORD="{obfs_password}"
+SNI="{sni}"
+ENABLE_PORT_HOPPING="{enable_hopping}"
+PORT_RANGE_START="{port_range_start}"
+PORT_RANGE_END="{port_range_end}"
+
+# 2. 清理旧环境
+systemctl stop hysteria-server.service 2>/dev/null
+systemctl disable hysteria-server.service 2>/dev/null
+rm -rf /etc/hysteria
+
+# 3. 安装 Hysteria 2
+bash <(curl -fsSL https://get.hy2.sh/)
+
+# 4. 生成自签名证书
+mkdir -p /etc/hysteria
+openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
+  -keyout /etc/hysteria/server.key \
+  -out /etc/hysteria/server.crt \
+  -subj "/CN=$SNI" \
+  -days 3650
+chown hysteria /etc/hysteria/server.key
+chown hysteria /etc/hysteria/server.crt
+
+# 5. 写入配置
+cat << EOF > /etc/hysteria/config.yaml
+listen: :443
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+auth:
+  type: password
+  password: $PASSWORD
+obfs:
+  type: salamander
+  salamander:
+    password: $OBFS_PASSWORD
+masquerade:
+  type: proxy
+  proxy:
+    url: https://$SNI
+    rewriteHost: true
+EOF
+
+# 6. 端口跳跃 (注意：这里的 awk 花括号必须双写以避开 Python 格式化)
+if [ "$ENABLE_PORT_HOPPING" == "true" ]; then
+    IFACE=$(ip route get 8.8.8.8 | awk '{{print $5; exit}}')
+    iptables -t nat -D PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports 443 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports 443
+fi
+
+# 7. 启动
+systemctl enable --now hysteria-server.service
+sleep 2
+
+# 8. 输出链接
+if systemctl is-active --quiet hysteria-server.service; then
+    PUBLIC_IP=$(curl -s https://api.ipify.org)
+    LINK="hy2://$PASSWORD@$PUBLIC_IP:443?peer=$SNI&insecure=1&obfs=salamander&obfs-password=$OBFS_PASSWORD&sni=$SNI#Hy2-SelfSigned"
+    echo "HYSTERIA_DEPLOY_SUCCESS_LINK: $LINK"
+else
+    echo "HYSTERIA_DEPLOY_FAILED"
+fi
+"""
+# ================= [复刻 XHTTP 逻辑] 一键部署 Hysteria 2 (带自定义名称) =================
+async def open_deploy_hysteria_dialog(server_conf, callback):
+    # --- 1. IP 获取逻辑 (保持不变) ---
+    target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
     
+    real_ip = target_host
+    import re
+    import socket
+    
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", target_host):
+        try:
+            real_ip = await run.io_bound(socket.gethostbyname, target_host)
+        except:
+            safe_notify(f"❌ 无法解析服务器 IP: {target_host}", "negative")
+            return
+
+    # --- 2. 构建 UI ---
+    with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl'):
+        
+        # 顶部标题栏
+        with ui.column().classes('w-full bg-slate-900 p-6 gap-2'):
+            with ui.row().classes('items-center gap-2 text-white'):
+                ui.icon('bolt', size='md')
+                ui.label('部署 Hysteria 2 (直连模式)').classes('text-lg font-bold')
+            
+            ui.label(f"服务器 IP: {real_ip}").classes('text-xs text-gray-400 font-mono')
+
+        # 内容输入区
+        with ui.column().classes('w-full p-6 gap-4'):
+            # === 新增：自定义节点名称 ===
+            name_input = ui.input('节点名称 (可选)', placeholder='留空将自动生成').props('outlined dense').classes('w-full')
+
+            # 伪装域名
+            sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense').classes('w-full')
+            # 混淆密码
+            obfs_input = ui.input('混淆密码', value=str(uuid.uuid4())[:8]).props('outlined dense').classes('w-full')
+            
+            # 端口跳跃
+            enable_hopping = ui.checkbox('启用端口跳跃 (Port Hopping)', value=True).classes('text-sm font-bold text-gray-600')
+            with ui.row().classes('w-full items-center gap-2'):
+                hop_start = ui.number('起始端口', value=20000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
+                ui.label('-').bind_visibility_from(enable_hopping, 'value')
+                hop_end = ui.number('结束端口', value=50000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
+
+            # 日志区域
+            log_area = ui.log().classes('w-full h-48 bg-gray-900 text-green-400 text-[11px] font-mono p-3 rounded border border-gray-700 hidden transition-all')
+
+        # 底部按钮区
+        with ui.row().classes('w-full p-4 bg-gray-50 border-t border-gray-200 justify-end gap-3'):
+            btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
+            
+            async def start_process():
+                btn_cancel.disable()
+                btn_deploy.props('loading')
+                log_area.classes(remove='hidden')
+                
+                try:
+                    hy2_password = str(uuid.uuid4()).replace('-', '')[:16]
+                    
+                    params = {
+                        "password": hy2_password,
+                        "obfs_password": obfs_input.value,
+                        "sni": sni_input.value,
+                        "enable_hopping": "true" if enable_hopping.value else "false",
+                        "port_range_start": int(hop_start.value),
+                        "port_range_end": int(hop_end.value)
+                    }
+                    
+                    script_content = HYSTERIA_INSTALL_SCRIPT_TEMPLATE.format(**params)
+                    
+                    deploy_cmd = f"""
+cat > /tmp/install_hy2.sh << 'EOF_SCRIPT'
+{script_content}
+EOF_SCRIPT
+bash /tmp/install_hy2.sh
+"""
+                    log_area.push(f"🚀 [SSH] 连接到 {real_ip} 开始安装...")
+                    
+                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, deploy_cmd))
+                    
+                    if success:
+                        log_area.push("✅ 脚本执行完毕，正在解析输出...")
+                        
+                        import re
+                        match = re.search(r'HYSTERIA_DEPLOY_SUCCESS_LINK: (hy2://.*)', output)
+                        
+                        if match:
+                            link = match.group(1).strip()
+                            log_area.push("🎉 部署成功！")
+                            
+                            # === 修改：使用自定义名称逻辑 ===
+                            custom_name = name_input.value.strip()
+                            if custom_name:
+                                node_name = custom_name
+                            else:
+                                node_name = f"Hy2-{real_ip[-3:]}-{sni_input.value}"
+
+                            # 构建节点对象
+                            new_node = {
+                                "id": str(uuid.uuid4()),
+                                "remark": node_name,
+                                "port": 443,
+                                "protocol": "hysteria2",
+                                "settings": {},
+                                "streamSettings": {},
+                                "enable": True,
+                                "_is_custom": True, 
+                                "_raw_link": link 
+                            }
+                            
+                            if 'custom_nodes' not in server_conf: server_conf['custom_nodes'] = []
+                            server_conf['custom_nodes'].append(new_node)
+                            await save_servers()
+                            
+                            safe_notify(f"✅ 节点 {node_name} 已添加", "positive")
+                            await asyncio.sleep(1)
+                            d.close()
+                            if callback: await callback() 
+                        else:
+                            log_area.push("❌ 未捕获到链接，请检查日志")
+                            log_area.push(output[-500:]) 
+                    else:
+                        log_area.push(f"❌ SSH 连接或执行失败: {output}")
+
+                except Exception as e:
+                    log_area.push(f"❌ 异常: {str(e)}")
+                
+                btn_cancel.enable()
+                btn_deploy.props(remove='loading')
+
+            # 这里按钮也顺便统一了风格
+            btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
+
+    d.open()
+ 
 # ================= 全局变量区 (缓存) =================
 PROBE_DATA_CACHE = {} 
 PING_TREND_CACHE = {} 
@@ -2729,19 +2935,41 @@ async def sub_handler(token: str, request: Request):
     sub = next((s for s in SUBS_CACHE if s['token'] == token), None)
     if not sub: return Response("Invalid Token", 404)
     links = []
+    
     for srv in SERVERS_CACHE:
-        inbounds = NODES_DATA.get(srv['url'], [])
-        if not inbounds: continue
+        # 1. 获取面板节点 (缓存中)
+        panel_nodes = NODES_DATA.get(srv['url'], []) or []
+        
+        # 2. 获取自定义节点 (一键部署的 Hy2/XHTTP)
+        custom_nodes = srv.get('custom_nodes', []) or []
+        
+        # === 合并节点列表 ===
+        all_nodes = panel_nodes + custom_nodes
+        
+        if not all_nodes: continue
+        
         raw_url = srv['url']
         try:
             if '://' not in raw_url: raw_url = f'http://{raw_url}'
             parsed = urlparse(raw_url); host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
         except: host = raw_url
+        
         sub_nodes_set = set(sub.get('nodes', []))
-        for n in inbounds:
+        
+        for n in all_nodes:
+            # 检查节点 ID 是否在订阅的选择列表中
+            # 注意：一键部署的节点在保存时也生成了 uuid 作为 id，所以逻辑通用
             if f"{srv['url']}|{n['id']}" in sub_nodes_set:
-                l = generate_node_link(n, host)
-                if l: links.append(l)
+                
+                # A. 优先使用原始链接 (Hy2/XHTTP 部署时存的完整链接)
+                if n.get('_raw_link'):
+                    links.append(n['_raw_link'])
+                
+                # B. 或者是面板节点，需要生成链接
+                else:
+                    l = generate_node_link(n, host)
+                    if l: links.append(l)
+                    
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
 # ================= 分组订阅接口：支持 Tag 和 主分组 =================
@@ -2752,7 +2980,7 @@ async def group_sub_handler(group_b64: str, request: Request):
     
     links = []
     
-    # ✨✨✨ 同时筛选“主分组”和“Tags” ✨✨✨
+    # 筛选符合分组的服务器
     target_servers = [
         s for s in SERVERS_CACHE 
         if s.get('group', '默认分组') == group_name or group_name in s.get('tags', [])
@@ -2761,8 +2989,14 @@ async def group_sub_handler(group_b64: str, request: Request):
     logger.info(f"正在生成分组订阅: [{group_name}]，匹配到 {len(target_servers)} 个服务器")
 
     for srv in target_servers:
-        inbounds = NODES_DATA.get(srv['url'], [])
-        if not inbounds: continue
+        # 1. 获取面板节点
+        panel_nodes = NODES_DATA.get(srv['url'], []) or []
+        # 2. 获取自定义节点
+        custom_nodes = srv.get('custom_nodes', []) or []
+        # === 合并 ===
+        all_nodes = panel_nodes + custom_nodes
+        
+        if not all_nodes: continue
         
         raw_url = srv['url']
         try:
@@ -2770,12 +3004,16 @@ async def group_sub_handler(group_b64: str, request: Request):
             parsed = urlparse(raw_url); host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
         except: host = raw_url
         
-        for n in inbounds:
+        for n in all_nodes:
             if n.get('enable'): 
-                l = generate_node_link(n, host)
-                if l: links.append(l)
+                # A. 优先使用原始链接
+                if n.get('_raw_link'):
+                    links.append(n['_raw_link'])
+                # B. 生成面板节点链接
+                else:
+                    l = generate_node_link(n, host)
+                    if l: links.append(l)
     
-    # 如果没有节点，返回一个提示注释，防止 SubConverter 报错
     if not links:
         return Response(f"// Group [{group_name}] is empty or not found", media_type="text/plain; charset=utf-8")
         
@@ -3592,26 +3830,38 @@ class SubEditor:
         with self.cont: 
             ui.spinner('dots').classes('self-center mt-10')
 
-        # ✨✨✨ 修复核心：先对服务器列表进行快照，防止在 await 期间列表发生变化 ✨✨✨
         current_servers_snapshot = list(SERVERS_CACHE)
         
+        # 并发获取面板节点
         tasks = [fetch_inbounds_safe(s, force_refresh=False) for s in current_servers_snapshot]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         self.groups_data = {}
         self.all_node_keys = set()
         
-        # 使用快照进行遍历，确保索引一一对应
         for i, srv in enumerate(current_servers_snapshot):
+            # 1. 获取面板数据
             nodes = results[i]
-            if not nodes or isinstance(nodes, Exception): nodes = NODES_DATA.get(srv['url'], [])
-            if nodes:
-                for n in nodes:
+            if not nodes or isinstance(nodes, Exception): 
+                nodes = NODES_DATA.get(srv['url'], []) or []
+            
+            # 2. 获取自定义数据 (Hy2/XHTTP)
+            custom = srv.get('custom_nodes', []) or []
+            
+            # === 合并显示 ===
+            all_server_nodes = nodes + custom
+            
+            if all_server_nodes:
+                for n in all_server_nodes:
+                    # 注册 Key 用于全选功能
                     k = f"{srv['url']}|{n['id']}"
                     self.all_node_keys.add(k)
+            
             g_name = srv.get('group', '默认分组') or '默认分组'
             if g_name not in self.groups_data: self.groups_data[g_name] = []
-            self.groups_data[g_name].append({'server': srv, 'nodes': nodes})
+            
+            # 将合并后的列表传给 UI 渲染
+            self.groups_data[g_name].append({'server': srv, 'nodes': all_server_nodes})
 
         self.render_list()
 
@@ -4536,27 +4786,30 @@ async def update_probe_stats(card_refs, is_manual=False):
     
 # ================= 订阅管理视图 (极简模式：只显在线) =================
 async def load_subs_view():
-    # ✨✨✨ [新增] 标记当前在订阅管理 ✨✨✨
+    # 标记当前视图
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'SUBS'
     CURRENT_VIEW_STATE['data'] = None
     show_loading(content_container)
+    
     try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
     except: origin = ""
     if not origin: origin = "https://xui-manager.sijuly.nyc.mn"
 
     content_container.clear()
     
-    # 1. 预先统计所有当前"活着"的节点 Key (确保是节点粒度)
+    # === 1. 预先统计所有当前存在的节点 Key (面板 + 自定义) ===
     all_active_keys = set()
     for srv in SERVERS_CACHE:
-        # NODES_DATA 是实时的，如果服务器挂了，之前那个修复会让这里为空列表
-        nodes = NODES_DATA.get(srv['url'], [])
-        if nodes:
-            for n in nodes:
-                # 这里的 key 是 URL + NodeID，确保是唯一的节点标识
-                key = f"{srv['url']}|{n['id']}"
-                all_active_keys.add(key)
+        # 面板节点
+        panel = NODES_DATA.get(srv['url'], []) or []
+        # 自定义节点
+        custom = srv.get('custom_nodes', []) or []
+        
+        for n in (panel + custom):
+            key = f"{srv['url']}|{n['id']}"
+            all_active_keys.add(key)
+    # =======================================================
 
     with content_container:
         ui.label('订阅管理').classes('text-2xl font-bold mb-4')
@@ -4567,15 +4820,12 @@ async def load_subs_view():
             with ui.card().classes('w-full p-4 mb-2 shadow-sm hover:shadow-md transition border-l-4 border-blue-500'):
                 with ui.row().classes('justify-between w-full items-center'):
                     with ui.column().classes('gap-1'):
-                        # 订阅标题
                         ui.label(sub['name']).classes('font-bold text-lg text-slate-800')
                         
-                        # 计算在线节点数
+                        # 计算有效节点数
                         saved_node_ids = set(sub.get('nodes', []))
-                        # 取交集：订阅记录的 ID  VS  当前全局在线的 ID
                         valid_count = len(saved_node_ids.intersection(all_active_keys))
                         
-                        # ✨ 只显示这一行动态数据
                         color_cls = 'text-green-600' if valid_count > 0 else 'text-gray-400'
                         ui.label(f"⚡ 在线节点: {valid_count}").classes(f'text-xs font-bold {color_cls}')
                     
@@ -4600,10 +4850,8 @@ async def load_subs_view():
                     
                     with ui.row().classes('gap-1'):
                         ui.button(icon='content_copy', on_click=lambda u=raw_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
-                        
                         surge_short = f"{origin}/get/sub/surge/{sub['token']}"
                         ui.button(icon='bolt', on_click=lambda u=surge_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
-                        
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
@@ -5479,6 +5727,7 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
 SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
 
+
 # ================= ✨✨✨ 刷新逻辑 (修复双标题栏问题) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     try: client = ui.context.client
@@ -5614,291 +5863,322 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
 
 # 用于外部调用的刷新句柄 (例如给右上角"新建节点"按钮使用)
 REFRESH_CURRENT_NODES = lambda: None
-# ================= [V82 最终版] 单服务器视图 (SSH高度增加至500px) =================
+# ================= [V83 修复版] 单服务器视图 (修复空白BUG) =================
 async def render_single_server_view(server_conf, force_refresh=False):
     global REFRESH_CURRENT_NODES
     
-    # 1. 布局初始化：确保主容器填满屏幕并处理内部滚动
+    # 1. 布局初始化
+    # 显式使用 content_container，确保渲染位置正确
     if content_container:
+        content_container.clear()
         content_container.classes(remove='overflow-y-auto block', add='h-full overflow-hidden flex flex-col p-4')
     
-    # 安全获取管理器
-    has_xui_config = (server_conf.get('url') and server_conf.get('user') and server_conf.get('pass'))
-    mgr = None
-    if has_xui_config:
-        try: mgr = get_manager(server_conf)
-        except: pass
-
-    ui_refs = {} 
-
-    # --- 0. 刷新回调 ---
-    async def reload_and_refresh_ui():
+    # 确保在容器内渲染
+    with content_container:
+        
+        # 安全获取管理器
+        has_xui_config = (server_conf.get('url') and server_conf.get('user') and server_conf.get('pass'))
+        mgr = None
         if has_xui_config:
-            try: await fetch_inbounds_safe(server_conf, force_refresh=True)
+            try: mgr = get_manager(server_conf)
             except: pass
-        render_node_list.refresh()
 
-    REFRESH_CURRENT_NODES = reload_and_refresh_ui
+        # --- 0. 刷新回调 (修正拼写错误) ---
+        @ui.refreshable
+        async def render_node_list():
+            # 这是一个占位，后面会重新定义，但这里需要先声明以供 reload_and_refresh_ui 调用
+            pass
 
-    # --- 1. 辅助功能 (编辑/卸载) ---
-    def open_edit_custom_node(node_data):
-        with ui.dialog() as d, ui.card().classes('w-96 p-4'):
-            ui.label('编辑节点备注').classes('text-lg font-bold mb-4')
-            name_input = ui.input('备注名称', value=node_data.get('remark', '')).classes('w-full')
-            async def save():
-                node_data['remark'] = name_input.value.strip()
-                await save_servers()
-                safe_notify('修改已保存', 'positive')
-                d.close()
-                render_node_list.refresh()
-            with ui.row().classes('w-full justify-end mt-4'):
-                ui.button('取消', on_click=d.close).props('flat')
-                ui.button('保存', on_click=save).classes('bg-blue-600 text-white')
-        d.open()
-
-    async def uninstall_and_delete(node_data):
-        with ui.dialog() as d, ui.card().classes('w-96 p-6'):
-            with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
-                ui.icon('warning', size='md')
-                ui.label('确认卸载节点？').classes('font-bold text-lg')
-            ui.label(f"将停止服务并删除节点 [{node_data.get('remark')}]").classes('text-sm text-gray-600')
-            
-            async def start_uninstall():
-                d.close()
-                notification = ui.notification(message='正在执行卸载...', timeout=0, spinner=True)
-                success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, XHTTP_UNINSTALL_SCRIPT))
-                notification.dismiss()
-                if success: safe_notify('✅ 服务已停止，配置已清理', 'positive')
-                else: safe_notify(f'⚠️ 卸载异常: {output}', 'warning')
-                
-                if 'custom_nodes' in server_conf and node_data in server_conf['custom_nodes']:
-                    server_conf['custom_nodes'].remove(node_data)
-                    await save_servers()
-                await reload_and_refresh_ui()
-                
-            with ui.row().classes('w-full justify-end mt-6 gap-2'):
-                ui.button('取消', on_click=d.close).props('flat')
-                ui.button('确认卸载', on_click=start_uninstall).classes('bg-red-600 text-white')
-        d.open()
-
-    # ================= 布局构建区域 =================
-
-    # --- 第一段：顶部标题栏 (固定高度) ---
-    btn_3d_base = 'text-xs font-bold text-white rounded-lg px-4 py-2 border-b-4 active:border-b-0 active:translate-y-[4px] transition-all duration-150 shadow-sm'
-    btn_blue = f'bg-blue-600 border-blue-800 hover:bg-blue-500 {btn_3d_base}'
-    btn_green = f'bg-green-600 border-green-800 hover:bg-green-500 {btn_3d_base}'
-
-    with ui.row().classes('w-full justify-between items-center bg-white p-4 rounded-xl border border-gray-200 border-b-[4px] border-b-gray-300 shadow-sm flex-shrink-0'):
-        # 左侧信息
-        with ui.row().classes('items-center gap-4'):
-            sys_icon = 'computer' if 'Oracle' in server_conf.get('name', '') else 'dns'
-            with ui.element('div').classes('p-3 bg-slate-100 rounded-lg border border-slate-200'):
-                ui.icon(sys_icon, size='md').classes('text-slate-700')
-            
-            with ui.column().classes('gap-1'):
-                ui.label(server_conf.get('name', '未命名服务器')).classes('text-xl font-black text-slate-800 leading-tight tracking-tight')
-                with ui.row().classes('items-center gap-2'):
-                    ip_addr = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').split(':')[0]
-                    ui.label(ip_addr).classes('text-xs font-mono font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded')
-                    if server_conf.get('_status') == 'online':
-                        ui.badge('Online', color='green').props('rounded outline size=xs')
-                    else:
-                        ui.badge('Offline', color='grey').props('rounded outline size=xs')
-
-        # 右侧按钮
-        with ui.row().classes('gap-3'):
-            ui.button('一键部署 XHTTP', icon='rocket_launch', 
-                      on_click=lambda: open_deploy_xhttp_dialog(server_conf, reload_and_refresh_ui)) \
-                .props('unelevated').classes(btn_blue)
-            
+        async def reload_and_refresh_ui():
             if has_xui_config:
-                async def on_add_success():
-                    ui.notify('添加节点成功')
-                    await reload_and_refresh_ui()
-                ui.button('新建节点', icon='add', 
-                          on_click=lambda: open_inbound_dialog(mgr, None, on_add_success)) \
-                    .props('unelevated').classes(btn_green)
+                try: await fetch_inbounds_safe(server_conf, force_refresh=True)
+                except: pass
+            render_node_list.refresh()
 
-    ui.element('div').classes('h-4 flex-shrink-0') 
+        # ✨✨✨ [修复] 修正之前的变量名拼写错误 ✨✨✨
+        REFRESH_CURRENT_NODES = reload_and_refresh_ui
 
-    # --- 第二段：中间节点区域 (自适应高度) ---
-    with ui.card().classes('w-full flex-grow flex flex-col p-0 rounded-xl border border-gray-200 border-b-[4px] border-b-gray-300 shadow-sm overflow-hidden'):
-        # 2.1 列表标题
-        with ui.row().classes('w-full items-center justify-between p-3 bg-gray-50 border-b border-gray-200'):
-             ui.label('节点列表').classes('text-sm font-black text-gray-600 uppercase tracking-wide ml-1')
-             if has_xui_config:
-                 ui.badge('X-UI 面板已连接', color='green').props('outline rounded size=xs')
+        # --- 1. 辅助功能 (编辑/卸载) ---
+        def open_edit_custom_node(node_data):
+            with ui.dialog() as d, ui.card().classes('w-96 p-4'):
+                ui.label('编辑节点备注').classes('text-lg font-bold mb-4')
+                name_input = ui.input('备注名称', value=node_data.get('remark', '')).classes('w-full')
+                async def save():
+                    node_data['remark'] = name_input.value.strip()
+                    await save_servers()
+                    safe_notify('修改已保存', 'positive')
+                    d.close()
+                    render_node_list.refresh()
+                with ui.row().classes('w-full justify-end mt-4'):
+                    ui.button('取消', on_click=d.close).props('flat')
+                    ui.button('保存', on_click=save).classes('bg-blue-600 text-white')
+            d.open()
 
-        # 2.2 固定表头
-        with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-4 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
-            ui.label('备注名称').classes('text-left')
-            for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
-
-        # 2.3 滚动内容区
-        # --- 将原本的 bg-white 改为 bg-gray-50，让白色3D卡片能显现出来 ---
-        with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-3'): 
-            @ui.refreshable
-            async def render_node_list():
-                xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False) if has_xui_config else []
-                custom_nodes = server_conf.get('custom_nodes', [])
-                all_nodes = xui_nodes + custom_nodes
+        async def uninstall_and_delete(node_data):
+            with ui.dialog() as d, ui.card().classes('w-96 p-6'):
+                with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
+                    ui.icon('warning', size='md')
+                    ui.label('确认卸载节点？').classes('font-bold text-lg')
+                ui.label(f"将停止服务并删除节点 [{node_data.get('remark')}]").classes('text-sm text-gray-600')
                 
-                if not all_nodes:
-                    with ui.column().classes('w-full py-12 items-center justify-center opacity-50'):
-                        ui.icon('inbox', size='4rem').classes('text-gray-300 mb-2')
-                        ui.label('暂无节点数据').classes('text-gray-400 text-sm')
-                else:
-                    for n in all_nodes:
-                        is_custom = n.get('_is_custom', False)
-                        
-                        # ✨✨✨ 3D 效果核心样式 ✨✨✨
-                        row_3d_cls = (
-                            'grid w-full gap-4 py-3 px-4 mb-2 items-center group ' # 布局与间距
-                            'bg-white rounded-xl border border-gray-200 border-b-[3px] ' # 3D 基础结构 (底部加厚)
-                            'shadow-sm transition-all duration-150 ease-out ' # 动画过渡
-                            'hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] ' # 悬停：上浮 + 蓝边
-                            'active:border-b active:translate-y-[2px] active:shadow-none ' # 点击：下沉 + 阴影消失
-                            'cursor-default'
-                        )
+                async def start_uninstall():
+                    d.close()
+                    notification = ui.notification(message='正在执行卸载...', timeout=0, spinner=True)
+                    # 使用 lambda 延迟执行，防止传参报错
+                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, XHTTP_UNINSTALL_SCRIPT))
+                    notification.dismiss()
+                    if success: safe_notify('✅ 服务已停止，配置已清理', 'positive')
+                    else: safe_notify(f'⚠️ 卸载异常: {output}', 'warning')
+                    
+                    if 'custom_nodes' in server_conf and node_data in server_conf['custom_nodes']:
+                        server_conf['custom_nodes'].remove(node_data)
+                        await save_servers()
+                    await reload_and_refresh_ui()
+                    
+                with ui.row().classes('w-full justify-end mt-6 gap-2'):
+                    ui.button('取消', on_click=d.close).props('flat')
+                    ui.button('确认卸载', on_click=start_uninstall).classes('bg-red-600 text-white')
+            d.open()
 
-                        # 注意：这里 style(SINGLE_COLS_NO_PING) 必须保留以对齐表头
-                        with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
+        # ================= 布局构建区域 =================
+
+        # --- 第一段：顶部标题栏 ---
+        btn_3d_base = 'text-xs font-bold text-white rounded-lg px-4 py-2 border-b-4 active:border-b-0 active:translate-y-[4px] transition-all duration-150 shadow-sm'
+        btn_blue = f'bg-blue-600 border-blue-800 hover:bg-blue-500 {btn_3d_base}'
+        btn_green = f'bg-green-600 border-green-800 hover:bg-green-500 {btn_3d_base}'
+
+        with ui.row().classes('w-full justify-between items-center bg-white p-4 rounded-xl border border-gray-200 border-b-[4px] border-b-gray-300 shadow-sm flex-shrink-0'):
+            # 左侧信息
+            with ui.row().classes('items-center gap-4'):
+                sys_icon = 'computer' if 'Oracle' in server_conf.get('name', '') else 'dns'
+                with ui.element('div').classes('p-3 bg-slate-100 rounded-lg border border-slate-200'):
+                    ui.icon(sys_icon, size='md').classes('text-slate-700')
+                
+                with ui.column().classes('gap-1'):
+                    ui.label(server_conf.get('name', '未命名服务器')).classes('text-xl font-black text-slate-800 leading-tight tracking-tight')
+                    with ui.row().classes('items-center gap-2'):
+                        ip_addr = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').split(':')[0]
+                        ui.label(ip_addr).classes('text-xs font-mono font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded')
+                        if server_conf.get('_status') == 'online':
+                            ui.badge('Online', color='green').props('rounded outline size=xs')
+                        else:
+                            ui.badge('Offline', color='grey').props('rounded outline size=xs')
+            # 右侧按钮组
+            with ui.row().classes('gap-3'):
+                # 1. XHTTP 按钮
+                ui.button('一键部署 XHTTP', icon='rocket_launch', 
+                          on_click=lambda: open_deploy_xhttp_dialog(server_conf, reload_and_refresh_ui)) \
+                    .props('unelevated').classes(btn_blue)
+
+                # 2. Hy2 按钮
+                ui.button('一键部署 Hy2', icon='bolt', 
+                          on_click=lambda: open_deploy_hysteria_dialog(server_conf, reload_and_refresh_ui)) \
+                    .props('unelevated').classes(btn_blue)
+                
+                # 3. XUI 按钮
+                if has_xui_config:
+                    async def on_add_success():
+                        ui.notify('添加节点成功')
+                        await reload_and_refresh_ui()
+                    ui.button('新建 XUI 节点', icon='add', 
+                              on_click=lambda: open_inbound_dialog(mgr, None, on_add_success)) \
+                        .props('unelevated').classes(btn_green)
+
+        ui.element('div').classes('h-4 flex-shrink-0')
+
+        # --- 第二段：中间节点区域 ---
+        with ui.card().classes('w-full flex-grow flex flex-col p-0 rounded-xl border border-gray-200 border-b-[4px] border-b-gray-300 shadow-sm overflow-hidden'):
+            # 2.1 列表标题
+            with ui.row().classes('w-full items-center justify-between p-3 bg-gray-50 border-b border-gray-200'):
+                 ui.label('节点列表').classes('text-sm font-black text-gray-600 uppercase tracking-wide ml-1')
+                 if has_xui_config:
+                     ui.badge('X-UI 面板已连接', color='green').props('outline rounded size=xs')
+
+            # 2.2 固定表头
+            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-4 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
+                ui.label('备注名称').classes('text-left')
+                for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
+
+            # 2.3 滚动内容区
+            with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-3'): 
+                # 重新定义 refreshable 函数，覆盖之前的占位符
+                @ui.refreshable
+                async def render_node_list():
+                    xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False) if has_xui_config else []
+                    custom_nodes = server_conf.get('custom_nodes', [])
+                    all_nodes = xui_nodes + custom_nodes
+                    
+                    if not all_nodes:
+                        with ui.column().classes('w-full py-12 items-center justify-center opacity-50'):
+                            ui.icon('inbox', size='4rem').classes('text-gray-300 mb-2')
+                            ui.label('暂无节点数据').classes('text-gray-400 text-sm')
+                    else:
+                        for n in all_nodes:
+                            is_custom = n.get('_is_custom', False)
                             
-                            # 1. 备注名
-                            ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left text-slate-700 text-sm')
-                            
-                            # 2. 类型标签
-                            source_tag = "独立" if is_custom else "面板"
-                            source_cls = "bg-purple-100 text-purple-700" if is_custom else "bg-gray-100 text-gray-600"
-                            ui.label(source_tag).classes(f'text-[10px] {source_cls} font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
-                            
-                            # 3. 流量
-                            traffic = format_bytes(n.get('up', 0) + n.get('down', 0)) if not is_custom else "--"
-                            ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono font-bold')
-                            
-                            # 4. 协议
-                            proto = n.get('protocol', 'unk').upper()
-                            ui.label(proto).classes('text-[10px] font-black bg-slate-100 text-slate-500 px-1 rounded w-fit mx-auto')
-                            
-                            # 5. 端口
-                            ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
-                            
-                            # 6. 状态圆点
-                            is_enable = n.get('enable', True)
-                            with ui.row().classes('w-full justify-center items-center gap-1'):
-                                color = "green" if (is_custom or is_enable) else "red"
-                                text = "已安装" if is_custom else ("运行中" if is_enable else "已停止")
-                                # 给圆点也加个光晕效果
-                                ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]')
-                                ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
-                            
-                            # 7. 操作按钮 (悬停时显示)
-                            with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
-                                link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
+                            # 3D 效果核心样式
+                            row_3d_cls = (
+                                'grid w-full gap-4 py-3 px-4 mb-2 items-center group '
+                                'bg-white rounded-xl border border-gray-200 border-b-[3px] '
+                                'shadow-sm transition-all duration-150 ease-out '
+                                'hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] '
+                                'active:border-b active:translate-y-[2px] active:shadow-none '
+                                'cursor-default'
+                            )
+
+                            with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
+                                # 1. 备注名
+                                ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left text-slate-700 text-sm')
                                 
-                                # 按钮统一样式：圆形、扁平、微动效
-                                btn_props = 'flat dense size=sm round'
+                                # 2. 类型标签
+                                source_tag = "独立" if is_custom else "面板"
+                                source_cls = "bg-purple-100 text-purple-700" if is_custom else "bg-gray-100 text-gray-600"
+                                ui.label(source_tag).classes(f'text-[10px] {source_cls} font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
                                 
-                                if link: 
-                                    ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
+                                # 3. 流量
+                                traffic = format_bytes(n.get('up', 0) + n.get('down', 0)) if not is_custom else "--"
+                                ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono font-bold')
                                 
-                                if is_custom:
-                                    ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
-                                    ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
-                                else:
-                                    async def on_edit_success(): ui.notify('修改成功'); await reload_and_refresh_ui()
-                                    ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
+                                # 4. 协议
+                                proto = n.get('protocol', 'unk').upper()
+                                ui.label(proto).classes('text-[10px] font-black bg-slate-100 text-slate-500 px-1 rounded w-fit mx-auto')
+                                
+                                # 5. 端口
+                                ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
+                                
+                                # 6. 状态圆点
+                                is_enable = n.get('enable', True)
+                                with ui.row().classes('w-full justify-center items-center gap-1'):
+                                    color = "green" if (is_custom or is_enable) else "red"
+                                    text = "已安装" if is_custom else ("运行中" if is_enable else "已停止")
+                                    ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]')
+                                    ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
+                                
+                                # 7. 操作按钮
+                                with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
+                                    link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
+                                    btn_props = 'flat dense size=sm round'
                                     
-                                    async def on_del_success(): ui.notify('删除成功'); await reload_and_refresh_ui()
-                                    ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props(btn_props).classes('text-red-500 hover:bg-red-50')
-            
-            await render_node_list()
-            if has_xui_config: asyncio.create_task(reload_and_refresh_ui())
+                                    if link: 
+                                        ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
+                                    
+                                    if is_custom:
+                                        ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
+                                        ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
+                                    else:
+                                        async def on_edit_success(): ui.notify('修改成功'); await reload_and_refresh_ui()
+                                        ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
+                                        
+                                        async def on_del_success(): ui.notify('删除成功'); await reload_and_refresh_ui()
+                                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props(btn_props).classes('text-red-500 hover:bg-red-50')
+                
+                await render_node_list()
+                if has_xui_config: asyncio.create_task(reload_and_refresh_ui())
 
-    ui.element('div').classes('h-6 flex-shrink-0') 
+        ui.element('div').classes('h-6 flex-shrink-0') 
 
-    # --- 第三段：底部 SSH 窗口 (固定高度增加至 500px) ---
-    with ui.card().classes('w-full h-[650px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
-        ssh_state = {'active': False, 'instance': None}
+        # --- 第三段：底部 SSH 窗口 ---
+        with ui.card().classes('w-full h-[650px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
+            ssh_state = {'active': False, 'instance': None}
 
-        def render_ssh_area():
-            # 标题栏
-            with ui.row().classes('w-full h-10 bg-slate-800 items-center justify-between px-4 flex-shrink-0 border-b border-slate-700'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.icon('terminal').classes('text-white text-sm')
-                    ui.label(f"SSH Console: {server_conf.get('ssh_user','root')}@{server_conf.get('ssh_host') or 'IP'}").classes('text-gray-300 text-xs font-mono font-bold')
-                if ssh_state['active']:
-                    ui.button(icon='link_off', on_click=stop_ssh).props('flat dense round color=red size=sm').tooltip('断开连接')
-                else:
-                    ui.label('Disconnected').classes('text-[10px] text-gray-500')
+            def render_ssh_area():
+                # 标题栏
+                with ui.row().classes('w-full h-10 bg-slate-800 items-center justify-between px-4 flex-shrink-0 border-b border-slate-700'):
+                    with ui.row().classes('items-center gap-2'):
+                        ui.icon('terminal').classes('text-white text-sm')
+                        ui.label(f"SSH Console: {server_conf.get('ssh_user','root')}@{server_conf.get('ssh_host') or 'IP'}").classes('text-gray-300 text-xs font-mono font-bold')
+                    if ssh_state['active']:
+                        ui.button(icon='link_off', on_click=stop_ssh).props('flat dense round color=red size=sm').tooltip('断开连接')
+                    else:
+                        ui.label('Disconnected').classes('text-[10px] text-gray-500')
 
-            # ✨✨✨ 修复核心：动态容器 Class (未连接居中，已连接全屏) ✨✨✨
-            box_cls = 'w-full flex-grow bg-[#0f0f0f] overflow-hidden'
-            if not ssh_state['active']:
-                box_cls += ' flex justify-center items-center' # 未连接：居中显示按钮
-            else:
-                box_cls += ' relative block' # 已连接：Block布局，让 Xterm 填满
-
-            terminal_box = ui.element('div').classes(box_cls)
-            
-            with terminal_box:
+                box_cls = 'w-full flex-grow bg-[#0f0f0f] overflow-hidden'
                 if not ssh_state['active']:
-                    # 连接按钮
-                    with ui.column().classes('items-center gap-4'):
-                        ui.icon('dns', size='4rem').classes('text-gray-800')
-                        ui.label('安全终端已就绪').classes('text-gray-600 text-sm font-bold')
-                        ui.button('立即连接 SSH', icon='login', on_click=start_ssh) \
-                            .classes('bg-blue-600 text-white font-bold px-6 py-2 rounded-lg border-b-4 border-blue-800 active:border-b-0 active:translate-y-[2px] transition-all')
+                    box_cls += ' flex justify-center items-center'
                 else:
-                    # 激活的终端
-                    # 注意：直接传入 terminal_box DIV 确保 xterm 正确挂载
-                    ssh = WebSSH(terminal_box, server_conf)
-                    ssh_state['instance'] = ssh
-                    ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
+                    box_cls += ' relative block'
 
-        async def start_ssh():
-            ssh_state['active'] = True
+                terminal_box = ui.element('div').classes(box_cls)
+                
+                with terminal_box:
+                    if not ssh_state['active']:
+                        # 连接按钮
+                        with ui.column().classes('items-center gap-4'):
+                            ui.icon('dns', size='4rem').classes('text-gray-800')
+                            ui.label('安全终端已就绪').classes('text-gray-600 text-sm font-bold')
+                            ui.button('立即连接 SSH', icon='login', on_click=start_ssh) \
+                                .classes('bg-blue-600 text-white font-bold px-6 py-2 rounded-lg border-b-4 border-blue-800 active:border-b-0 active:translate-y-[2px] transition-all')
+                    else:
+                        # 激活的终端
+                        ssh = WebSSH(terminal_box, server_conf)
+                        ssh_state['instance'] = ssh
+                        ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
+
+            async def start_ssh():
+                ssh_state['active'] = True
+                render_card_content()
+
+            async def stop_ssh():
+                if ssh_state['instance']:
+                    ssh_state['instance'].close()
+                    ssh_state['instance'] = None
+                ssh_state['active'] = False
+                render_card_content()
+
+            def render_card_content():
+                ssh_wrapper.clear()
+                with ssh_wrapper:
+                    render_ssh_area()
+
+            ssh_wrapper = ui.column().classes('w-full h-full p-0 gap-0')
             render_card_content()
-
-        async def stop_ssh():
-            if ssh_state['instance']:
-                ssh_state['instance'].close()
-                ssh_state['instance'] = None
-            ssh_state['active'] = False
-            render_card_content()
-
-        def render_card_content():
-            ssh_wrapper.clear()
-            with ssh_wrapper:
-                render_ssh_area()
-
-        ssh_wrapper = ui.column().classes('w-full h-full p-0 gap-0')
-        render_card_content()
-
 
 # ================= 聚合视图 (局部静默刷新 + 自动状态更新) =================
 # 全局字典，用于存储每行 UI 元素的引用，以便局部更新
 # 结构: { 'server_url': { 'row_el': row_element, 'status_icon': icon, 'status_label': label, ... } }
 UI_ROW_REFS = {} 
 CURRENT_VIEW_STATE = {'scope': 'DASHBOARD', 'data': None}
+# ================= [新增] 点击自定义节点显示详情 =================
+def show_custom_node_info(node):
+    with ui.dialog() as d, ui.card().classes('w-full max-w-sm'):
+        ui.label(node.get('remark', '节点详情')).classes('text-lg font-bold mb-2')
+        
+        # 获取链接
+        link = node.get('_raw_link') or node.get('link') or "无法获取链接"
+        
+        # 显示链接区域
+        with ui.row().classes('w-full bg-gray-100 p-3 rounded break-all font-mono text-xs mb-4'):
+            ui.label(link)
+            
+        with ui.row().classes('w-full justify-end gap-2'):
+            ui.button('复制', icon='content_copy', on_click=lambda: [safe_copy_to_clipboard(link), d.close()])
+            ui.button('关闭', on_click=d.close).props('flat')
+    d.open()
 
-# ================= ✨✨✨ 高性能渲染函数 (3D 卡片版) ✨✨✨ =================
+# ================= ✨✨✨ 聚合视图渲染 (节点展开 + 纯净样式版) ✨✨✨ =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
-    # 如果强制刷新，后台触发一下数据更新，但不阻塞当前 UI 渲染
+    # 1. 触发后台数据更新
     if force_refresh:
         asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in server_list], return_exceptions=True))
 
-    # 修改 1: 增加容器内边距，给 3D 卡片留出阴影空间
     list_container = ui.column().classes('w-full gap-3 p-1')
     
-    # 定义布局样式
-    is_all_servers = (len(server_list) == len(SERVERS_CACHE) and not show_ping)
-    use_special_mode = is_all_servers or show_ping
-    current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
+    # 2. 定义列宽 (保持对齐)
+    # 格式: 服务器(150) 备注(200) 分组(1fr) 流量(100) 协议(80) 端口(80) 状态(50) 操作(150)
+    # 注意：根据是否显示延迟(show_ping)切换布局
+    cols_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 1.5fr' 
+    cols_no_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 0.5fr 1.5fr'
+    
+    try:
+        is_all_servers = (len(server_list) == len(SERVERS_CACHE) and not show_ping)
+        use_special_mode = is_all_servers or show_ping
+        current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
+    except:
+        current_css = cols_ping if show_ping else cols_no_ping
 
     list_container.clear()
     with list_container:
-        # 1. 绘制静态表头 (为了对齐卡片内容，增加 px-4)
+        # === A. 绘制静态表头 ===
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
             ui.label('服务器').classes('text-left pl-1')
             ui.label('备注名称').classes('text-left pl-1')
@@ -5910,137 +6190,152 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             if not use_special_mode: ui.label('状态').classes('text-center')
             ui.label('操作').classes('text-center')
         
-        # 2. 遍历服务器，绘制每一行 (3D 卡片化)
+        # === B. 遍历服务器 ===
         for srv in server_list:
             
-            # ✨✨✨ 3D 卡片核心样式 ✨✨✨
-            card_cls = (
-                'grid w-full gap-4 py-3 px-4 items-center group relative '
-                'bg-white rounded-xl border border-gray-200 border-b-[3px] '  # 3D 基础结构
-                'shadow-sm transition-all duration-150 ease-out '  # 动画过渡
-                'hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] '  # 悬停上浮
-                'active:border-b active:translate-y-[2px] active:shadow-none '  # 点击下沉
-            )
-            
-            row_card = ui.element('div').classes(card_cls).style(current_css)
-            
-            with row_card:
-                # --- 静态内容 ---
-                ui.label(srv.get('name', '未命名')).classes('text-xs text-gray-400 truncate w-full text-left pl-2 font-mono')
+            # 创建一个局部刷新区域，用于显示该服务器下的所有节点行
+            # 这样数据更新时，只会重绘这块区域，不会闪烁整个页面
+            @ui.refreshable
+            def render_server_rows(server_data):
+                # 1. 获取所有节点
+                panel_n = NODES_DATA.get(server_data['url'], []) or []
+                custom_n = server_data.get('custom_nodes', []) or []
                 
-                # --- 动态内容 (Label 占位) ---
+                # 给自定义节点打标
+                for cn in custom_n: cn['_is_custom'] = True
                 
-                # 1. 备注名
-                lbl_remark = ui.label('Loading...').classes('font-bold truncate w-full text-left pl-2 text-slate-700')
+                # 合并列表 (面板在前，自定义在后，或者反过来，看你喜好)
+                all_nodes = panel_n + custom_n
                 
-                # 2. 分组或在线状态
-                if use_special_mode:
-                    with ui.row().classes('w-full justify-center items-center gap-1'):
-                        icon_status = ui.icon('bolt').classes('text-gray-300 text-sm')
-                        lbl_ip = ui.label(get_real_ip_display(srv['url'])).classes('text-xs font-mono text-gray-500 font-bold bg-gray-100 px-1.5 rounded')
-                        bind_ip_label(srv['url'], lbl_ip) # 绑定 DNS 更新
-                else:
-                    lbl_group = ui.label(srv.get('group', '默认分组')).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
-
-                # 3. 流量
-                lbl_traffic = ui.label('--').classes('text-xs text-gray-600 w-full text-center font-mono font-bold')
-                
-                # 4. 协议 & 端口
-                lbl_proto = ui.label('--').classes('uppercase text-[10px] font-black w-fit mx-auto px-1.5 py-0.5 rounded bg-slate-100 text-slate-500')
-                lbl_port = ui.label('--').classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
-
-                # 5. 状态圆点 (非特殊模式下)
-                icon_dot = None
-                if not use_special_mode:
-                    with ui.element('div').classes('flex justify-center w-full'): 
-                        icon_dot = ui.element('div').classes('w-2 h-2 rounded-full bg-gray-300 shadow-sm')
-                
-                # 6. 操作按钮 (扁平化圆形按钮)
-                with ui.row().classes('gap-1 justify-center w-full no-wrap'):
-                    
-                    def make_handlers(current_s):
-                        # A. 复制链接
-                        async def on_copy_link():
-                            nodes = NODES_DATA.get(current_s['url'], [])
-                            if nodes:
-                                await safe_copy_to_clipboard(generate_node_link(nodes[0], current_s['url']))
-                            else:
-                                safe_notify('暂无节点数据', 'warning')
-                        
-                        # B. 复制明文
-                        async def on_copy_text():
-                            nodes = NODES_DATA.get(current_s['url'], [])
-                            if nodes:
-                                raw_host = current_s['url'].split('://')[-1].split(':')[0]
-                                text = generate_detail_config(nodes[0], raw_host)
-                                if text:
-                                    await safe_copy_to_clipboard(text)
-                                    safe_notify('明文配置已复制', 'positive')
-                                else:
-                                    safe_notify('生成配置失败', 'warning')
-                            else:
-                                safe_notify('暂无节点数据', 'warning')
-                        
-                        return on_copy_link, on_copy_text
-
-                    h_copy, h_text = make_handlers(srv)
-
-                    # 1. 复制链接
-                    ui.button(icon='content_copy', on_click=h_copy).props('flat dense size=sm round').tooltip('复制链接 (Base64)').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
-                    
-                    # 2. 复制明文
-                    ui.button(icon='description', on_click=h_text).props('flat dense size=sm round').tooltip('复制明文配置 (Surge/Loon)').classes('text-gray-500 hover:text-purple-600 hover:bg-purple-50')
-                    
-                    # 3. 详情/删除 (使用 Settings 图标)
-                    ui.button(icon='settings', on_click=lambda s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('服务器详情/删除').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
-
-            # ================= 内部闭包更新函数 =================
-            def update_row(_srv=srv, _lbl_rem=lbl_remark, _lbl_tra=lbl_traffic, 
-                           _lbl_pro=lbl_proto, _lbl_prt=lbl_port, _icon_dot=icon_dot, 
-                           _icon_stat=icon_status if use_special_mode else None):
-                
-                nodes = NODES_DATA.get(_srv['url'], [])
-                
-                if not nodes:
-                    is_probe = _srv.get('probe_installed', False)
-                    msg = '同步中...' if not is_probe else '离线/无节点'
-                    _lbl_rem.set_text(msg)
-                    _lbl_rem.classes(replace='text-gray-400' if not is_probe else 'text-red-400', remove='text-slate-700')
-                    _lbl_tra.set_text('--')
-                    _lbl_pro.set_text('UNK')
-                    _lbl_prt.set_text('--')
-                    if _icon_stat: _icon_stat.classes(replace='text-red-300')
-                    if _icon_dot: _icon_dot.classes(replace='bg-gray-300')
+                # 2. 如果没有任何节点 (显示一行占位)
+                if not all_nodes:
+                    draw_row(server_data, None, current_css, use_special_mode, is_first=True)
                     return
 
-                n = nodes[0]
-                total_traffic = sum(x.get('up',0) + x.get('down',0) for x in nodes)
-                
-                _lbl_rem.set_text(n.get('remark', '未命名'))
-                _lbl_rem.classes(replace='text-slate-700', remove='text-gray-400 text-red-400')
-                
-                _lbl_tra.set_text(format_bytes(total_traffic))
-                _lbl_pro.set_text(n.get('protocol', 'unk').upper())
-                _lbl_prt.set_text(str(n.get('port', 0)))
+                # 3. 遍历渲染每个节点 (一行一个)
+                for index, node in enumerate(all_nodes):
+                    draw_row(server_data, node, current_css, use_special_mode, is_first=(index==0))
 
-                is_online = _srv.get('_status') == 'online'
-                is_enable = n.get('enable', True)
+            # 渲染该服务器的行
+            render_server_rows(srv)
+            
+            # 设置定时刷新 (每3秒刷新一次该区域的数据显示)
+            # 注意：这里的 refresh 会重新读取 NODES_DATA，如果后台 fetch 更新了，这里就会变
+            ui.timer(3.0, render_server_rows.refresh)
+
+# --- 辅助函数：绘制单行 ---
+def draw_row(srv, node, css_style, use_special_mode, is_first=True):
+    # 3D 卡片样式 (每行一个卡片，或者紧凑一点)
+    # 为了视觉效果，如果一个服务器有多个节点，可以让他们稍微紧凑一点，或者保持独立卡片
+    # 这里保持独立卡片风格，清晰度最高
+    card_cls = (
+        'grid w-full gap-4 py-3 px-4 items-center group relative '
+        'bg-white rounded-xl border border-gray-200 border-b-[3px] '
+        'shadow-sm transition-all duration-150 ease-out '
+        'hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] '
+        'mb-2' # 增加下边距，让行与行之间有空隙
+    )
+    
+    with ui.element('div').classes(card_cls).style(css_style):
+        
+        # 1. 服务器名 (只在第一行显示，或者每行都显示但变淡)
+        # 为了防误触，建议每行都显示，但可以用不同颜色区分
+        srv_name = srv.get('name', '未命名')
+        if not is_first:
+            # 如果不是第一行，显示淡一点，表示同属一台机器
+            ui.label(srv_name).classes('text-xs text-gray-300 truncate w-full text-left pl-2 font-mono')
+        else:
+            ui.label(srv_name).classes('text-xs text-gray-500 font-bold truncate w-full text-left pl-2 font-mono')
+
+        # 如果没有节点数据 (Loading 或 空)
+        if not node:
+            is_probe = srv.get('probe_installed', False)
+            msg = '同步中...' if not is_probe else '无节点配置'
+            ui.label(msg).classes('font-bold truncate text-gray-400 text-xs italic')
+            ui.label('--').classes('text-center text-gray-300') # 组/IP
+            ui.label('--').classes('text-center text-gray-300') # 流量
+            ui.label('UNK').classes('text-center text-gray-300 font-bold text-[10px]') # 协议
+            ui.label('--').classes('text-center text-gray-300') # 端口
+            if not use_special_mode: ui.element('div') # 状态占位
+            
+            # 操作按钮 (仅显示设置)
+            with ui.row().classes('gap-1 justify-center w-full no-wrap'):
+                 ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round color=grey')
+            return
+
+        # === 正常节点渲染 ===
+        
+        # 2. 备注名称
+        remark = node.get('ps') or node.get('remark') or '未命名节点'
+        ui.label(remark).classes('font-bold truncate w-full text-left pl-2 text-slate-700 text-sm')
+
+        # 3. 分组 / IP (根据模式)
+        if use_special_mode:
+            with ui.row().classes('w-full justify-center items-center gap-1'):
+                # 在线状态图标
+                is_online = srv.get('_status') == 'online'
+                color = 'text-green-500' if is_online else 'text-red-500'
+                if not srv.get('probe_installed') and not node.get('_is_custom'): color = 'text-orange-400'
+                ui.icon('bolt').classes(f'{color} text-sm')
                 
-                if use_special_mode and _icon_stat:
-                    color = 'text-green-500' if is_online else 'text-red-500'
-                    if not _srv.get('probe_installed'): color = 'text-orange-400'
-                    _icon_stat.classes(replace=color, remove='text-gray-300')
-                
-                if not use_special_mode and _icon_dot:
-                    # 动态颜色和光晕
-                    color_cls = "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.6)]"
-                    _icon_dot.classes(replace=color_cls, remove="bg-gray-300 shadow-sm")
+                # IP显示
+                try: real_ip = srv.get('address', srv.get('ip', ''))
+                except: real_ip = '0.0.0.0'
+                ui.label(real_ip).classes('text-xs font-mono text-gray-500 font-bold bg-gray-100 px-1.5 rounded')
+        else:
+            group = srv.get('group', '默认分组')
+            ui.label(group).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
 
-            ui.timer(2.0, update_row)
-            update_row()
+        # 4. 流量 (自定义节点显示 - )
+        if node.get('_is_custom'):
+            ui.label('-').classes('text-xs text-gray-400 w-full text-center font-mono')
+        else:
+            traffic = sum([node.get('up', 0), node.get('down', 0)])
+            ui.label(format_bytes(traffic)).classes('text-xs text-blue-600 w-full text-center font-mono font-bold')
+
+        # 5. 协议 (✨纯字体颜色，无背景✨)
+        proto = str(node.get('protocol', 'unk')).upper()
+        # 别名优化
+        if 'HYSTERIA' in proto: proto = 'HY2'
+        if 'SHADOWSOCKS' in proto: proto = 'SS'
+        
+        # 颜色映射
+        proto_color = 'text-slate-500' # 默认灰
+        if 'HY2' in proto: proto_color = 'text-purple-600'
+        elif 'VLESS' in proto: proto_color = 'text-blue-600'
+        elif 'VMESS' in proto: proto_color = 'text-green-600'
+        elif 'TROJAN' in proto: proto_color = 'text-orange-600'
+        
+        # 渲染协议文本 (加粗，居中)
+        ui.label(proto).classes(f'text-[11px] font-extrabold w-full text-center {proto_color} tracking-wide')
+
+        # 6. 端口
+        port_val = str(node.get('port', 0))
+        ui.label(port_val).classes('text-slate-600 font-mono w-full text-center font-bold text-xs')
+
+        # 7. 状态圆点 (非特殊模式下显示)
+        if not use_special_mode:
+            with ui.element('div').classes('flex justify-center w-full'):
+                is_enable = node.get('enable', True)
+                # 绿色表示启用，红色表示禁用 (带光晕)
+                dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
+                ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
+
+        # 8. 操作按钮
+        with ui.row().classes('gap-1 justify-center w-full no-wrap'):
+            # 复制链接
+            async def copy_link():
+                link = node.get('_raw_link') or node.get('link')
+                if not link: link = generate_node_link(node, srv['url'])
+                await safe_copy_to_clipboard(link)
+
+            ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
+            
+            # 详情跳转
+            ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
 
-# ================= 核心：静默刷新 UI 数据 (清理版) =================
+# ================= 核心：静默刷新 UI 数据 (已修复：统计 Hy2/XHTTP 节点) =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -6050,29 +6345,38 @@ async def refresh_dashboard_ui():
         online_servers = 0
         total_nodes = 0
         total_traffic_bytes = 0
-        total_up_bytes = 0
-        total_down_bytes = 0
         
         server_traffic_map = {}
         protocol_count = {}
         
         # --- 1. 计算数据 ---
         for s in SERVERS_CACHE:
-            res = NODES_DATA.get(s['url'], [])
-            name = s.get('name', '未命名')
+            # 获取两类节点数据
+            res = NODES_DATA.get(s['url'], []) or []
+            custom = s.get('custom_nodes', []) or []
             
+            name = s.get('name', '未命名')
+            srv_traffic = 0
+            
+            # === A. 统计面板节点 (XUI) ===
             if res:
                 online_servers += 1
                 total_nodes += len(res)
-                srv_traffic = 0
                 for n in res: 
                     u = int(n.get('up', 0)); d = int(n.get('down', 0)); t = u + d
-                    total_up_bytes += u; total_down_bytes += d; total_traffic_bytes += t; srv_traffic += t
+                    total_traffic_bytes += t; srv_traffic += t
                     proto = str(n.get('protocol', 'unknown')).upper()
                     protocol_count[proto] = protocol_count.get(proto, 0) + 1
-                server_traffic_map[name] = srv_traffic
-            else:
-                server_traffic_map[name] = 0
+            
+            # === B. 统计自定义节点 (Hy2/XHTTP) [修复点] ===
+            if custom:
+                total_nodes += len(custom) # 累加自定义节点数量
+                for cn in custom:
+                    # 统计协议分布
+                    c_proto = str(cn.get('protocol', 'custom')).upper()
+                    protocol_count[c_proto] = protocol_count.get(c_proto, 0) + 1
+
+            server_traffic_map[name] = srv_traffic
 
         # --- 2. 更新 UI (静默更新) ---
         
@@ -6097,8 +6401,6 @@ async def refresh_dashboard_ui():
             pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
             DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
             DASHBOARD_REFS['pie_chart'].update()
-            
-            # ✨✨✨ 修改点：删除了 stat_up, stat_down, stat_avg 的更新代码 ✨✨✨
 
         if DASHBOARD_REFS.get('map_info'):
              DASHBOARD_REFS['map_info'].set_text('Live Rendering')
@@ -6114,8 +6416,7 @@ def get_dashboard_live_data():
     return data if data else {"error": "Calculation failed"}
 
 
-
-# ================= 辅助：统一数据计算逻辑 =================
+# ================= 辅助：统一数据计算逻辑 (已修复统计自定义节点) =================
 def calculate_dashboard_data():
     """
     计算并返回当前所有面板数据。
@@ -6133,7 +6434,11 @@ def calculate_dashboard_data():
         country_counter = Counter()
 
         for s in SERVERS_CACHE:
-            res = NODES_DATA.get(s['url'], [])
+            # 1. 获取面板节点 (X-UI API 数据)
+            res = NODES_DATA.get(s['url'], []) or []
+            # 2. 获取自定义节点 (一键部署的数据)
+            custom = s.get('custom_nodes', []) or []
+            
             name = s.get('name', '未命名')
             
             # 统计区域
@@ -6143,19 +6448,32 @@ def calculate_dashboard_data():
             except: region_str = "🏳️ 未知区域"
             country_counter[region_str] += 1
 
+            # === A. 处理面板节点 (统计流量、协议、在线状态) ===
+            srv_traffic = 0
             if res:
                 online_servers += 1
-                total_nodes += len(res)
-                srv_traffic = 0
+                total_nodes += len(res) # 累加面板节点
                 for n in res: 
                     t = int(n.get('up', 0)) + int(n.get('down', 0))
                     total_traffic_bytes += t
                     srv_traffic += t
                     proto = str(n.get('protocol', 'unknown')).upper()
                     protocol_count[proto] += 1
-                server_traffic_map[name] = srv_traffic
-            else:
-                server_traffic_map[name] = 0
+            
+            # === B. 处理自定义节点 (累加数量和协议) ===
+            if custom:
+                # 注意：如果面板掉线(res为空)但有自定义节点，是否算在线服务器？
+                # 这里暂且保持原逻辑：只根据API连通性判断 online_servers
+                # 但节点数量必须加上去：
+                total_nodes += len(custom)
+                
+                for cn in custom:
+                    # 自定义节点通常没有流量反馈，只统计协议
+                    c_proto = str(cn.get('protocol', 'custom')).upper()
+                    protocol_count[c_proto] += 1
+
+            # 记录该服务器总流量
+            server_traffic_map[name] = srv_traffic
 
         # 构建图表数据
         sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15]
@@ -6172,15 +6490,16 @@ def calculate_dashboard_data():
 
         return {
             "servers": f"{online_servers}/{total_servers}",
-            "nodes": str(total_nodes),
+            "nodes": str(total_nodes), # 这里的 total_nodes 现在包含了 Hy2 和 XHTTP
             "traffic": f"{total_traffic_bytes/(1024**3):.2f} GB",
             "subs": str(len(SUBS_CACHE)),
             "bar_chart": {"names": bar_names, "values": bar_values},
             "pie_chart": chart_data
         }
-    except:
+    except Exception as e:
+        # 建议把报错打印出来方便调试，生产环境可以去掉 print
+        print(f"Error calculating dashboard data: {e}")
         return None
-
 
 # ================= 核心：仪表盘主视图渲染 (V103：UI高度紧凑优化版) =================
 async def load_dashboard_stats():
