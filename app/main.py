@@ -5902,7 +5902,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
 REFRESH_CURRENT_NODES = lambda: None
 
 
-# =================  单服务器视图  =================
+# =================  单服务器视图 (已修复：补回明文复制按钮)  =================
 async def render_single_server_view(server_conf, force_refresh=False):
     global REFRESH_CURRENT_NODES
     
@@ -6001,7 +6001,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                  if has_xui_config: ui.badge('X-UI 面板已连接', color='green').props('outline rounded size=xs')
 
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-2 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
-                ui.label('节点名称').classes('text-left pl-2') # ✅ 改为 pl-2，与内容对齐
+                ui.label('节点名称').classes('text-left pl-2')
                 for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
 
             with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-1'): 
@@ -6030,10 +6030,26 @@ async def render_single_server_view(server_conf, force_refresh=False):
                                 with ui.row().classes('w-full justify-center items-center gap-1'):
                                     color = "green" if (is_custom or is_enable) else "red"; text = "已安装" if is_custom else ("运行中" if is_enable else "已停止")
                                     ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]'); ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
+                                
+                                # --- 按钮操作区 ---
                                 with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
                                     link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
                                     btn_props = 'flat dense size=sm round'
+                                    
+                                    # 1. 复制链接
                                     if link: ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
+                                    
+                                    # 2. ✨✨✨ 补回：复制明文配置 (Surge/Loon) ✨✨✨
+                                    async def copy_detail_action(node_item=n):
+                                        host = server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
+                                        # 调用全局辅助函数生成
+                                        text = generate_detail_config(node_item, host)
+                                        if text: await safe_copy_to_clipboard(text)
+                                        else: ui.notify('该协议不支持生成明文配置', type='warning')
+
+                                    ui.button(icon='description', on_click=copy_detail_action).props(btn_props).tooltip('复制明文配置').classes('text-gray-600 hover:bg-orange-50 hover:text-orange-600')
+
+                                    # 3. 编辑/删除按钮
                                     if is_custom:
                                         ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
                                         ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
@@ -6047,7 +6063,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 
         ui.element('div').classes('h-6 flex-shrink-0') 
 
-        # --- 第三段：SSH 窗口 (改) ---
+        # --- 第三段：SSH 窗口 ---
         with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
             ssh_state = {'active': False, 'instance': None}
 
@@ -6075,7 +6091,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         ssh_state['instance'] = ssh
                         ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
 
-                # --- 快捷命令区 (✨✨✨ 修复：纯暗黑配色 ✨✨✨) ---
+                # --- 快捷命令区 ---
                 with ui.row().classes('w-full min-h-[60px] bg-slate-800 border-t border-slate-700 px-4 py-4 gap-3 items-center flex-wrap'):
                     ui.label('快捷命令:').classes('text-xs font-bold text-gray-400 mr-2')
                     
@@ -6119,7 +6135,6 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 else:
                     ui.notify("请先连接 SSH", type='warning', position='bottom')
 
-            # ✨ 暗黑弹窗 ✨
             def open_cmd_editor(existing_cmd=None):
                 with ui.dialog() as d, ui.card().classes('w-96 p-5 bg-[#1e293b] border border-slate-600 shadow-2xl'):
                     with ui.row().classes('w-full justify-between items-center mb-4'):
@@ -6445,14 +6460,29 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
                 dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
                 ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
 
-        # 8. 操作按钮
+        # 8. 操作按钮 (✨ 已修复：加回了复制明文配置按钮 ✨)
         with ui.row().classes('gap-1 justify-center w-full no-wrap'):
+            
+            # (1) 复制标准链接
             async def copy_link():
                 link = node.get('_raw_link') or node.get('link')
                 if not link: link = generate_node_link(node, srv['url'])
                 await safe_copy_to_clipboard(link)
 
             ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
+
+            # (2) 复制明文配置 (Surge/Loon)
+            async def copy_detail():
+                host = srv['url'].split('://')[-1].split(':')[0]
+                text = generate_detail_config(node, host)
+                if text:
+                    await safe_copy_to_clipboard(text)
+                else:
+                    ui.notify('该协议不支持生成明文配置', type='warning')
+
+            ui.button(icon='description', on_click=copy_detail).props('flat dense size=sm round').tooltip('复制明文配置').classes('text-gray-500 hover:text-orange-600 hover:bg-orange-50')
+
+            # (3) 设置按钮
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
 
@@ -7416,7 +7446,7 @@ def render_sidebar_content():
             'absolute top-2 right-6 text-[3rem] font-black text-gray-200 '
             'opacity-30 pointer-events-none -rotate-12 select-none z-0 tracking-tighter leading-tight'
         )
-        ui.label('X-Fusion Panel').classes(
+        ui.label('小龙女她爸').classes(
             'text-2xl font-black mb-4 z-10 relative '
             'bg-gradient-to-r from-gray-700 to-black bg-clip-text text-transparent '
             'tracking-wide drop-shadow-sm'
