@@ -1,3 +1,12 @@
 :80 {
-    reverse_proxy x-fusion-panel:8080
+    # 1. 拦截订阅转换请求 (转发给 SubConverter 容器)
+    handle_path /convert* {
+        rewrite * /sub
+        reverse_proxy subconverter:25500
+    }
+
+    # 2. 主面板 (转发给 Panel 容器)
+    handle {
+        reverse_proxy x-fusion-panel:8080
+    }
 }
