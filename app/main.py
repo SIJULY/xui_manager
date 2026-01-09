@@ -1864,7 +1864,7 @@ class WebSSH:
                 # 1. 渲染终端 UI 容器
                 ui.element('div').props(f'id={self.term_id}').classes('w-full h-full bg-black rounded p-2 overflow-hidden relative')
                 
-                # 2. 注入 JS
+                # 2. 注入 JS (xterm.js 初始化)
                 init_js = f"""
                 try {{
                     if (window.{self.term_id}) {{
@@ -1878,7 +1878,6 @@ class WebSSH:
                         throw new Error("xterm.js 库未加载");
                     }}
                     
-                    // ✨ 修复：移除了 rendererType: "canvas"，防止因缺少插件导致报错
                     var term = new Terminal({{
                         cursorBlink: true,
                         fontSize: 13,
@@ -1920,12 +1919,53 @@ class WebSSH:
 
                 ui.on(f'term_input_{self.term_id}', lambda e: self._write_to_ssh(e.args))
 
+                # 3. 建立基础连接 (此时还不启动 Shell)
                 self.client, msg = await run.io_bound(get_ssh_client_sync, self.server_data)
                 
                 if not self.client:
                     self._print_error(msg)
                     return
 
+                # ================= ✨✨✨ 预处理阶段：定制信息格式 ✨✨✨ =================
+                
+                def pre_login_tasks():
+                    last_login_msg = ""
+                    try:
+                        # 1. 屏蔽广告
+                        self.client.exec_command("touch ~/.hushlogin")
+                        
+                        # 2. 获取原始日志
+                        # raw_log 类似: root pts/0 Wed Jan 9 16:30 still logged in 167.234.xx.xx
+                        stdin, stdout, stderr = self.client.exec_command("last -n 2 -a | head -n 2 | tail -n 1")
+                        raw_log = stdout.read().decode().strip()
+                        
+                        if raw_log and "wtmp" not in raw_log:
+                            # 3. ✂️ Python 字符串切割重组 ✂️
+                            parts = raw_log.split()
+                            # 确保长度足够防止报错
+                            # parts[2:6] 是日期时间 (Wed Jan 9 16:30)
+                            # parts[-1] 是 IP 地址 (167.234.xx.xx)
+                            if len(parts) >= 7:
+                                date_time = " ".join(parts[2:6])
+                                ip_addr = parts[-1]
+                                # 拼凑最终格式
+                                last_login_msg = f"Last login:  {date_time}   {ip_addr}"
+                    except: pass
+                    return last_login_msg
+
+                # 在后台线程执行
+                login_info = await run.io_bound(pre_login_tasks)
+
+                # 3.1 打印定制后的绿色信息
+                if login_info:
+                    # \x1b[32m 是绿色
+                    formatted_msg = f"\r\n\x1b[32m{login_info}\x1b[0m\r\n"
+                    b64_msg = base64.b64encode(formatted_msg.encode('utf-8')).decode('utf-8')
+                    ui.run_javascript(f'if(window.{self.term_id}) window.{self.term_id}.write(atob("{b64_msg}"));')
+
+                # =========================================================================
+
+                # 4. 启动交互式 Shell
                 self.channel = self.client.invoke_shell(term='xterm', width=100, height=30)
                 self.channel.settimeout(0.0) 
                 self.active = True
@@ -2033,8 +2073,8 @@ def open_ssh_interface(server_data):
                         .props('round unelevated dense size=sm color=red-1 text-color=red shadow-none') \
                         .tooltip('断开连接')
 
-                # --- 黑色终端区域 ---
-                terminal_box = ui.column().classes('w-full flex-grow bg-black p-0 overflow-hidden relative min-h-0 min-w-0')
+                # --- 黑色终端区域 + 底部命令栏区域 ---
+                terminal_box = ui.column().classes('w-full flex-grow p-0 overflow-hidden relative min-h-0 min-w-0 flex flex-col')
                 
                 # 启动 WebSSH
                 ssh = WebSSH(terminal_box, server_data)
