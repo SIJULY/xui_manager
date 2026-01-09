@@ -6111,7 +6111,7 @@ def show_custom_node_info(node):
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
 
-# ================= ✨✨✨ 聚合视图渲染 (节点展开 + 纯净样式版) ✨✨✨ =================
+# ================= 聚合视图渲染  =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     # 1. 触发后台数据更新
     if force_refresh:
@@ -6120,8 +6120,6 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     list_container = ui.column().classes('w-full gap-3 p-1')
     
     # 2. 定义列宽 (保持对齐)
-    # 格式: 服务器(150) 备注(200) 分组(1fr) 流量(100) 协议(80) 端口(80) 状态(50) 操作(150)
-    # 注意：根据是否显示延迟(show_ping)切换布局
     cols_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 1.5fr' 
     cols_no_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 0.5fr 1.5fr'
     
@@ -6138,7 +6136,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
             ui.label('服务器').classes('text-left pl-1')
             ui.label('备注名称').classes('text-left pl-1')
-            if use_special_mode: ui.label('在线状态').classes('text-center')
+            if use_special_mode: ui.label('在线状态 / IP').classes('text-center') # 修改表头名称
             else: ui.label('所在组').classes('text-center')
             ui.label('已用流量').classes('text-center')
             ui.label('协议').classes('text-center')
@@ -6149,18 +6147,16 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         # === B. 遍历服务器 ===
         for srv in server_list:
             
-            # 创建一个局部刷新区域，用于显示该服务器下的所有节点行
-            # 这样数据更新时，只会重绘这块区域，不会闪烁整个页面
+            # 创建一个局部刷新区域
             @ui.refreshable
             def render_server_rows(server_data):
                 # 1. 获取所有节点
                 panel_n = NODES_DATA.get(server_data['url'], []) or []
                 custom_n = server_data.get('custom_nodes', []) or []
                 
-                # 给自定义节点打标
                 for cn in custom_n: cn['_is_custom'] = True
                 
-                # 合并列表 (面板在前，自定义在后，或者反过来，看你喜好)
+                # 合并列表
                 all_nodes = panel_n + custom_n
                 
                 # 2. 如果没有任何节点 (显示一行占位)
@@ -6172,49 +6168,39 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 for index, node in enumerate(all_nodes):
                     draw_row(server_data, node, current_css, use_special_mode, is_first=(index==0))
 
-            # 渲染该服务器的行
             render_server_rows(srv)
-            
-            # 设置定时刷新 (每3秒刷新一次该区域的数据显示)
-            # 注意：这里的 refresh 会重新读取 NODES_DATA，如果后台 fetch 更新了，这里就会变
             ui.timer(3.0, render_server_rows.refresh)
 
 # --- 辅助函数：绘制单行 ---
 def draw_row(srv, node, css_style, use_special_mode, is_first=True):
-    # 3D 卡片样式 (每行一个卡片，或者紧凑一点)
-    # 为了视觉效果，如果一个服务器有多个节点，可以让他们稍微紧凑一点，或者保持独立卡片
-    # 这里保持独立卡片风格，清晰度最高
+    # 3D 卡片样式
     card_cls = (
         'grid w-full gap-4 py-3 px-4 items-center group relative '
         'bg-white rounded-xl border border-gray-200 border-b-[3px] '
         'shadow-sm transition-all duration-150 ease-out '
         'hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] '
-        'mb-2' # 增加下边距，让行与行之间有空隙
+        'mb-2'
     )
     
     with ui.element('div').classes(card_cls).style(css_style):
         
-        # 1. 服务器名 (只在第一行显示，或者每行都显示但变淡)
-        # 为了防误触，建议每行都显示，但可以用不同颜色区分
+        # 1. 服务器名
         srv_name = srv.get('name', '未命名')
         if not is_first:
-            # 如果不是第一行，显示淡一点，表示同属一台机器
             ui.label(srv_name).classes('text-xs text-gray-300 truncate w-full text-left pl-2 font-mono')
         else:
             ui.label(srv_name).classes('text-xs text-gray-500 font-bold truncate w-full text-left pl-2 font-mono')
 
-        # 如果没有节点数据 (Loading 或 空)
+        # 如果没有节点数据
         if not node:
             is_probe = srv.get('probe_installed', False)
             msg = '同步中...' if not is_probe else '无节点配置'
             ui.label(msg).classes('font-bold truncate text-gray-400 text-xs italic')
-            ui.label('--').classes('text-center text-gray-300') # 组/IP
-            ui.label('--').classes('text-center text-gray-300') # 流量
-            ui.label('UNK').classes('text-center text-gray-300 font-bold text-[10px]') # 协议
-            ui.label('--').classes('text-center text-gray-300') # 端口
-            if not use_special_mode: ui.element('div') # 状态占位
-            
-            # 操作按钮 (仅显示设置)
+            ui.label('--').classes('text-center text-gray-300')
+            ui.label('--').classes('text-center text-gray-300')
+            ui.label('UNK').classes('text-center text-gray-300 font-bold text-[10px]')
+            ui.label('--').classes('text-center text-gray-300')
+            if not use_special_mode: ui.element('div')
             with ui.row().classes('gap-1 justify-center w-full no-wrap'):
                  ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round color=grey')
             return
@@ -6225,69 +6211,67 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
         remark = node.get('ps') or node.get('remark') or '未命名节点'
         ui.label(remark).classes('font-bold truncate w-full text-left pl-2 text-slate-700 text-sm')
 
-        # 3. 分组 / IP (根据模式)
+        # 3. 分组 / IP (✨✨✨ 修复：自动解析域名为 IP ✨✨✨)
         if use_special_mode:
-            with ui.row().classes('w-full justify-center items-center gap-1'):
-                # 在线状态图标
+            with ui.row().classes('w-full justify-center items-center gap-1.5 no-wrap'):
+                # A. 状态图标
                 is_online = srv.get('_status') == 'online'
                 color = 'text-green-500' if is_online else 'text-red-500'
                 if not srv.get('probe_installed') and not node.get('_is_custom'): color = 'text-orange-400'
                 ui.icon('bolt').classes(f'{color} text-sm')
                 
-                # IP显示
-                try: real_ip = srv.get('address', srv.get('ip', ''))
-                except: real_ip = '0.0.0.0'
-                ui.label(real_ip).classes('text-xs font-mono text-gray-500 font-bold bg-gray-100 px-1.5 rounded')
+                # B. IP 显示 (调用 get_real_ip_display 智能解析)
+                # 即使填的是域名，这里也会显示解析后的 IP (如果有缓存)
+                # 如果没有缓存，会先显示域名，后台解析完自动更新
+                display_ip = get_real_ip_display(srv['url'])
+                
+                ip_lbl = ui.label(display_ip).classes('text-[10px] font-mono text-gray-500 font-bold bg-gray-100 px-1.5 py-0.5 rounded select-all')
+                
+                # 绑定后台更新 (如果还在解析中，解析完了会自动刷新这个 Label)
+                bind_ip_label(srv['url'], ip_lbl)
         else:
             group = srv.get('group', '默认分组')
             ui.label(group).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
 
-        # 4. 流量 (自定义节点显示 - )
+        # 4. 流量
         if node.get('_is_custom'):
             ui.label('-').classes('text-xs text-gray-400 w-full text-center font-mono')
         else:
             traffic = sum([node.get('up', 0), node.get('down', 0)])
             ui.label(format_bytes(traffic)).classes('text-xs text-blue-600 w-full text-center font-mono font-bold')
 
-        # 5. 协议 (✨纯字体颜色，无背景✨)
+        # 5. 协议
         proto = str(node.get('protocol', 'unk')).upper()
-        # 别名优化
         if 'HYSTERIA' in proto: proto = 'HY2'
         if 'SHADOWSOCKS' in proto: proto = 'SS'
         
-        # 颜色映射
-        proto_color = 'text-slate-500' # 默认灰
+        proto_color = 'text-slate-500'
         if 'HY2' in proto: proto_color = 'text-purple-600'
         elif 'VLESS' in proto: proto_color = 'text-blue-600'
         elif 'VMESS' in proto: proto_color = 'text-green-600'
         elif 'TROJAN' in proto: proto_color = 'text-orange-600'
         
-        # 渲染协议文本 (加粗，居中)
         ui.label(proto).classes(f'text-[11px] font-extrabold w-full text-center {proto_color} tracking-wide')
 
         # 6. 端口
         port_val = str(node.get('port', 0))
         ui.label(port_val).classes('text-slate-600 font-mono w-full text-center font-bold text-xs')
 
-        # 7. 状态圆点 (非特殊模式下显示)
+        # 7. 状态圆点
         if not use_special_mode:
             with ui.element('div').classes('flex justify-center w-full'):
                 is_enable = node.get('enable', True)
-                # 绿色表示启用，红色表示禁用 (带光晕)
                 dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
                 ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
 
         # 8. 操作按钮
         with ui.row().classes('gap-1 justify-center w-full no-wrap'):
-            # 复制链接
             async def copy_link():
                 link = node.get('_raw_link') or node.get('link')
                 if not link: link = generate_node_link(node, srv['url'])
                 await safe_copy_to_clipboard(link)
 
             ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
-            
-            # 详情跳转
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
 
