@@ -5726,29 +5726,33 @@ def smart_sort_key(server_info):
         return to_safe_sort_list(mixed_list)
     
 
-# ================= 表格布局定义 (定义两种模式) =================
 
-# 1. 带延迟 (用于：区域分组、单个服务器) - 包含 90px 的延迟列
-# 格式: 服务器(150) 备注(200) 分组(1fr) 流量(100) 协议(80) 端口(80) 延迟(90) 状态(50) 操作(150)
-COLS_WITH_PING = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
+# ================= 全局布局定义区域 (全响应式版) =================
 
-# 2. 无延迟 (用于：所有服务器、自定义分组) - 移除了延迟列
-# 格式: 服务器(150) 备注(200) 分组(1fr) 流量(100) 协议(80) 端口(80) 状态(50) 操作(150)
-COLS_NO_PING   = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px 50px 150px; align-items: center;'
+# 1. 带延迟 (9列) - 用于: 区域分组(如显示Ping时)
+# 布局: 服务器(2fr) 备注(2fr) 分组/IP(1.5fr) 流量(1fr) 协议(0.8fr) 端口(0.8fr) 延迟(0.8fr) 状态(0.5fr) 操作(1.5fr)
+COLS_WITH_PING = 'grid-template-columns: 2fr 2fr 1.5fr 1fr 0.8fr 0.8fr 0.8fr 0.5fr 1.5fr; align-items: center;'
 
-# 单个服务器视图直接复用带延迟的样式
-SINGLE_COLS = 'grid-template-columns: 200px 1fr 100px 80px 80px 90px 50px 150px; align-items: center;'
+# 2. 无延迟 (8列) - 用于: 所有服务器列表(默认), 自定义分组
+# 布局: 服务器(2fr) 备注(2fr) 分组(1.5fr) 流量(1fr) 协议(0.8fr) 端口(0.8fr) 状态(0.5fr) 操作(1.5fr)
+COLS_NO_PING   = 'grid-template-columns: 2fr 2fr 1.5fr 1fr 0.8fr 0.8fr 0.5fr 1.5fr; align-items: center;'
 
+# 3. 单机视图带延迟 (8列) - 用于: 单台服务器详情页 (如果显示延迟的话)
+# 布局: 节点名称(3fr) 类型(1fr) 流量(1fr) 协议(0.8fr) 端口(0.8fr) 延迟(0.8fr) 状态(0.5fr) 操作(1.5fr)
+# 注：这里给“节点名称”分配 3fr，因为它只有一列长文字，可以宽一点
+SINGLE_COLS = 'grid-template-columns: 3fr 1fr 1fr 0.8fr 0.8fr 0.8fr 0.5fr 1.5fr; align-items: center;'
+
+# 4. 所有服务器简略版 (7列) - 某些特殊视图使用
+# 布局: 服务器(2fr) 备注(2fr) 在线状态(1.5fr) 流量(1fr) 协议(0.8fr) 端口(0.8fr) 操作(1.5fr)
+COLS_ALL_SERVERS = 'grid-template-columns: 2fr 2fr 1.5fr 1fr 0.8fr 0.8fr 1.5fr; align-items: center;'
+
+# 5. 区域分组专用布局  ✨✨✨
 # 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 操作(150)
-COLS_ALL_SERVERS = 'grid-template-columns: 150px 200px 1fr 100px 80px 80px 150px; align-items: center;'
+COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2.5fr 1.5fr 1.5fr 1fr 0.8fr 0.8fr 1.5fr; align-items: center;'
 
-# ✨✨✨区域分组专用布局  ✨✨✨
-# 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 操作(150)
-COLS_SPECIAL_WITH_PING = 'grid-template-columns: 220px 200px 1fr 100px 80px 80px 150px; align-items: center;'
-
-# ✨✨✨ 新增：单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
+# 6. 单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
-SINGLE_COLS_NO_PING = 'grid-template-columns: 200px 1fr 100px 80px 80px 100px 150px; align-items: center;'
+SINGLE_COLS_NO_PING = 'grid-template-columns: 3fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr; align-items: center;'
 
 
 # ================= 刷新逻辑 =================
@@ -5898,7 +5902,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
 REFRESH_CURRENT_NODES = lambda: None
 
 
-# ================= [V111 终极版] 单服务器视图 (纯暗黑按钮修复) =================
+# =================  单服务器视图  =================
 async def render_single_server_view(server_conf, force_refresh=False):
     global REFRESH_CURRENT_NODES
     
@@ -5929,7 +5933,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
         def open_edit_custom_node(node_data):
             with ui.dialog() as d, ui.card().classes('w-96 p-4'):
                 ui.label('编辑节点备注').classes('text-lg font-bold mb-4')
-                name_input = ui.input('备注名称', value=node_data.get('remark', '')).classes('w-full')
+                name_input = ui.input('节点名称', value=node_data.get('remark', '')).classes('w-full')
                 async def save():
                     node_data['remark'] = name_input.value.strip()
                     await save_servers()
@@ -5996,11 +6000,11 @@ async def render_single_server_view(server_conf, force_refresh=False):
                  ui.label('节点列表').classes('text-sm font-black text-gray-600 uppercase tracking-wide ml-1')
                  if has_xui_config: ui.badge('X-UI 面板已连接', color='green').props('outline rounded size=xs')
 
-            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-4 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
-                ui.label('备注名称').classes('text-left')
+            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-2 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
+                ui.label('节点名称').classes('text-left pl-2') # ✅ 改为 pl-2，与内容对齐
                 for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
 
-            with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-3'): 
+            with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-1'): 
                 @ui.refreshable
                 async def render_node_list():
                     xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False) if has_xui_config else []
@@ -6012,7 +6016,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     else:
                         for n in all_nodes:
                             is_custom = n.get('_is_custom', False)
-                            row_3d_cls = 'grid w-full gap-4 py-3 px-4 mb-2 items-center group bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] active:border-b active:translate-y-[2px] active:shadow-none cursor-default'
+                            row_3d_cls = 'grid w-full gap-4 py-3 px-2 mb-2 items-center group bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] active:border-b active:translate-y-[2px] active:shadow-none cursor-default'
                             with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
                                 ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left text-slate-700 text-sm')
                                 source_tag = "独立" if is_custom else "面板"; source_cls = "bg-purple-100 text-purple-700" if is_custom else "bg-gray-100 text-gray-600"
@@ -6312,7 +6316,7 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         # === A. 绘制静态表头 ===
         with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
             ui.label('服务器').classes('text-left pl-1')
-            ui.label('备注名称').classes('text-left pl-1')
+            ui.label('节点名称').classes('text-left pl-1')
             if use_special_mode: ui.label('在线状态 / IP').classes('text-center') # 修改表头名称
             else: ui.label('所在组').classes('text-center')
             ui.label('已用流量').classes('text-center')
