@@ -1707,16 +1707,25 @@ def init_data():
             with open(ADMIN_CONFIG_FILE, 'r', encoding='utf-8') as f: ADMIN_CONFIG = json.load(f)
         except: ADMIN_CONFIG = {}
 
-    # ✨✨✨ [新增] 首次启动自动生成随机探针 Token ✨✨✨
+    # ================= ✨✨✨ 核心修改开始 ✨✨✨ =================
+    # 1. 默认开启探针功能 (无论是否点击过设置页)
+    if 'probe_enabled' not in ADMIN_CONFIG:
+        ADMIN_CONFIG['probe_enabled'] = True
+        logger.info("✅ 初始化: 探针功能默认已激活")
+
+    # 2. 首次启动自动生成随机探针 Token
     if 'probe_token' not in ADMIN_CONFIG:
         # 生成一个随机的 32 位字符串
         ADMIN_CONFIG['probe_token'] = uuid.uuid4().hex
-        try:
-            with open(ADMIN_CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(ADMIN_CONFIG, f, indent=4, ensure_ascii=False)
-            logger.info(f"🔑 系统初始化: 已生成唯一的探针安全令牌")
-        except Exception as e:
-            logger.error(f"❌ 保存 Config 失败: {e}")
+        logger.info(f"🔑 系统初始化: 已生成唯一的探针安全令牌")
+
+    # 立即保存配置到硬盘，确保持久化 (合并了上面两处的保存逻辑)
+    try:
+        with open(ADMIN_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(ADMIN_CONFIG, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"❌ 保存 Config 失败: {e}")
+    # ================= ✨✨✨ 核心修改结束 ✨✨✨ =================
 
 def _save_file_sync_internal(filename, data):
     temp_file = f"{filename}.{uuid.uuid4()}.tmp"
@@ -4522,23 +4531,11 @@ async def render_probe_page():
     content_container.clear()
     content_container.classes(replace='w-full h-full overflow-y-auto p-6 bg-slate-50 relative flex flex-col justify-center items-center')
     
-    # 3. 开启引导逻辑
-    async def enable_probe_feature():
+    if not ADMIN_CONFIG.get('probe_enabled'):
         ADMIN_CONFIG['probe_enabled'] = True
         await save_admin_config()
-        safe_notify("✅ 探针功能已激活！", "positive")
-        asyncio.create_task(batch_install_all_probes())
-        await render_probe_page()
 
-    if not ADMIN_CONFIG.get('probe_enabled', False):
-        with content_container:
-            with ui.column().classes('w-full h-full justify-center items-center opacity-50 gap-4'):
-                ui.icon('monitor_heart', size='5rem').classes('text-gray-300')
-                ui.label('探针监控功能未开启').classes('text-2xl font-bold text-gray-400')
-                ui.button('立即开启探针监控', on_click=enable_probe_feature).props('push color=primary')
-        return
-
-    # 4. 渲染布局 (限制最大宽度)
+    # 3. 渲染布局 (直接开始渲染正式页面)
     with content_container:
         with ui.column().classes('w-full max-w-7xl gap-6'):
             
@@ -7846,7 +7843,46 @@ def main_page(request: Request):
     global content_container
     content_container = ui.column().classes('w-full h-full pl-4 pr-4 pt-4 overflow-y-auto bg-slate-50')
     
-    # ================= 5. 启动后台任务 =================
+# ================= 5. 启动后台任务 =================
+    
+    # ✨✨✨ [新增] 自动初始化任务：抓取地址 + 双重保活 ✨✨✨
+    async def auto_init_system_settings():
+        try:
+            # 1. 获取当前浏览器地址 (例如 https://status.sijuly.tk)
+            current_origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
+            if not current_origin: return
+
+            # 2. 读取当前配置
+            stored_url = ADMIN_CONFIG.get('manager_base_url', '')
+            
+            # 3. 标记是否有变动
+            need_save = False
+
+            # --- 逻辑 A: 自动修正通信地址 ---
+            # 如果地址为空，或者还是默认的内部地址/回环地址，就覆盖它
+            if not stored_url or 'xui-manager' in stored_url or '127.0.0.1' in stored_url:
+                ADMIN_CONFIG['manager_base_url'] = current_origin
+                need_save = True
+                logger.info(f"♻️ [自动配置] 通信地址已修正为: {current_origin}")
+
+            # --- 逻辑 B: 双重保险，再次确认探针是开启的 ---
+            if not ADMIN_CONFIG.get('probe_enabled'):
+                ADMIN_CONFIG['probe_enabled'] = True
+                need_save = True
+
+            # 4. 如果有变动，执行保存并提示
+            if need_save:
+                await save_admin_config()
+                # 仅在首次修正时弹出提示，避免每次刷新都弹
+                ui.notify(f'✅ 系统初始化完成，通信地址已自动绑定: {current_origin}', type='positive', close_button=True)
+
+        except Exception as e:
+            pass
+
+    # 开机后延迟 1 秒执行一次 (不阻塞页面加载)
+    ui.timer(1.0, auto_init_system_settings, once=True)
+
+    # --- 原有的视图恢复逻辑 (保持不变) ---
     async def restore_last_view():
         last_scope = app.storage.user.get('last_view_scope', 'DASHBOARD')
         last_data_id = app.storage.user.get('last_view_data', None)
