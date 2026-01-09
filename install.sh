@@ -134,6 +134,11 @@ deploy_base() {
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
 
+    # ✨✨✨ 新增：下载世界地图数据到 static 目录 ✨✨✨
+    # 这样可以加速内网加载，避免访问 jsDelivr 超时
+    print_info "正在下载地图数据..."
+    curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
+
     if [ ! -f "app/main.py" ]; then
         print_error "主程序下载失败！请检查 GitHub 仓库地址是否正确。"
     fi
@@ -185,14 +190,26 @@ install_caddy_if_needed() {
     if ! command -v caddy &> /dev/null; then
         print_info "未检测到 Caddy，正在安装..."
         wait_for_apt_lock
-        apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-        apt-get update
-        apt-get install -y caddy
+        # 检测系统类型并安装
+        if [ -f /etc/debian_version ]; then
+            apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+            apt-get update
+            apt-get install -y caddy
+        elif [ -f /etc/redhat-release ]; then
+            yum install -y yum-utils
+            yum-config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
+            yum install -y caddy
+        else
+             print_warning "不支持的系统，请手动安装 Caddy。"
+        fi
     fi
-    if ! systemctl is-active --quiet caddy; then
-        systemctl enable --now caddy
+    
+    if command -v caddy &> /dev/null; then
+        if ! systemctl is-active --quiet caddy; then
+            systemctl enable --now caddy
+        fi
     fi
 }
 
@@ -209,10 +226,13 @@ configure_caddy() {
     cat >> "$CADDY_CONFIG_PATH" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
+    # 1. 拦截订阅转换请求 (转发给 SubConverter)
     handle_path /convert* {
         rewrite * /sub
         reverse_proxy 127.0.0.1:25500
     }
+
+    # 2. 面板主体 (转发给 Python 面板)
     handle {
         reverse_proxy 127.0.0.1:${PORT}
     }
@@ -346,6 +366,10 @@ update_panel() {
     curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
+
+    # ✨✨✨ 新增：更新时同步世界地图数据 ✨✨✨
+    print_info "更新地图数据..."
+    curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
 
     generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY"
 
