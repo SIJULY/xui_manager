@@ -1643,7 +1643,7 @@ GLOBE_JS_LOGIC = r"""
         myChart.setOption(option);
     }
 
-    fetch('https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json')
+    fetch('/static/world.json')
         .then(response => response.json())
         .then(worldJson => {
             echarts.registerMap('world', worldJson);
@@ -9218,7 +9218,7 @@ async def render_desktop_status_page():
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
             if (!chartDom || typeof echarts === 'undefined') {{ setTimeout(checkAndRender, 100); return; }}
-            fetch('https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json').then(r => r.json()).then(w => {{
+            fetch('/static/world.json').then(r => r.json()).then(w => {{
                 echarts.registerMap('world', w);
                 var myChart = echarts.init(chartDom);
                 window.publicMapChart = myChart; 
