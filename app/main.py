@@ -1469,17 +1469,24 @@ GLOBE_STRUCTURE = r"""
     <div id="earth-render-area" style="width:100%; height:100%;"></div>
 </div>
 """
-# ================= 2D 平面地图：JS 逻辑 (已锁定视角) =================
+
+# ================= 2D 平面地图：JS 逻辑 (仪表盘专用 - 已添加自动定位) =================
 GLOBE_JS_LOGIC = r"""
 (function() {
-    // 初始化数据
-    var serverData = window.GLOBE_DATA || [];
-    var realTotal = window.SERVER_TOTAL || serverData.length;
+    // 1. 获取仪表盘专用容器
+    var container = document.getElementById('earth-render-area');
+    if (!container) return;
     
+    // 2. 初始化数据
+    var serverData = window.DASHBOARD_DATA || [];
+    
+    // 3. 定义默认坐标 (北京)，如果定位成功会被覆盖
+    var myLat = 39.9;
+    var myLon = 116.4;
+
     // 更新统计数字
     var nodeCountEl = document.getElementById('node-count');
     var regionCountEl = document.getElementById('region-count');
-    
     function updateStats(data) {
         if(nodeCountEl) nodeCountEl.textContent = data.length;
         const uniqueRegions = new Set(data.map(s => s.name));
@@ -1487,37 +1494,38 @@ GLOBE_JS_LOGIC = r"""
     }
     updateStats(serverData);
 
-    var container = document.getElementById('earth-render-area');
-    if (!container) return;
-    
+    // 初始化 ECharts
+    var existing = echarts.getInstanceByDom(container);
+    if (existing) existing.dispose();
     var myChart = echarts.init(container);
-    var currentOption = null; // 保存当前的配置
 
-    // 定义高亮区域映射
+    // 4. 获取浏览器定位 (核心修复：像探针页面一样获取真实位置)
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function(position) {
+            myLat = position.coords.latitude;
+            myLon = position.coords.longitude;
+            // 定位成功后立即刷新一次地图，修正飞线起点
+            var option = buildOption(window.cachedWorldJson, serverData, myLat, myLon);
+            myChart.setOption(option);
+        });
+    }
+
+    // 5. 定义仪表盘专用的更新函数
+    window.updateDashboardMap = function(newData) {
+        if (!window.cachedWorldJson || !myChart) return;
+        // 更新内存数据，防止定位延迟回调覆盖
+        serverData = newData;
+        updateStats(newData);
+        // 使用当前最新的坐标 (myLat, myLon)
+        var option = buildOption(window.cachedWorldJson, newData, myLat, myLon);
+        myChart.setOption(option);
+    };
+
+    // 定义高亮区域
     const searchKeys = {
-        '🇺🇸': 'United States', 'US': 'United States', 'USA': 'United States',
-        '🇨🇦': 'Canada', 'CA': 'Canada',
-        '🇲🇽': 'Mexico', 'MX': 'Mexico',
-        '🇬🇧': 'United Kingdom', 'UK': 'United Kingdom', 'GB': 'United Kingdom',
-        '🇩🇪': 'Germany', 'DE': 'Germany',
-        '🇫🇷': 'France', 'FR': 'France',
-        '🇳🇱': 'Netherlands', 'NL': 'Netherlands',
-        '🇷🇺': 'Russia', 'RU': 'Russia',
-        '🇮🇹': 'Italy', 'IT': 'Italy',
-        '🇪🇸': 'Spain', 'ES': 'Spain',
-        '🇨🇳': 'China', 'CN': 'China', '🇭🇰': 'China', 'HK': 'China', '🇹🇼': 'China', 'TW': 'China',
-        '🇯🇵': 'Japan', 'JP': 'Japan',
-        '🇰🇷': 'Korea', 'KR': 'Korea',
-        '🇸🇬': 'Singapore', 'SG': 'Singapore',
-        '🇮🇳': 'India', 'IN': 'India',
-        '🇦🇺': 'Australia', 'AU': 'Australia',
-        '🇻🇳': 'Vietnam', 'VN': 'Vietnam',
-        '🇹🇭': 'Thailand', 'TH': 'Thailand',
-        '🇲🇾': 'Malaysia', 'MY': 'Malaysia',
-        '🇮🇩': 'Indonesia', 'ID': 'Indonesia',
-        '🇵🇭': 'Philippines', 'PH': 'Philippines',
-        '🇧🇷': 'Brazil', 'BR': 'Brazil',
-        '🇦🇷': 'Argentina', 'AR': 'Argentina'
+        '🇺🇸': 'United States', '🇨🇳': 'China', '🇭🇰': 'China', '🇹🇼': 'China', '🇯🇵': 'Japan', '🇰🇷': 'Korea',
+        '🇸🇬': 'Singapore', '🇬🇧': 'United Kingdom', '🇩🇪': 'Germany', '🇫🇷': 'France', '🇷🇺': 'Russia',
+        '🇨🇦': 'Canada', '🇦🇺': 'Australia', '🇮🇳': 'India', '🇧🇷': 'Brazil'
     };
 
     function buildOption(mapGeoJSON, data, userLat, userLon) {
@@ -1526,37 +1534,27 @@ GLOBE_JS_LOGIC = r"""
 
         data.forEach(s => {
             let keyword = null;
-            // 尝试从名字匹配国家
             for (let key in searchKeys) {
-                if ((s.name && s.name.includes(key)) || (s.country && s.country.includes(key))) {
+                if ((s.name && s.name.includes(key))) {
                     keyword = searchKeys[key];
                     break;
                 }
             }
-            if (!keyword && s.country) keyword = s.country; 
-
-            if (keyword) {
-                if (mapFeatureNames.includes(keyword)) {
-                    activeMapNames.add(keyword);
-                } else {
-                    const match = mapFeatureNames.find(n => n.includes(keyword) || keyword.includes(n));
-                    if (match) activeMapNames.add(match);
-                }
+            if (keyword && mapFeatureNames.includes(keyword)) {
+                activeMapNames.add(keyword);
             }
         });
 
         const highlightRegions = Array.from(activeMapNames).map(name => ({
             name: name,
-            itemStyle: {
-                areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5,
-                shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9
-            }
+            itemStyle: { areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, opacity: 0.9 }
         }));
 
         const scatterData = data.map(s => ({
             name: s.name, value: [s.lon, s.lat], itemStyle: { color: '#00ffff' }
         }));
         
+        // 使用传入的 userLat, userLon 作为起点
         scatterData.push({
             name: "ME", value: [userLon, userLat], itemStyle: { color: '#FFD700' },
             symbolSize: 15, label: { show: true, position: 'top', formatter: 'My PC', color: '#FFD700' }
@@ -1567,7 +1565,7 @@ GLOBE_JS_LOGIC = r"""
         }));
 
         return {
-            backgroundColor: '#100C2A',
+            backgroundColor: '#100C2A', // 仪表盘固定深色背景
             geo: {
                 map: 'world', roam: false, zoom: 1.2, center: [15, 10],
                 label: { show: false },
@@ -1585,50 +1583,246 @@ GLOBE_JS_LOGIC = r"""
                 {
                     type: 'scatter', coordinateSystem: 'geo', zlevel: 3, symbol: 'circle', symbolSize: 12,
                     itemStyle: { color: '#00ffff', shadowBlur: 10, shadowColor: '#333' },
-                    label: { show: true, position: 'right', formatter: '{b}', color: '#fff', fontSize: 16, fontWeight: 'bold', textBorderColor: '#000', textBorderWidth: 2 },
+                    label: { show: true, position: 'right', formatter: '{b}', color: '#fff', fontSize: 16, fontWeight: 'bold' },
                     data: scatterData
                 }
             ]
         };
     }
 
-    // ✨✨✨ 暴露给外部的更新函数 ✨✨✨
-    window.updateGlobeMap = function(newData) {
-        if (!window.cachedWorldJson || !myChart) return;
-        
-        // 更新统计
-        updateStats(newData);
-        
-        // 使用缓存的坐标和地图数据重绘
-        let uLat = window.cachedUserLat || 39.9;
-        let uLon = window.cachedUserLon || 116.4;
-        
-        const option = buildOption(window.cachedWorldJson, newData, uLat, uLon);
-        myChart.setOption(option);
-    };
-
     fetch('/static/world.json')
         .then(response => response.json())
         .then(worldJson => {
             echarts.registerMap('world', worldJson);
-            window.cachedWorldJson = worldJson; // 缓存 GeoJSON
+            window.cachedWorldJson = worldJson;
             
-            let uLat = 39.9, uLon = 116.4; 
+            // 初始渲染
+            var option = buildOption(worldJson, serverData, myLat, myLon);
+            myChart.setOption(option);
             
-            const initMap = (lat, lon) => {
-                window.cachedUserLat = lat; window.cachedUserLon = lon;
-                const option = buildOption(worldJson, serverData, lat, lon);
-                myChart.setOption(option);
-            };
-            } else {
-                initMap(uLat, uLon);
-            }
-
             window.addEventListener('resize', () => myChart.resize());
             new ResizeObserver(() => myChart.resize()).observe(container);
         });
 })();
 """
+
+# ================= 全局地图名称映射表 (用于 Status 页面) =================
+MATCH_MAP = {
+    # --- 南美 ---
+    '🇨🇱': 'Chile', 'CHILE': 'Chile',
+    '🇧🇷': 'Brazil', 'BRAZIL': 'Brazil', 'BRA': 'Brazil', 'SAO PAULO': 'Brazil',
+    '🇦🇷': 'Argentina', 'ARGENTINA': 'Argentina', 'ARG': 'Argentina',
+    '🇨🇴': 'Colombia', 'COLOMBIA': 'Colombia', 'COL': 'Colombia',
+    '🇵🇪': 'Peru', 'PERU': 'Peru',
+    # --- 北美 ---
+    '🇺🇸': 'United States', 'USA': 'United States', 'UNITED STATES': 'United States', 'AMERICA': 'United States',
+    '🇨🇦': 'Canada', 'CANADA': 'Canada', 'CAN': 'Canada',
+    '🇲🇽': 'Mexico', 'MEXICO': 'Mexico', 'MEX': 'Mexico',
+    # --- 欧洲 ---
+    '🇬🇧': 'United Kingdom', 'UK': 'United Kingdom', 'GB': 'United Kingdom', 'UNITED KINGDOM': 'United Kingdom', 'LONDON': 'United Kingdom',
+    '🇩🇪': 'Germany', 'GERMANY': 'Germany', 'DEU': 'Germany', 'FRANKFURT': 'Germany',
+    '🇫🇷': 'France', 'FRANCE': 'France', 'FRA': 'France', 'PARIS': 'France',
+    '🇳🇱': 'Netherlands', 'NETHERLANDS': 'Netherlands', 'NLD': 'Netherlands', 'AMSTERDAM': 'Netherlands',
+    '🇷🇺': 'Russia', 'RUSSIA': 'Russia', 'RUS': 'Russia',
+    '🇮🇹': 'Italy', 'ITALY': 'Italy', 'ITA': 'Italy', 'MILAN': 'Italy',
+    '🇪🇸': 'Spain', 'SPAIN': 'Spain', 'ESP': 'Spain', 'MADRID': 'Spain',
+    '🇵🇱': 'Poland', 'POLAND': 'Poland', 'POL': 'Poland',
+    '🇺🇦': 'Ukraine', 'UKRAINE': 'Ukraine', 'UKR': 'Ukraine',
+    '🇸🇪': 'Sweden', 'SWEDEN': 'Sweden', 'SWE': 'Sweden',
+    '🇨🇭': 'Switzerland', 'SWITZERLAND': 'Switzerland', 'CHE': 'Switzerland',
+    '🇹🇷': 'Turkey', 'TURKEY': 'Turkey', 'TUR': 'Turkey',
+    '🇮🇪': 'Ireland', 'IRELAND': 'Ireland', 'IRL': 'Ireland',
+    '🇫🇮': 'Finland', 'FINLAND': 'Finland', 'FIN': 'Finland',
+    '🇳🇴': 'Norway', 'NORWAY': 'Norway', 'NOR': 'Norway',
+    '🇦🇹': 'Austria', 'AUSTRIA': 'Austria', 'AUT': 'Austria',
+    '🇧🇪': 'Belgium', 'BELGIUM': 'Belgium', 'BEL': 'Belgium',
+    '🇵🇹': 'Portugal', 'PORTUGAL': 'Portugal', 'PRT': 'Portugal',
+    '🇬🇷': 'Greece', 'GREECE': 'Greece', 'GRC': 'Greece',
+    # --- 亚太 ---
+    '🇨🇳': 'China', 'CHINA': 'China', 'CHN': 'China', 'CN': 'China',
+    '🇭🇰': 'China', 'HONG KONG': 'China', 'HK': 'China',
+    '🇲🇴': 'China', 'MACAU': 'China', 'MO': 'China',
+    '🇹🇼': 'China', 'TAIWAN': 'China', 'TW': 'China',
+    '🇯🇵': 'Japan', 'JAPAN': 'Japan', 'JPN': 'Japan', 'TOKYO': 'Japan', 'OSAKA': 'Japan',
+    '🇰🇷': 'South Korea', 'KOREA': 'South Korea', 'KOR': 'South Korea', 'SEOUL': 'South Korea',
+    '🇸🇬': 'Singapore', 'SINGAPORE': 'Singapore', 'SGP': 'Singapore', 'SG': 'Singapore',
+    '🇮🇳': 'India', 'INDIA': 'India', 'IND': 'India', 'MUMBAI': 'India',
+    '🇦🇺': 'Australia', 'AUSTRALIA': 'Australia', 'AUS': 'Australia', 'SYDNEY': 'Australia',
+    '🇳🇿': 'New Zealand', 'NEW ZEALAND': 'New Zealand', 'NZL': 'New Zealand',
+    '🇻🇳': 'Vietnam', 'VIETNAM': 'Vietnam', 'VNM': 'Vietnam',
+    '🇹🇭': 'Thailand', 'THAILAND': 'Thailand', 'THA': 'Thailand', 'BANGKOK': 'Thailand',
+    '🇲🇾': 'Malaysia', 'MALAYSIA': 'Malaysia', 'MYS': 'Malaysia',
+    '🇮🇩': 'Indonesia', 'INDONESIA': 'Indonesia', 'IDN': 'Indonesia', 'JAKARTA': 'Indonesia',
+    '🇵🇭': 'Philippines', 'PHILIPPINES': 'Philippines', 'PHL': 'Philippines',
+    '🇰🇭': 'Cambodia', 'CAMBODIA': 'Cambodia', 'KHM': 'Cambodia',
+    # --- 中东/非洲 ---
+    '🇦🇪': 'United Arab Emirates', 'UAE': 'United Arab Emirates', 'DUBAI': 'United Arab Emirates',
+    '🇿🇦': 'South Africa', 'SOUTH AFRICA': 'South Africa', 'ZAF': 'South Africa',
+    '🇸🇦': 'Saudi Arabia', 'SAUDI ARABIA': 'Saudi Arabia', 'SAU': 'Saudi Arabia',
+    '🇮🇱': 'Israel', 'ISRAEL': 'Israel', 'ISR': 'Israel',
+    '🇪🇬': 'Egypt', 'EGYPT': 'Egypt', 'EGY': 'Egypt',
+    '🇮🇷': 'Iran', 'IRAN': 'Iran', 'IRN': 'Iran',
+    '🇳🇬': 'Nigeria', 'NIGERIA': 'Nigeria', 'NGA': 'Nigeria'
+}
+
+def get_echarts_region_name(name_raw):
+    if not name_raw: return None
+    name = name_raw.upper()
+    sorted_keys = sorted(MATCH_MAP.keys(), key=len, reverse=True)
+    for key in sorted_keys:
+        if key in name: return MATCH_MAP[key]
+    return None
+
+def prepare_map_data():
+    try:
+        city_points_map = {} 
+        flag_points_map = {} 
+        unique_deployed_countries = set() # 统计真实国家数
+        region_stats = {} 
+        active_regions_for_highlight = set()
+
+        # 1. 国旗 -> 标准地图名映射
+        FLAG_TO_MAP_NAME = {
+            '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
+            '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
+            '🇬🇧': 'United Kingdom', '🇩🇪': 'Germany', '🇫🇷': 'France', '🇳🇱': 'Netherlands',
+            '🇷🇺': 'Russia', '🇯🇵': 'Japan', '🇰🇷': 'South Korea', '🇸🇬': 'Singapore',
+            '🇮🇳': 'India', '🇦🇺': 'Australia', '🇧🇷': 'Brazil', '🇦🇷': 'Argentina',
+            '🇹🇷': 'Turkey', '🇮🇹': 'Italy', '🇪🇸': 'Spain', '🇵🇹': 'Portugal',
+            '🇨🇭': 'Switzerland', '🇸🇪': 'Sweden', '🇳🇴': 'Norway', '🇫🇮': 'Finland',
+            '🇵🇱': 'Poland', '🇺🇦': 'Ukraine', '🇮🇪': 'Ireland', '🇦🇹': 'Austria',
+            '🇧🇪': 'Belgium', '🇩🇰': 'Denmark', '🇨🇿': 'Czech Republic', '🇬🇷': 'Greece',
+            '🇿🇦': 'South Africa', '🇪🇬': 'Egypt', '🇸🇦': 'Saudi Arabia', '🇦🇪': 'United Arab Emirates',
+            '🇮🇱': 'Israel', '🇮🇷': 'Iran', '🇮🇩': 'Indonesia', '🇲🇾': 'Malaysia',
+            '🇹🇭': 'Thailand', '🇻🇳': 'Vietnam', '🇵🇭': 'Philippines', '🇨🇱': 'Chile',
+            '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
+        }
+
+        # 2. 地图名别名库
+        MAP_NAME_ALIASES = {
+            'United States': ['United States of America', 'USA'],
+            'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
+            'China': ['People\'s Republic of China'],
+            'Russia': ['Russian Federation'],
+            'South Korea': ['Korea', 'Republic of Korea'],
+            'North Korea': ['Dem. Rep. Korea'],
+            'Vietnam': ['Viet Nam'],
+            'Laos': ['Lao PDR']
+        }
+
+        # 3. 中心点坐标库
+        COUNTRY_CENTROIDS = {
+            'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
+            'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
+            'Russia': [105.31, 61.52], 'Canada': [-106.34, 56.13], 'Brazil': [-51.92, -14.23],
+            'Australia': [133.77, -25.27], 'India': [78.96, 20.59], 'Japan': [138.25, 36.20],
+            'South Korea': [127.76, 35.90], 'Singapore': [103.81, 1.35], 'Turkey': [35.24, 38.96]
+        }
+        
+        CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76) }
+        
+        from collections import Counter; country_counter = Counter()
+        snapshot = list(SERVERS_CACHE)
+        temp_stats_storage = {}
+
+        for s in snapshot:
+            s_name = s.get('name', '')
+            
+            # A. 确定国旗
+            flag_icon = "📍"
+            for f in FLAG_TO_MAP_NAME.keys():
+                if f in s_name:
+                    flag_icon = f
+                    break
+            if flag_icon == "📍":
+                try:
+                    group_str = detect_country_group(s_name, s)
+                    if group_str:
+                        first_char = group_str.split(' ')[0]
+                        if any(c in first_char for c in FLAG_TO_MAP_NAME):
+                            flag_icon = first_char
+                except: pass
+
+            try: country_counter[detect_country_group(s_name, s)] += 1
+            except: pass
+
+            # B. 确定坐标
+            lat, lon = None, None
+            for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
+                if city_key.lower() in s_name.lower(): lat, lon = c_lat, c_lon; break
+            if not lat:
+                if 'lat' in s: lat, lon = s['lat'], s['lon']
+                else: 
+                    coords = get_coords_from_name(s_name)
+                    if coords: lat, lon = coords[0], coords[1]
+            
+            # C. 确定标准地图名
+            map_name_standard = FLAG_TO_MAP_NAME.get(flag_icon)
+            if not map_name_standard:
+                tmp = get_echarts_region_name(s_name)
+                if tmp and tmp.upper() in MATCH_MAP: map_name_standard = MATCH_MAP[tmp.upper()]
+
+            # D. 生成数据
+            if lat and lon and map_name_standard:
+                coord_key = f"{lat},{lon}"
+                if coord_key not in city_points_map: 
+                    city_points_map[coord_key] = {'name': s_name, 'value': [lon, lat], 'country_key': map_name_standard}
+                
+                display_flag = flag_icon if flag_icon != "📍" else "📍"
+                if display_flag not in flag_points_map: 
+                    flag_points_map[display_flag] = {'name': display_flag, 'value': [lon, lat], 'country_key': map_name_standard}
+
+            if map_name_standard:
+                unique_deployed_countries.add(map_name_standard)
+                if map_name_standard not in temp_stats_storage:
+                    temp_stats_storage[map_name_standard] = {
+                        'flag': flag_icon, 'cn': map_name_standard,
+                        'total': 0, 'online': 0, 'offline': 0, 'list': []
+                    }
+                
+                rs = temp_stats_storage[map_name_standard]
+                rs['total'] += 1
+                is_on = s.get('_status') == 'online'
+                if is_on: rs['online'] += 1
+                else: rs['offline'] += 1
+                
+                if len(rs['list']) < 15: 
+                    rs['list'].append({ 'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline' })
+
+                if map_name_standard not in COUNTRY_CENTROIDS and lat and lon:
+                    COUNTRY_CENTROIDS[map_name_standard] = [lon, lat]
+
+        for std_name, stats in temp_stats_storage.items():
+            stats['list'].sort(key=lambda x: 0 if x['status'] == 'offline' else 1)
+            region_stats[std_name] = stats
+            active_regions_for_highlight.add(std_name)
+            if std_name in MAP_NAME_ALIASES:
+                for alias in MAP_NAME_ALIASES[std_name]:
+                    region_stats[alias] = stats
+                    active_regions_for_highlight.add(alias)
+
+        pie_data = []
+        if country_counter:
+            sorted_counts = country_counter.most_common(5)
+            for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
+            others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
+            if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
+        else: pie_data.append({'name': '暂无数据', 'value': 0})
+
+        city_list = list(city_points_map.values()); flag_list = list(flag_points_map.values())
+        
+        return (
+            json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions_for_highlight)}, ensure_ascii=False), 
+            pie_data, 
+            len(unique_deployed_countries), 
+            json.dumps(region_stats, ensure_ascii=False), 
+            json.dumps(COUNTRY_CENTROIDS, ensure_ascii=False)
+        )
+    except Exception as e:
+        print(f"[ERROR] prepare_map_data failed: {e}")
+        import traceback; traceback.print_exc()
+        return (json.dumps({'cities': [], 'flags': [], 'regions': []}), [], 0, "{}", "{}")
+
 
 # ==========================================
 # 👇全局变量定义 👇
@@ -6463,7 +6657,7 @@ async def refresh_dashboard_ui():
         server_traffic_map = {}
         protocol_count = {}
         
-        # --- 1. 计算数据 ---
+        # --- 1. 计算基础统计数据 ---
         for s in SERVERS_CACHE:
             res = NODES_DATA.get(s['url'], []) or []
             custom = s.get('custom_nodes', []) or []
@@ -6488,13 +6682,11 @@ async def refresh_dashboard_ui():
             server_traffic_map[name] = srv_traffic
 
         # --- 2. 更新 UI 文字和图表 ---
-        # 顶部卡片
         if DASHBOARD_REFS.get('servers'): DASHBOARD_REFS['servers'].set_text(f"{online_servers}/{total_servers}")
         if DASHBOARD_REFS.get('nodes'): DASHBOARD_REFS['nodes'].set_text(str(total_nodes))
         if DASHBOARD_REFS.get('traffic'): DASHBOARD_REFS['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
         if DASHBOARD_REFS.get('subs'): DASHBOARD_REFS['subs'].set_text(str(len(SUBS_CACHE)))
 
-        # 柱状图
         if DASHBOARD_REFS.get('bar_chart'):
             sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
             names = [x[0] for x in sorted_traffic]
@@ -6503,14 +6695,13 @@ async def refresh_dashboard_ui():
             DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = values
             DASHBOARD_REFS['bar_chart'].update()
 
-        # 饼图
         if DASHBOARD_REFS.get('pie_chart'):
             pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
             if not pie_data: pie_data = [{'name': '暂无数据', 'value': 0}]
             DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
             DASHBOARD_REFS['pie_chart'].update()
 
-        # --- ✨✨✨ 3. 新增：更新 3D 地图 (Globe) ✨✨✨ ---
+        # --- ✨✨✨ 3. 新增：同步刷新地图数据 ✨✨✨ ---
         globe_data_list = []
         seen_locations = set()
         for s in SERVERS_CACHE:
@@ -6525,18 +6716,19 @@ async def refresh_dashboard_ui():
                 if coord_key not in seen_locations:
                     seen_locations.add(coord_key)
                     flag_only = "📍"
-                    country_name = s.get('_detected_region', '')
                     try:
                         full_group = detect_country_group(s.get('name', ''), s)
                         flag_only = full_group.split(' ')[0]
                     except: pass
-                    globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name})
+                    # 旧版格式：{lat, lon, name}
+                    globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only})
         
-        # 只有当前是在仪表盘页面时才执行 JS，防止报错
+        # 只有当前是在仪表盘页面时才执行 JS
         if CURRENT_VIEW_STATE.get('scope') == 'DASHBOARD':
             import json
             json_data = json.dumps(globe_data_list, ensure_ascii=False)
-            ui.run_javascript(f'if(window.updateGlobeMap) window.updateGlobeMap({json_data});')
+            # ✨ 核心修复：调用我们刚才改名后的 updateDashboardMap
+            ui.run_javascript(f'if(window.updateDashboardMap) window.updateDashboardMap({json_data});')
 
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
@@ -6634,7 +6826,7 @@ def calculate_dashboard_data():
         print(f"Error calculating dashboard data: {e}")
         return None
 
-# ================= 核心：仪表盘主视图渲染 =================
+# ================= 核心：仪表盘主视图渲染 (仪表盘专用) =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
@@ -6644,9 +6836,8 @@ async def load_dashboard_stats():
     content_container.clear()
     content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
     
-    # ✨ 第一道保险：Python 端先计算一次初始数据
+    # 1. 计算初始统计数据
     init_data = calculate_dashboard_data()
-    
     if not init_data:
         init_data = {
             "servers": "0/0", "nodes": "0", "traffic": "0 GB", "subs": "0",
@@ -6654,7 +6845,7 @@ async def load_dashboard_stats():
         }
 
     with content_container:
-        # JS 轮询脚本 (保持不变，作为前端双重保险)
+        # JS 轮询脚本
         ui.run_javascript("""
         if (window.dashInterval) clearInterval(window.dashInterval);
         window.dashInterval = setInterval(async () => {
@@ -6698,16 +6889,14 @@ async def load_dashboard_stats():
 
         ui.label('系统概览').classes('text-3xl font-bold mb-4 text-slate-800 tracking-tight')
         
-        # === A. 顶部统计卡片 (✨✨✨ 关键修改：赋值给 DASHBOARD_REFS ✨✨✨) ===
+        # === A. 顶部统计卡片 ===
         with ui.row().classes('w-full gap-4 mb-6 items-stretch'):
-            # 增加 ref_key 参数
             def create_stat_card(ref_key, dom_id, title, sub_text, icon, gradient, init_val):
                 with ui.card().classes(f'flex-1 p-3 shadow border-none text-white {gradient} rounded-xl relative overflow-hidden'):
                     ui.element('div').classes('absolute -right-4 -top-4 w-20 h-20 bg-white opacity-10 rounded-full')
                     with ui.row().classes('items-center justify-between w-full relative z-10'):
                         with ui.column().classes('gap-0'):
                             ui.label(title).classes('opacity-90 text-[10px] font-bold uppercase tracking-wider')
-                            # ✨✨✨ 赋值给全局引用字典 ✨✨✨
                             DASHBOARD_REFS[ref_key] = ui.label(init_val).props(f'id={dom_id}').classes('text-2xl font-extrabold tracking-tight my-0.5')
                             ui.label(sub_text).classes('opacity-70 text-[10px] font-medium')
                         ui.icon(icon).classes('text-3xl opacity-80')
@@ -6717,10 +6906,9 @@ async def load_dashboard_stats():
             create_stat_card('traffic', 'stat-traffic', '总流量消耗', 'Upload + Download', 'bolt', 'bg-gradient-to-br from-emerald-500 to-teal-600', init_data['traffic'])
             create_stat_card('subs', 'stat-subs', '订阅配置', 'Subscriptions', 'rss_feed', 'bg-gradient-to-br from-orange-400 to-red-500', init_data['subs'])
 
-        # === B. 图表区域 (✨✨✨ 关键修改：赋值给 DASHBOARD_REFS ✨✨✨) ===
+        # === B. 图表区域 ===
         with ui.row().classes('w-full gap-4 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
-            
-            # --- 流量排行 (左侧) ---
+            # 流量排行
             with ui.card().classes('w-full xl:w-2/3 p-4 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-base font-bold text-slate-700')
@@ -6728,7 +6916,6 @@ async def load_dashboard_stats():
                         ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse')
                         ui.label('Live').classes('text-[10px] font-bold text-green-700')
                 
-                # ✨✨✨ 赋值 Bar Chart ✨✨✨
                 DASHBOARD_REFS['bar_chart'] = ui.echart({
                     'tooltip': {'trigger': 'axis'},
                     'grid': {'left': '2%', 'right': '3%', 'bottom': '2%', 'top': '10%', 'containLabel': True},
@@ -6737,13 +6924,11 @@ async def load_dashboard_stats():
                     'series': [{'type': 'bar', 'data': init_data['bar_chart']['values'], 'barWidth': '40%', 'itemStyle': {'borderRadius': [3, 3, 0, 0], 'color': '#6366f1'}}]
                 }).classes('w-full h-56').props('id=chart-bar')
 
-            # --- 区域分布 (右侧) ---
+            # 区域分布
             with ui.card().classes('w-full xl:w-1/3 p-4 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 ui.label('🌏 服务器分布').classes('text-base font-bold text-slate-700 mb-1')
-                
                 color_palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#6366f1', '#ec4899', '#14b8a6', '#f97316']
                 
-                # ✨✨✨ 赋值 Pie Chart ✨✨✨
                 DASHBOARD_REFS['pie_chart'] = ui.echart({
                     'tooltip': {'trigger': 'item', 'formatter': '{b}: <br/><b>{c} 台</b> ({d}%)'},
                     'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 10, 'textStyle': {'color': '#64748b', 'fontSize': 11}},
@@ -6762,48 +6947,43 @@ async def load_dashboard_stats():
                     }]
                 }).classes('w-full h-56').props('id=chart-pie')
 
-        # === C. 底部地图区域 (结构保持不变，更新逻辑在 refresh_dashboard_ui 中) ===
+        # === C. 底部地图区域 (仪表盘专用) ===
         with ui.row().classes('w-full gap-6 mb-6'):
             with ui.card().classes('w-full p-0 shadow-md border-none rounded-xl bg-slate-900 overflow-hidden relative'):
                 with ui.row().classes('w-full px-6 py-3 bg-slate-800/50 border-b border-gray-700 justify-between items-center z-10 relative'):
                     with ui.row().classes('gap-2 items-center'):
                         ui.icon('public', color='blue-4').classes('text-xl')
                         ui.label('全球节点实景 (Global View)').classes('text-base font-bold text-white')
-                    # ✨✨✨ 赋值 Label 以便显示更新状态 ✨✨✨
                     DASHBOARD_REFS['map_info'] = ui.label('Live Rendering').classes('text-[10px] text-gray-400')
 
-                # 计算初始地图数据
+                # 1. 准备旧版简单数据
                 globe_data_list = []
                 seen_locations = set()
                 total_server_count = len(SERVERS_CACHE)
                 
                 for s in SERVERS_CACHE:
                     lat, lon = None, None
-                    if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
+                    if 'lat' in s: lat, lon = s['lat'], s['lon']
                     else:
-                        coords = get_coords_from_name(s.get('name', ''))
-                        if coords: lat, lon = coords[0], coords[1]
-                    
-                    if lat is not None and lon is not None:
-                        coord_key = (round(lat, 2), round(lon, 2))
-                        if coord_key not in seen_locations:
-                            seen_locations.add(coord_key)
-                            flag_only = "📍"
-                            country_name = s.get('_detected_region', '')
-                            try:
-                                full_group = detect_country_group(s.get('name', ''), s)
-                                flag_only = full_group.split(' ')[0]
+                        c = get_coords_from_name(s.get('name', ''))
+                        if c: lat, lon = c[0], c[1]
+                    if lat:
+                        k = (round(lat,2), round(lon,2))
+                        if k not in seen_locations:
+                            seen_locations.add(k)
+                            flag = "📍"
+                            try: flag = detect_country_group(s['name']).split(' ')[0]
                             except: pass
-                            globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name})
+                            globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag})
 
                 import json
                 json_data = json.dumps(globe_data_list, ensure_ascii=False)
                 
-                # 渲染 HTML 容器
+                # 2. 渲染容器 (使用 GLOBE_STRUCTURE)
                 ui.html(GLOBE_STRUCTURE, sanitize=False).classes('w-full h-[650px] overflow-hidden')
                 
-                # 注入数据和 JS 逻辑 (注意：GLOBE_JS_LOGIC 需要使用上面修复后的版本)
-                ui.run_javascript(f'window.GLOBE_DATA = {json_data}; window.SERVER_TOTAL = {total_server_count};')
+                # 3. 注入数据 (使用 DASHBOARD_DATA) 和 JS
+                ui.run_javascript(f'window.DASHBOARD_DATA = {json_data};')
                 ui.run_javascript(GLOBE_JS_LOGIC)
         
 # ================= 全能批量编辑器 =================
@@ -8755,10 +8935,11 @@ async def status_page_router(request: Request):
         await render_desktop_status_page()
 
 
-# ================= 电脑端大屏显示  =================        
+# ================= 电脑端大屏辅助全局变量  =================        
 import asyncio 
 import traceback
 
+# ================= 核心：/status 电脑端大屏显示 (Status页专用 - 已隔离) =================
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -8824,179 +9005,17 @@ async def render_desktop_status_page():
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
     def fmt_speed(b): return f"{int(b)} B" if b < 1024 else (f"{int(b/1024)} K" if b < 1024**2 else f"{int(b/1024**2)} M")
 
-    def prepare_map_data():
-        try:
-            city_points_map = {} 
-            flag_points_map = {} 
-            
-            # ✨ 新增：专门用于统计真实国家数量的集合（解决显示为3的问题）
-            unique_deployed_countries = set()
-            
-            # 用于 ECharts 高亮和 Tooltip 查询的字典
-            region_stats = {} 
-            active_regions_for_highlight = set()
-
-            # 1. 国旗 -> 标准地图名映射
-            FLAG_TO_MAP_NAME = {
-                '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
-                '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
-                '🇬🇧': 'United Kingdom', '🇩🇪': 'Germany', '🇫🇷': 'France', '🇳🇱': 'Netherlands',
-                '🇷🇺': 'Russia', '🇯🇵': 'Japan', '🇰🇷': 'South Korea', '🇸🇬': 'Singapore',
-                '🇮🇳': 'India', '🇦🇺': 'Australia', '🇧🇷': 'Brazil', '🇦🇷': 'Argentina',
-                '🇹🇷': 'Turkey', '🇮🇹': 'Italy', '🇪🇸': 'Spain', '🇵🇹': 'Portugal',
-                '🇨🇭': 'Switzerland', '🇸🇪': 'Sweden', '🇳🇴': 'Norway', '🇫🇮': 'Finland',
-                '🇵🇱': 'Poland', '🇺🇦': 'Ukraine', '🇮🇪': 'Ireland', '🇦🇹': 'Austria',
-                '🇧🇪': 'Belgium', '🇩🇰': 'Denmark', '🇨🇿': 'Czech Republic', '🇬🇷': 'Greece',
-                '🇿🇦': 'South Africa', '🇪🇬': 'Egypt', '🇸🇦': 'Saudi Arabia', '🇦🇪': 'United Arab Emirates',
-                '🇮🇱': 'Israel', '🇮🇷': 'Iran', '🇮🇩': 'Indonesia', '🇲🇾': 'Malaysia',
-                '🇹🇭': 'Thailand', '🇻🇳': 'Vietnam', '🇵🇭': 'Philippines', '🇨🇱': 'Chile',
-                '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
-            }
-
-            # 2. 地图名别名库 (确保鼠标悬停在 "United States of America" 也能触发)
-            MAP_NAME_ALIASES = {
-                'United States': ['United States of America', 'USA'],
-                'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
-                'China': ['People\'s Republic of China'],
-                'Russia': ['Russian Federation'],
-                'South Korea': ['Korea', 'Republic of Korea'],
-                'North Korea': ['Dem. Rep. Korea'],
-                'Vietnam': ['Viet Nam'],
-                'Laos': ['Lao PDR']
-            }
-
-            # 3. 中心点坐标库
-            COUNTRY_CENTROIDS = {
-                'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
-                'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
-                'Russia': [105.31, 61.52], 'Canada': [-106.34, 56.13], 'Brazil': [-51.92, -14.23],
-                'Australia': [133.77, -25.27], 'India': [78.96, 20.59], 'Japan': [138.25, 36.20],
-                'South Korea': [127.76, 35.90], 'Singapore': [103.81, 1.35], 'Turkey': [35.24, 38.96]
-            }
-            
-            CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76) }
-            
-            from collections import Counter; country_counter = Counter()
-            snapshot = list(SERVERS_CACHE)
-            
-            # --- 临时存储统计数据的字典（按标准名）---
-            temp_stats_storage = {}
-
-            for s in snapshot:
-                s_name = s.get('name', '')
-                
-                # A. 确定国旗
-                flag_icon = "📍"
-                for f in FLAG_TO_MAP_NAME.keys():
-                    if f in s_name:
-                        flag_icon = f
-                        break
-                
-                if flag_icon == "📍":
-                    group_str = detect_country_group(s_name, s)
-                    if group_str:
-                        first_char = group_str.split(' ')[0]
-                        if any(c in first_char for c in FLAG_TO_MAP_NAME):
-                            flag_icon = first_char
-
-                country_counter[detect_country_group(s_name, s)] += 1
-
-                # B. 确定坐标
-                lat, lon = None, None
-                for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
-                    if city_key.lower() in s_name.lower(): lat, lon = c_lat, c_lon; break
-                if not lat:
-                    if 'lat' in s: lat, lon = s['lat'], s['lon']
-                    else: 
-                        coords = get_coords_from_name(s_name)
-                        if coords: lat, lon = coords[0], coords[1]
-                
-                # C. 确定标准地图名
-                map_name_standard = FLAG_TO_MAP_NAME.get(flag_icon)
-                if not map_name_standard:
-                    tmp = get_echarts_region_name(s_name)
-                    if tmp and tmp.upper() in MATCH_MAP: map_name_standard = MATCH_MAP[tmp.upper()]
-
-                # D. 生成点位数据
-                if lat and lon and map_name_standard:
-                    coord_key = f"{lat},{lon}"
-                    if coord_key not in city_points_map: 
-                        city_points_map[coord_key] = {'name': s_name, 'value': [lon, lat], 'country_key': map_name_standard}
-                    
-                    display_flag = flag_icon if flag_icon != "📍" else "📍"
-                    if display_flag not in flag_points_map: 
-                        flag_points_map[display_flag] = {'name': display_flag, 'value': [lon, lat], 'country_key': map_name_standard}
-
-                # E. 聚合统计数据
-                if map_name_standard:
-                    # ✨ 核心修复：只将标准名加入计数集合
-                    unique_deployed_countries.add(map_name_standard)
-                    
-                    if map_name_standard not in temp_stats_storage:
-                        temp_stats_storage[map_name_standard] = {
-                            'flag': flag_icon, 
-                            'cn': map_name_standard,
-                            'total': 0, 'online': 0, 'offline': 0, 
-                            'list': []
-                        }
-                    
-                    rs = temp_stats_storage[map_name_standard]
-                    rs['total'] += 1
-                    is_on = s.get('_status') == 'online'
-                    if is_on: rs['online'] += 1
-                    else: rs['offline'] += 1
-                    
-                    if len(rs['list']) < 15: 
-                        rs['list'].append({ 
-                            'name': s.get('name', 'Unknown'), 
-                            'status': 'online' if is_on else 'offline' 
-                        })
-
-                    # 更新中心点
-                    if map_name_standard not in COUNTRY_CENTROIDS and lat and lon:
-                        COUNTRY_CENTROIDS[map_name_standard] = [lon, lat]
-
-            # F. 将统计数据“广播”到所有别名 Key 中，确保悬浮地图任意位置都能查到
-            for std_name, stats in temp_stats_storage.items():
-                stats['list'].sort(key=lambda x: 0 if x['status'] == 'offline' else 1)
-                
-                # 1. 添加标准名
-                region_stats[std_name] = stats
-                active_regions_for_highlight.add(std_name)
-                
-                # 2. 添加别名 (例如 'United States of America')
-                if std_name in MAP_NAME_ALIASES:
-                    for alias in MAP_NAME_ALIASES[std_name]:
-                        region_stats[alias] = stats
-                        active_regions_for_highlight.add(alias)
-
-            # 生成饼图数据
-            pie_data = []
-            if country_counter:
-                sorted_counts = country_counter.most_common(5)
-                for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
-                others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
-                if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
-            else: pie_data.append({'name': '暂无数据', 'value': 0})
-
-            city_list = list(city_points_map.values()); flag_list = list(flag_points_map.values())
-            
-            return (
-                json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions_for_highlight)}, ensure_ascii=False), 
-                pie_data, 
-                len(unique_deployed_countries), # ✨ 返回去重后的数量
-                json.dumps(region_stats, ensure_ascii=False), 
-                json.dumps(COUNTRY_CENTROIDS, ensure_ascii=False)
-            )
-        except Exception as e:
-            print(f"[ERROR] prepare_map_data failed: {e}")
-            import traceback; traceback.print_exc()
-            return (json.dumps({'cities': [], 'flags': [], 'regions': []}), [], 0, "{}", "{}")
-
-    # 获取初始数据 (5个参数 + 1个新参数 = 6个)
-    # ✨✨✨ 注意：之前的错误就是因为这一行没有正确对齐，或者没有放在 try...except 之后 ✨✨✨
-    # 这一行必须与 prepare_map_data 的 def 对齐
-    chart_data, pie_data, region_count, region_stats_json, centroids_json = prepare_map_data()
+    # 获取初始数据
+    try:
+        # 确保 prepare_map_data 已定义并返回 5 个值
+        chart_data, pie_data, region_count, region_stats_json, centroids_json = prepare_map_data()
+    except Exception as e:
+        print(f"[Status Page Error] Map data prepare failed: {e}")
+        chart_data = '{"cities": [], "flags": [], "regions": []}'
+        pie_data = []
+        region_count = 0
+        region_stats_json = "{}"
+        centroids_json = "{}"
 
     # ================= UI 布局 =================
     with ui.element('div').classes('fixed top-0 left-0 w-full h-[35vh] min-h-[300px] max-h-[500px] z-0').style('z-index: 0; contain: size layout paint;'): 
@@ -9185,7 +9204,6 @@ async def render_desktop_status_page():
             if card.visible != should_show: card.set_visibility(should_show)
 
     def sync_cards_pool():
-        print(f"[DIAG] Syncing cards. Cache: {len(SERVERS_CACHE)}, Rendered: {len(RENDERED_CARDS)}")
         current_urls = set(s['url'] for s in SERVERS_CACHE)
         rendered_urls = set(RENDERED_CARDS.keys())
         new_urls = current_urls - rendered_urls; deleted_urls = rendered_urls - current_urls
@@ -9202,7 +9220,6 @@ async def render_desktop_status_page():
     for s in sorted_init_list: create_server_card(s)
     render_tabs(); apply_filter(CURRENT_PROBE_TAB)
     
-
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
@@ -9239,24 +9256,16 @@ async def render_desktop_status_page():
                     var mapTop = '1%';
 
                     var lines = mapData.cities.map(pt => ({{ coords: [pt.value, defaultPt] }}));
-                    
-                    // 获取当前主题状态
                     var isDark = document.body.classList.contains('body--dark');
+                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; var borderColor = isDark ? '#404a59' : '#a5b4fc'; var bgColor = 'transparent'; 
                     
-                    // 地图本身的颜色定义
-                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; 
-                    var borderColor = isDark ? '#404a59' : '#a5b4fc'; 
-                    var bgColor = 'transparent'; 
-
-                    // ✨✨✨ 新增：定义 Tooltip 的深浅模式主题色 ✨✨✨
                     var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
                     var ttTextMain = isDark ? '#fff' : '#1e293b';
                     var ttTextSub = isDark ? '#94a3b8' : '#64748b';
                     var ttSeparator = isDark ? 'rgba(255,255,255,0.1)' : '#e2e8f0';
                     var ttItemText = isDark ? '#e2e8f0' : '#334155';
-                    // --------------------------------------------------
-                    
+
                     var option = {{
                         backgroundColor: bgColor,
                         tooltip: {{
@@ -9267,7 +9276,7 @@ async def render_desktop_status_page():
                             borderColor: 'transparent',
                             borderWidth: 0,
                             padding: 0,
-                            textStyle: {{ color: ttTextMain }}, // 使用动态主文本色
+                            textStyle: {{ color: ttTextMain }},
                             extraCssText: 'box-shadow: none;', 
                             
                             formatter: function(params) {{
@@ -9285,7 +9294,6 @@ async def render_desktop_status_page():
                                     var srv = stats.list[i];
                                     var statusColor = srv.status === 'online' ? '#22c55e' : '#ef4444'; 
                                     var statusText = srv.status === 'online' ? '在线' : '离线';
-                                    // ✨ 使用动态列表文本色 (ttItemText)
                                     serverListHtml += `
                                         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:13px; color:${{ttItemText}};">
                                             <div style="display:flex; align-items:center; gap:8px;">
@@ -9296,11 +9304,9 @@ async def render_desktop_status_page():
                                         </div>`;
                                 }}
                                 if (stats.list.length > displayLimit) {{
-                                    // ✨ 使用动态副文本色 (ttTextSub)
                                     serverListHtml += `<div style="font-size:12px; color:${{ttTextSub}}; margin-top:4px;">+${{stats.list.length - displayLimit}} 更多...</div>`;
                                 }}
 
-                                // ✨ 将容器、标题、副标题、分割线的样式全部替换为动态变量
                                 return `
                                     <div style="background-color: ${{ttBg}}; border: ${{ttBorder}}; border-radius: 12px; padding: 16px; min-width: 260px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); backdrop-filter: blur(8px);">
                                         <div style="font-size: 18px; font-weight: 800; color: ${{ttTextMain}}; margin-bottom: 8px; display:flex; align-items:center; gap:8px;">
@@ -9333,9 +9339,9 @@ async def render_desktop_status_page():
                     myChart.setOption(option, true);
                 }}
                 
-                window.updateMapData = function(newData) {{ 
+                window.updatePublicMap = function(newData) {{ 
+                    if (!newData) return;
                     mapData = newData; 
-                    // 保持当前的缩放和中心点状态
                     renderMap(isZoomed ? myChart.getOption().geo[0].center : defaultPt, isZoomed ? myChart.getOption().geo[0].zoom : defaultZoom, isZoomed ? 'move' : false); 
                 }}; 
 
@@ -9355,12 +9361,7 @@ async def render_desktop_status_page():
                 }});
 
                 myChart.getZr().on('mousewheel', function() {{ if (isZoomed) {{ isZoomed = false; renderMap(defaultPt, defaultZoom, false); }} }});
-                
-                // 主题切换时触发重绘
-                window.changeTheme = function(isDark) {{ 
-                    renderMap(isZoomed ? myChart.getOption().geo[0].center : defaultPt, isZoomed ? myChart.getOption().geo[0].zoom : defaultZoom, isZoomed ? 'move' : false); 
-                }}; 
-                
+                window.changeTheme = function(isDark) {{ renderMap(isZoomed ? undefined : defaultPt, isZoomed ? focusedZoom : defaultZoom, isZoomed ? 'move' : false); }}; 
                 window.addEventListener('resize', () => myChart.resize());
             }});
         }}
@@ -9376,16 +9377,18 @@ async def render_desktop_status_page():
                 local_ui_version = GLOBAL_UI_VERSION
                 render_tabs(); sync_cards_pool(); apply_filter(CURRENT_PROBE_TAB)
                 
-                # 获取 5 个参数
-                new_map, new_pie, new_cnt, new_stats, new_centroids = prepare_map_data()
+                try:
+                    new_map, new_pie, new_cnt, new_stats, new_centroids = prepare_map_data()
+                except:
+                    new_map, new_pie, new_cnt, new_stats, new_centroids = "{}", [], 0, "{}", "{}"
                 
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
                 if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
                 
-                ui.run_javascript(f'''if(window.updateMapData){{ 
+                ui.run_javascript(f'''if(window.updatePublicMap){{ 
                     window.regionStats = {new_stats}; 
                     window.countryCentroids = {new_centroids};
-                    window.updateMapData({new_map}); 
+                    window.updatePublicMap({new_map}); 
                 }}''')
 
             real_online_count = 0
