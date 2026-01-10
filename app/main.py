@@ -4903,46 +4903,68 @@ async def update_probe_stats(card_refs, is_manual=False):
                     refs['status_badge'].set_text('运行中')
                     refs['status_badge'].classes(replace='bg-green-100 text-green-600', remove='bg-gray-100 bg-red-100 bg-orange-100 text-orange-600')
                     
-                    # 硬件数据
+                    # 硬件数据 (顶部文字)
                     if 'cpu_cores' in res: refs['cpu_cores'].set_text(f"{res['cpu_cores']} Cores")
                     if 'mem_total' in res: refs['mem_total'].set_text(f"{res['mem_total']} GB")
                     if 'disk_total' in res: refs['disk_total'].set_text(f"{res['disk_total']} GB")
 
-                    # 进度条
+                    # --- 1. CPU 进度条与数值 ---
                     cpu = float(res.get('cpu_usage', 0))
                     refs['cpu_bar'].set_value(cpu / 100.0)
-                    refs['cpu_val'].set_text(f'{int(cpu)}%')
                     refs['cpu_bar'].props('color=blue')
+                    # 修正：显示核心数，而不是重复百分比
+                    cpu_cores = res.get('cpu_cores', 1)
+                    refs['cpu_val'].set_text(f"{cpu_cores} Cores")
                     
+                    # --- 2. 内存 进度条与数值 ---
                     mem = float(res.get('mem_usage', 0))
                     refs['mem_bar'].set_value(mem / 100.0)
                     mem_color = '#ef4444' if mem > 90 else ('#f97316' if mem > 75 else '#22c55e')
                     refs['mem_bar'].props(f'color="{mem_color}"')
-                    refs['mem_val'].set_text(f'{int(mem)}%')
+                    # 修正：计算已用量并显示 "已用 / 总量"
+                    mem_total = float(res.get('mem_total', 0))
+                    if mem_total > 0:
+                        mem_used = mem_total * (mem / 100.0)
+                        refs['mem_val'].set_text(f"{mem_used:.1f}G / {mem_total:.1f}G")
+                    else:
+                        refs['mem_val'].set_text(f'{int(mem)}%')
 
+                    # --- 3. 硬盘 进度条与数值 ---
                     disk = float(res.get('disk_usage', 0))
                     refs['disk_bar'].set_value(disk / 100.0)
                     refs['disk_bar'].props('color=purple')
-                    refs['disk_val'].set_text(f'{int(disk)}%')
+                    # 修正：计算已用量并显示 "已用 / 总量"
+                    disk_total = float(res.get('disk_total', 0))
+                    if disk_total > 0:
+                        disk_used = disk_total * (disk / 100.0)
+                        refs['disk_val'].set_text(f"{disk_used:.1f}G / {disk_total:.1f}G")
+                    else:
+                        refs['disk_val'].set_text(f'{int(disk)}%')
 
                     refs['uptime_val'].set_text(str(res.get('uptime', '')))
 
                 elif res and res.get('status') == 'warning':
                     # === 警告 (纯 X-UI 面板) ===
                     refs['status_badge'].set_text('未安装探针')
-                    # 橙色样式
                     refs['status_badge'].classes(replace='bg-orange-100 text-orange-600', remove='bg-green-100 bg-red-100 bg-gray-100')
                     
-                    # 仅显示 CPU/内存 (面板通常只给这两个)
+                    # CPU (面板模式通常没有核心数，保持百分比或显示 --)
                     cpu = float(res.get('cpu_usage', 0))
                     refs['cpu_bar'].set_value(cpu / 100.0)
-                    refs['cpu_val'].set_text(f'{int(cpu)}%')
-                    refs['cpu_bar'].props('color=orange') # 橙色警告条
+                    refs['cpu_bar'].props('color=orange')
+                    refs['cpu_val'].set_text(f'{int(cpu)}%') 
                     
+                    # 内存 (面板模式有总内存，可以计算)
                     mem = float(res.get('mem_usage', 0))
                     refs['mem_bar'].set_value(mem / 100.0)
-                    refs['mem_val'].set_text(f'{int(mem)}%')
                     refs['mem_bar'].props('color=orange')
+                    # 修正：面板模式也尝试显示数值
+                    mem_total = float(res.get('mem_total', 0))
+                    if mem_total > 0:
+                        mem_used = mem_total * (mem / 100.0)
+                        refs['mem_val'].set_text(f"{mem_used:.1f}G / {mem_total:.1f}G")
+                    else:
+                        refs['mem_val'].set_text(f'{int(mem)}%')
 
                     # 硬盘/负载置空
                     refs['disk_bar'].set_value(0); refs['disk_val'].set_text('--')
@@ -4953,7 +4975,9 @@ async def update_probe_stats(card_refs, is_manual=False):
                     # === 离线 ===
                     refs['status_badge'].set_text('已离线')
                     refs['status_badge'].classes(replace='bg-red-100 text-red-500', remove='bg-green-100 bg-orange-100 bg-gray-100')
-                    refs['cpu_bar'].set_value(0); refs['mem_bar'].set_value(0); refs['disk_bar'].set_value(0)
+                    refs['cpu_bar'].set_value(0); refs['cpu_val'].set_text('--')
+                    refs['mem_bar'].set_value(0); refs['mem_val'].set_text('--')
+                    refs['disk_bar'].set_value(0); refs['disk_val'].set_text('--')
                     
             except: pass
 
@@ -9119,18 +9143,38 @@ async def render_desktop_status_page():
                 refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}")
                 refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
 
+                # ================= 修复开始：进度条数值显示 =================
+                
+                # 1. CPU
                 cpu = float(res.get('cpu_usage', 0))
                 refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
+                # 修复：下方显示核心数
+                c_num = res.get('cpu_cores', 1)
+                refs['cpu_sub'].set_text(f"{c_num} Cores")
                 
+                # 2. 内存
                 mem = float(res.get('mem_usage', 0))
                 refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%')
-                if res.get('mem_used'): refs['mem_sub'].set_text(str(res.get('mem_used')))
-                else: refs['mem_sub'].set_text(f"{mem:.1f}%")
+                # 修复：下方显示 "已用 / 总量"
+                mem_total = float(res.get('mem_total', 0))
+                if mem_total > 0:
+                    mem_val_used = mem_total * (mem / 100.0)
+                    refs['mem_sub'].set_text(f"{fmt_capacity(mem_val_used)} / {fmt_capacity(mem_total)}")
+                else:
+                    refs['mem_sub'].set_text(f"{mem:.1f}%")
 
+                # 3. 硬盘
                 disk = float(res.get('disk_usage', 0))
                 refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%')
-                if res.get('disk_used'): refs['disk_sub'].set_text(str(res.get('disk_used')))
-                else: refs['disk_sub'].set_text(f"{disk:.1f}%")
+                # 修复：下方显示 "已用 / 总量"
+                disk_total = float(res.get('disk_total', 0))
+                if disk_total > 0:
+                    disk_val_used = disk_total * (disk / 100.0)
+                    refs['disk_sub'].set_text(f"{fmt_capacity(disk_val_used)} / {fmt_capacity(disk_total)}")
+                else:
+                    refs['disk_sub'].set_text(f"{disk:.1f}%")
+
+                # ================= 修复结束 =================
 
                 n_up = res.get('net_speed_out', 0); n_down = res.get('net_speed_in', 0)
                 refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
