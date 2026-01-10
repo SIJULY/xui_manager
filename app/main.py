@@ -1318,15 +1318,26 @@ SYNC_SEMAPHORE = asyncio.Semaphore(15)
 LAST_AUTO_SYNC_TIME = 0
 SYNC_COOLDOWN_SECONDS = 300  # 冷却时间：300秒（5分钟）
 
-# ================= 配置区域 =================
-CONFIG_FILE = 'data/servers.json'
-SUBS_FILE = 'data/subscriptions.json'
-NODES_CACHE_FILE = 'data/nodes_cache.json'
-ADMIN_CONFIG_FILE = 'data/admin_config.json'
+# ================= 配置区域 (Docker 强制版) =================
+import os
+import sys
 
-# ✨✨✨ 自动注册密钥 (优先从环境变量获取) ✨✨✨
+# 🛑 强制指定数据路径为 Docker 挂载点
+# 不要改动这里，直接指向容器内的挂载目录
+DATA_DIR = '/app/data'
+
+# 打印调试信息，确保它真的在读这里
+print(f"🔒 [System] 强制锁定数据目录: {DATA_DIR}")
+
+# 定义文件路径
+CONFIG_FILE = os.path.join(DATA_DIR, 'servers.json')
+SUBS_FILE = os.path.join(DATA_DIR, 'subscriptions.json')
+NODES_CACHE_FILE = os.path.join(DATA_DIR, 'nodes_cache.json')
+ADMIN_CONFIG_FILE = os.path.join(DATA_DIR, 'admin_config.json')
+GLOBAL_SSH_KEY_FILE = os.path.join(DATA_DIR, 'global_ssh_key')
+
+# 环境变量
 AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
-
 ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
 ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
 
@@ -1334,6 +1345,8 @@ SERVERS_CACHE = []
 SUBS_CACHE = []
 NODES_DATA = {}
 ADMIN_CONFIG = {}
+
+
 # ================= 智能分组配置  =================
 AUTO_COUNTRY_MAP = {
     # --- 亚太地区 ---
@@ -1832,62 +1845,77 @@ EXPANDED_GROUPS = set()
 SERVER_UI_MAP = {}
 # ==========================================
 
-
 def init_data():
-    if not os.path.exists('data'): os.makedirs('data')
+    # 如果强制路径不存在，说明 Docker 挂载失败，必须报错提醒
+    if not os.path.exists(DATA_DIR):
+        logger.error(f"❌ 严重错误: 找不到数据目录 {DATA_DIR}！请检查 docker-compose volumes 挂载！")
+        # 尝试创建以免程序崩溃，但大概率读不到旧数据
+        os.makedirs(DATA_DIR)
     
     global SERVERS_CACHE, SUBS_CACHE, NODES_DATA, ADMIN_CONFIG
     
-    logger.info(f"正在初始化数据... (当前登录账号: {ADMIN_USER})")
+    logger.info(f"正在读取数据... (目标: {DATA_DIR})")
     
+    # 1. 加载服务器
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f: 
                 raw_data = json.load(f)
-                # ✨✨✨ 修复：过滤掉非字典类型的脏数据 (解决 AttributeError: 'str' object has no attribute 'get') ✨✨✨
                 SERVERS_CACHE = [s for s in raw_data if isinstance(s, dict)]
-            logger.info(f"✅ 加载服务器配置: {len(SERVERS_CACHE)} 个")
-        except: SERVERS_CACHE = []
-    
+            logger.info(f"✅ 成功加载服务器: {len(SERVERS_CACHE)} 台")
+        except Exception as e:
+            logger.error(f"❌ 读取 servers.json 失败: {e}")
+            SERVERS_CACHE = []
+    else:
+        logger.warning(f"⚠️ 未找到服务器配置文件: {CONFIG_FILE}")
+
+    # 2. 加载订阅
     if os.path.exists(SUBS_FILE):
         try:
             with open(SUBS_FILE, 'r', encoding='utf-8') as f: SUBS_CACHE = json.load(f)
         except: SUBS_CACHE = []
 
+    # 3. 加载缓存
     if os.path.exists(NODES_CACHE_FILE):
-        try:
-            with open(NODES_CACHE_FILE, 'r', encoding='utf-8') as f: NODES_DATA = json.load(f)
-            # 统计一下节点数，确认真的加载进去了
-            count = sum([len(v) for v in NODES_DATA.values() if isinstance(v, list)])
-            logger.info(f"✅ 加载节点缓存完毕 (共 {count} 个节点)")
-        except: NODES_DATA = {}
+        # 处理之前误生成的文件夹
+        if os.path.isdir(NODES_CACHE_FILE):
+             try: 
+                import shutil
+                shutil.rmtree(NODES_CACHE_FILE)
+                logger.info("♻️ 已自动删除错误的缓存文件夹")
+             except: pass
+             NODES_DATA = {}
+        else:
+            try:
+                with open(NODES_CACHE_FILE, 'r', encoding='utf-8') as f: NODES_DATA = json.load(f)
+                count = sum([len(v) for v in NODES_DATA.values() if isinstance(v, list)])
+                logger.info(f"✅ 加载缓存节点: {count} 个")
+            except: NODES_DATA = {}
+    else:
+        NODES_DATA = {}
         
+    # 4. 加载配置
     if os.path.exists(ADMIN_CONFIG_FILE):
         try:
             with open(ADMIN_CONFIG_FILE, 'r', encoding='utf-8') as f: ADMIN_CONFIG = json.load(f)
         except: ADMIN_CONFIG = {}
 
-    # ================= ✨✨✨ 核心修改开始 ✨✨✨ =================
-    # 1. 默认开启探针功能 (无论是否点击过设置页)
+    # 初始化设置
     if 'probe_enabled' not in ADMIN_CONFIG:
         ADMIN_CONFIG['probe_enabled'] = True
-        logger.info("✅ 初始化: 探针功能默认已激活")
-
-    # 2. 首次启动自动生成随机探针 Token
     if 'probe_token' not in ADMIN_CONFIG:
-        # 生成一个随机的 32 位字符串
         ADMIN_CONFIG['probe_token'] = uuid.uuid4().hex
-        logger.info(f"🔑 系统初始化: 已生成唯一的探针安全令牌")
 
-    # 立即保存配置到硬盘，确保持久化 (合并了上面两处的保存逻辑)
+    # 保存一次配置确保持久化
     try:
         with open(ADMIN_CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(ADMIN_CONFIG, f, indent=4, ensure_ascii=False)
     except Exception as e:
-        logger.error(f"❌ 保存 Config 失败: {e}")
-    # ================= ✨✨✨ 核心修改结束 ✨✨✨ =================
+        logger.error(f"❌ 配置保存失败: {e}")
+    # ==========================================================
 
 def _save_file_sync_internal(filename, data):
+    # 使用绝对路径生成临时文件
     temp_file = f"{filename}.{uuid.uuid4()}.tmp"
     try:
         with open(temp_file, 'w', encoding='utf-8') as f:
