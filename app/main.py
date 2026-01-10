@@ -1620,12 +1620,6 @@ GLOBE_JS_LOGIC = r"""
                 const option = buildOption(worldJson, serverData, lat, lon);
                 myChart.setOption(option);
             };
-
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition(
-                    (p) => { initMap(p.coords.latitude, p.coords.longitude); },
-                    (e) => { initMap(uLat, uLon); }
-                );
             } else {
                 initMap(uLat, uLon);
             }
@@ -8422,7 +8416,7 @@ def open_mobile_server_detail(server_conf):
     except Exception as e:
         print(f"Mobile Detail error: {e}")
         
-# ================= [电脑端] 详情弹窗 (最终完美版) =================
+# ================= [电脑端] 详情弹窗 (完美修复CPU数值显示) =================
 def open_pc_server_detail(server_conf):
     try:
         # 1. 获取当前主题状态
@@ -8487,6 +8481,7 @@ def open_pc_server_detail(server_conf):
                     # 左侧：资源
                     with ui.column().classes(f'flex-1 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
                         ui.label('资源使用情况').classes(SECTION_TITLE)
+                        
                         def progress_block(label, key, icon, color_class):
                             with ui.column().classes('w-full gap-1'):
                                 with ui.row().classes('w-full justify-between items-end'):
@@ -8495,7 +8490,9 @@ def open_pc_server_detail(server_conf):
                                     refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-500 dark:text-gray-400 text-xs font-mono')
                                 refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color={TRACK_COLOR}').classes('h-1.5 rounded-full')
                                 with ui.row().classes('w-full justify-end'):
-                                    refs[f'{key}_val'] = ui.label('-- / --').classes('text-[11px] text-gray-500 font-mono mt-1')
+                                    # ✨ 修改默认占位符，不再显示 "-- / --"
+                                    refs[f'{key}_val'] = ui.label('--').classes('text-[11px] text-gray-500 font-mono mt-1')
+                        
                         progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
                         progress_block('RAM', 'mem', 'memory', 'green-5')
                         progress_block('DISK', 'disk', 'storage', 'purple-5')
@@ -8594,63 +8591,60 @@ def open_pc_server_detail(server_conf):
                         raw_cache = PROBE_DATA_CACHE.get(server_conf['url'], {})
                         static = raw_cache.get('static', {})
 
-                        # ✨✨✨ CPU 百分比修正：强制 1 位小数 ✨✨✨
+                        # ✨✨✨ CPU 更新逻辑：百分比 + 核心数 ✨✨✨
                         cpu_val = float(status.get('cpu_usage', 0))
                         refs['cpu_pct'].set_text(f"{cpu_val:.1f}%") 
                         refs['cpu_bar'].set_value(cpu_val / 100)
                         
-                        # ✨✨✨ 内存 百分比修正 + 智能容量 ✨✨✨
+                        # ✨ 核心修复：强制获取并显示核心数 (格式如 "2 C")
+                        c_cores = status.get('cpu_cores')
+                        if not c_cores:
+                            c_cores = static.get('cpu_cores') # 备用：从静态缓存读取
+                        
+                        if c_cores:
+                            refs['cpu_val'].set_text(f"{c_cores} C")
+                        else:
+                            refs['cpu_val'].set_text("--")
+
+                        # ✨✨✨ 内存 百分比 + 容量 ✨✨✨
                         mem_p = float(status.get('mem_usage', 0))
-                        refs['mem_pct'].set_text(f"{mem_p:.1f}%") # 强制 1 位小数
+                        refs['mem_pct'].set_text(f"{mem_p:.1f}%") 
                         refs['mem_bar'].set_value(mem_p / 100)
                         
                         mem_t_raw = status.get('mem_total', 0)
                         total_str = fmt_capacity(mem_t_raw)
-                        
                         used_str = "--"
                         if status.get('mem_used'):
                             used_str = fmt_capacity(status.get('mem_used'))
                         else:
+                            # 估算已用
                             try:
-                                val_t = 0
-                                if isinstance(mem_t_raw, str):
-                                    import re
-                                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", mem_t_raw)
-                                    val_t = float(nums[0]) if nums else 0
-                                else:
-                                    val_t = float(mem_t_raw)
+                                val_t = float(re.findall(r"[-+]?\d*\.\d+|\d+", str(mem_t_raw))[0]) if isinstance(mem_t_raw, str) else float(mem_t_raw)
                                 numeric_used = val_t * (mem_p / 100.0)
                                 used_str = fmt_capacity(numeric_used)
-                            except:
-                                used_str = "--"
+                            except: pass
                         refs['mem_val'].set_text(f"{used_str} / {total_str}")
 
-                        # ✨✨✨ 硬盘 百分比修正 + 智能容量 ✨✨✨
+                        # ✨✨✨ 硬盘 百分比 + 容量 ✨✨✨
                         disk_p = float(status.get('disk_usage', 0))
-                        refs['disk_pct'].set_text(f"{disk_p:.1f}%") # 强制 1 位小数
+                        refs['disk_pct'].set_text(f"{disk_p:.1f}%")
                         refs['disk_bar'].set_value(disk_p / 100)
                         
                         disk_t_raw = status.get('disk_total', 0)
                         disk_total_str = fmt_capacity(disk_t_raw)
-                        
                         disk_used_str = "--"
                         if status.get('disk_used'):
                             disk_used_str = fmt_capacity(status.get('disk_used'))
                         else:
+                            # 估算已用
                             try:
-                                val_d = 0
-                                if isinstance(disk_t_raw, str):
-                                    import re
-                                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", disk_t_raw)
-                                    val_d = float(nums[0]) if nums else 0
-                                else:
-                                    val_d = float(disk_t_raw)
+                                val_d = float(re.findall(r"[-+]?\d*\.\d+|\d+", str(disk_t_raw))[0]) if isinstance(disk_t_raw, str) else float(disk_t_raw)
                                 numeric_disk_used = val_d * (disk_p / 100.0)
                                 disk_used_str = fmt_capacity(numeric_disk_used)
-                            except:
-                                disk_used_str = "--"
+                            except: pass
                         refs['disk_val'].set_text(f"{disk_used_str} / {disk_total_str}")
 
+                        # 系统信息
                         raw_arch = static.get('arch', '').lower()
                         display_arch = "AMD" if "x86" in raw_arch or "amd" in raw_arch else "ARM" if "arm" in raw_arch or "aarch" in raw_arch else raw_arch.upper()
                         refs['os'].set_text(static.get('os', 'Linux')); refs['arch'].set_text(display_arch); refs['virt'].set_text(static.get('virt', 'kvm'))
@@ -8658,19 +8652,21 @@ def open_pc_server_detail(server_conf):
                         uptime_str = str(status.get('uptime', '-')).replace('up ', '').replace('days', '天').replace('hours', '时').replace('minutes', '分')
                         refs['uptime'].set_text(uptime_str); refs['uptime'].classes('text-green-500')
 
+                        # 延迟
                         pings = status.get('pings', {})
                         refs['ping_ct_cur'].set_text(str(pings.get('电信', 'N/A')))
                         refs['ping_cu_cur'].set_text(str(pings.get('联通', 'N/A')))
                         refs['ping_cm_cur'].set_text(str(pings.get('移动', 'N/A')))
 
+                        # 图表
                         history_data = PING_TREND_CACHE.get(server_conf['url'], [])
                         if history_data:
                             import time
                             current_mode = chart_tabs.value
-                            if current_mode == '1h': duration = 3600
-                            elif current_mode == '3h': duration = 10800
+                            duration = 3600
+                            if current_mode == '3h': duration = 10800
                             elif current_mode == '6h': duration = 21600 
-                            else: duration = 3600
+                            
                             cutoff = time.time() - duration
                             sliced = [p for p in history_data if p['ts'] > cutoff]
                             if sliced:
@@ -8678,12 +8674,11 @@ def open_pc_server_detail(server_conf):
                                 raw_cu = [p['cu'] for p in sliced]
                                 raw_cm = [p['cm'] for p in sliced]
                                 times = [p['time_str'] for p in sliced]
-                                if is_smooth['value']:
-                                    final_ct = calculate_ewma(raw_ct)
-                                    final_cu = calculate_ewma(raw_cu)
-                                    final_cm = calculate_ewma(raw_cm)
-                                else:
-                                    final_ct, final_cu, final_cm = raw_ct, raw_cu, raw_cm
+                                
+                                final_ct = calculate_ewma(raw_ct) if is_smooth['value'] else raw_ct
+                                final_cu = calculate_ewma(raw_cu) if is_smooth['value'] else raw_cu
+                                final_cm = calculate_ewma(raw_cm) if is_smooth['value'] else raw_cm
+                                
                                 chart.options['xAxis']['data'] = times
                                 chart.options['series'][0]['data'] = final_ct if visible_series[0] else []
                                 chart.options['series'][1]['data'] = final_cu if visible_series[1] else []
@@ -8758,7 +8753,8 @@ async def status_page_router(request: Request):
     else:
         # 恢复 V30 版本的酷炫地图大屏显示
         await render_desktop_status_page()
-        
+
+
 # ================= 电脑端大屏显示  =================        
 import asyncio 
 import traceback
@@ -8832,57 +8828,175 @@ async def render_desktop_status_page():
         try:
             city_points_map = {} 
             flag_points_map = {} 
-            active_regions = set()
+            
+            # ✨ 新增：专门用于统计真实国家数量的集合（解决显示为3的问题）
+            unique_deployed_countries = set()
+            
+            # 用于 ECharts 高亮和 Tooltip 查询的字典
             region_stats = {} 
-            name_to_flag_map = {} 
-            CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
+            active_regions_for_highlight = set()
+
+            # 1. 国旗 -> 标准地图名映射
+            FLAG_TO_MAP_NAME = {
+                '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
+                '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
+                '🇬🇧': 'United Kingdom', '🇩🇪': 'Germany', '🇫🇷': 'France', '🇳🇱': 'Netherlands',
+                '🇷🇺': 'Russia', '🇯🇵': 'Japan', '🇰🇷': 'South Korea', '🇸🇬': 'Singapore',
+                '🇮🇳': 'India', '🇦🇺': 'Australia', '🇧🇷': 'Brazil', '🇦🇷': 'Argentina',
+                '🇹🇷': 'Turkey', '🇮🇹': 'Italy', '🇪🇸': 'Spain', '🇵🇹': 'Portugal',
+                '🇨🇭': 'Switzerland', '🇸🇪': 'Sweden', '🇳🇴': 'Norway', '🇫🇮': 'Finland',
+                '🇵🇱': 'Poland', '🇺🇦': 'Ukraine', '🇮🇪': 'Ireland', '🇦🇹': 'Austria',
+                '🇧🇪': 'Belgium', '🇩🇰': 'Denmark', '🇨🇿': 'Czech Republic', '🇬🇷': 'Greece',
+                '🇿🇦': 'South Africa', '🇪🇬': 'Egypt', '🇸🇦': 'Saudi Arabia', '🇦🇪': 'United Arab Emirates',
+                '🇮🇱': 'Israel', '🇮🇷': 'Iran', '🇮🇩': 'Indonesia', '🇲🇾': 'Malaysia',
+                '🇹🇭': 'Thailand', '🇻🇳': 'Vietnam', '🇵🇭': 'Philippines', '🇨🇱': 'Chile',
+                '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
+            }
+
+            # 2. 地图名别名库 (确保鼠标悬停在 "United States of America" 也能触发)
+            MAP_NAME_ALIASES = {
+                'United States': ['United States of America', 'USA'],
+                'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
+                'China': ['People\'s Republic of China'],
+                'Russia': ['Russian Federation'],
+                'South Korea': ['Korea', 'Republic of Korea'],
+                'North Korea': ['Dem. Rep. Korea'],
+                'Vietnam': ['Viet Nam'],
+                'Laos': ['Lao PDR']
+            }
+
+            # 3. 中心点坐标库
+            COUNTRY_CENTROIDS = {
+                'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
+                'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
+                'Russia': [105.31, 61.52], 'Canada': [-106.34, 56.13], 'Brazil': [-51.92, -14.23],
+                'Australia': [133.77, -25.27], 'India': [78.96, 20.59], 'Japan': [138.25, 36.20],
+                'South Korea': [127.76, 35.90], 'Singapore': [103.81, 1.35], 'Turkey': [35.24, 38.96]
+            }
+            
+            CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76) }
+            
             from collections import Counter; country_counter = Counter()
             snapshot = list(SERVERS_CACHE)
             
+            # --- 临时存储统计数据的字典（按标准名）---
+            temp_stats_storage = {}
+
             for s in snapshot:
-                group_str = detect_country_group(s['name'], s); country_counter[group_str] += 1
-                parts = group_str.split(' '); flag_icon = parts[0] if len(parts) > 0 else "📍"; cn_name = parts[1] if len(parts) > 1 else group_str
+                s_name = s.get('name', '')
+                
+                # A. 确定国旗
+                flag_icon = "📍"
+                for f in FLAG_TO_MAP_NAME.keys():
+                    if f in s_name:
+                        flag_icon = f
+                        break
+                
+                if flag_icon == "📍":
+                    group_str = detect_country_group(s_name, s)
+                    if group_str:
+                        first_char = group_str.split(' ')[0]
+                        if any(c in first_char for c in FLAG_TO_MAP_NAME):
+                            flag_icon = first_char
+
+                country_counter[detect_country_group(s_name, s)] += 1
+
+                # B. 确定坐标
                 lat, lon = None, None
                 for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
-                    if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
+                    if city_key.lower() in s_name.lower(): lat, lon = c_lat, c_lon; break
                 if not lat:
                     if 'lat' in s: lat, lon = s['lat'], s['lon']
                     else: 
-                        coords = get_coords_from_name(s.get('name', ''))
+                        coords = get_coords_from_name(s_name)
                         if coords: lat, lon = coords[0], coords[1]
-                map_name_en = get_echarts_region_name(s.get('name', ''))
-                if not map_name_en: map_name_en = s.get('_detected_region', '')
-                if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
-                if lat and lon:
+                
+                # C. 确定标准地图名
+                map_name_standard = FLAG_TO_MAP_NAME.get(flag_icon)
+                if not map_name_standard:
+                    tmp = get_echarts_region_name(s_name)
+                    if tmp and tmp.upper() in MATCH_MAP: map_name_standard = MATCH_MAP[tmp.upper()]
+
+                # D. 生成点位数据
+                if lat and lon and map_name_standard:
                     coord_key = f"{lat},{lon}"
-                    if coord_key not in city_points_map: city_points_map[coord_key] = {'name': s['name'], 'value': [lon, lat]}
-                    if flag_icon not in flag_points_map: flag_points_map[flag_icon] = {'name': flag_icon, 'value': [lon, lat], 'country': map_name_en }
-                if map_name_en: active_regions.add(map_name_en); name_to_flag_map[map_name_en] = flag_icon
-                if flag_icon not in region_stats: region_stats[flag_icon] = {'flag': flag_icon, 'cn': cn_name, 'total': 0, 'online': 0, 'list': []}
-                rs = region_stats[flag_icon]; rs['total'] += 1
-                is_on = s.get('_status') == 'online'
-                if is_on: rs['online'] += 1
-                if len(rs['list']) < 15: rs['list'].append({'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline'})
-            
+                    if coord_key not in city_points_map: 
+                        city_points_map[coord_key] = {'name': s_name, 'value': [lon, lat], 'country_key': map_name_standard}
+                    
+                    display_flag = flag_icon if flag_icon != "📍" else "📍"
+                    if display_flag not in flag_points_map: 
+                        flag_points_map[display_flag] = {'name': display_flag, 'value': [lon, lat], 'country_key': map_name_standard}
+
+                # E. 聚合统计数据
+                if map_name_standard:
+                    # ✨ 核心修复：只将标准名加入计数集合
+                    unique_deployed_countries.add(map_name_standard)
+                    
+                    if map_name_standard not in temp_stats_storage:
+                        temp_stats_storage[map_name_standard] = {
+                            'flag': flag_icon, 
+                            'cn': map_name_standard,
+                            'total': 0, 'online': 0, 'offline': 0, 
+                            'list': []
+                        }
+                    
+                    rs = temp_stats_storage[map_name_standard]
+                    rs['total'] += 1
+                    is_on = s.get('_status') == 'online'
+                    if is_on: rs['online'] += 1
+                    else: rs['offline'] += 1
+                    
+                    if len(rs['list']) < 15: 
+                        rs['list'].append({ 
+                            'name': s.get('name', 'Unknown'), 
+                            'status': 'online' if is_on else 'offline' 
+                        })
+
+                    # 更新中心点
+                    if map_name_standard not in COUNTRY_CENTROIDS and lat and lon:
+                        COUNTRY_CENTROIDS[map_name_standard] = [lon, lat]
+
+            # F. 将统计数据“广播”到所有别名 Key 中，确保悬浮地图任意位置都能查到
+            for std_name, stats in temp_stats_storage.items():
+                stats['list'].sort(key=lambda x: 0 if x['status'] == 'offline' else 1)
+                
+                # 1. 添加标准名
+                region_stats[std_name] = stats
+                active_regions_for_highlight.add(std_name)
+                
+                # 2. 添加别名 (例如 'United States of America')
+                if std_name in MAP_NAME_ALIASES:
+                    for alias in MAP_NAME_ALIASES[std_name]:
+                        region_stats[alias] = stats
+                        active_regions_for_highlight.add(alias)
+
+            # 生成饼图数据
             pie_data = []
             if country_counter:
                 sorted_counts = country_counter.most_common(5)
                 for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
                 others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
                 if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
-            else:
-                pie_data.append({'name': '暂无数据', 'value': 0}) # 防止饼图为空
+            else: pie_data.append({'name': '暂无数据', 'value': 0})
 
             city_list = list(city_points_map.values()); flag_list = list(flag_points_map.values())
             
-            # 关键：确保返回完整的JSON结构，即使列表为空
-            return (json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions)}, ensure_ascii=False), pie_data, len(active_regions), json.dumps(region_stats, ensure_ascii=False), json.dumps(name_to_flag_map, ensure_ascii=False))
+            return (
+                json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions_for_highlight)}, ensure_ascii=False), 
+                pie_data, 
+                len(unique_deployed_countries), # ✨ 返回去重后的数量
+                json.dumps(region_stats, ensure_ascii=False), 
+                json.dumps(COUNTRY_CENTROIDS, ensure_ascii=False)
+            )
         except Exception as e:
             print(f"[ERROR] prepare_map_data failed: {e}")
-            # 失败兜底
+            import traceback; traceback.print_exc()
             return (json.dumps({'cities': [], 'flags': [], 'regions': []}), [], 0, "{}", "{}")
 
-    chart_data, pie_data, region_count, region_stats_json, name_map_json = prepare_map_data()
+    # 获取初始数据 (5个参数 + 1个新参数 = 6个)
+    # ✨✨✨ 注意：之前的错误就是因为这一行没有正确对齐，或者没有放在 try...except 之后 ✨✨✨
+    # 这一行必须与 prepare_map_data 的 def 对齐
+    chart_data, pie_data, region_count, region_stats_json, centroids_json = prepare_map_data()
 
     # ================= UI 布局 =================
     with ui.element('div').classes('fixed top-0 left-0 w-full h-[35vh] min-h-[300px] max-h-[500px] z-0').style('z-index: 0; contain: size layout paint;'): 
@@ -8938,8 +9052,7 @@ async def render_desktop_status_page():
     async def card_autoupdate_loop(url):
         while True:
             await asyncio.sleep(random.uniform(2.0, 3.0))
-            if url not in [s['url'] for s in SERVERS_CACHE]:
-                break
+            if url not in [s['url'] for s in SERVERS_CACHE]: break
             item = RENDERED_CARDS.get(url)
             if not item: break 
             if not item['card'].visible: continue 
@@ -8992,43 +9105,13 @@ async def render_desktop_status_page():
                 
                 mem = float(res.get('mem_usage', 0))
                 refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%')
-                if res.get('mem_used'):
-                    refs['mem_sub'].set_text(str(res.get('mem_used')))
-                else:
-                    try:
-                        mem_total_val = 0
-                        raw_total = res.get('mem_total', 0)
-                        if isinstance(raw_total, str):
-                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", raw_total)
-                            if nums: mem_total_val = float(nums[0])
-                        else:
-                            mem_total_val = float(raw_total)
-                        if mem_total_val > 0:
-                            mem_used = mem_total_val * (mem / 100.0)
-                            refs['mem_sub'].set_text(fmt_capacity(mem_used))
-                        else:
-                            refs['mem_sub'].set_text(f"{mem:.1f}%")
-                    except: refs['mem_sub'].set_text(f"{mem:.1f}%")
+                if res.get('mem_used'): refs['mem_sub'].set_text(str(res.get('mem_used')))
+                else: refs['mem_sub'].set_text(f"{mem:.1f}%")
 
                 disk = float(res.get('disk_usage', 0))
                 refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%')
-                if res.get('disk_used'):
-                    refs['disk_sub'].set_text(str(res.get('disk_used')))
-                else:
-                    try:
-                        disk_total_val = 0
-                        raw_disk = res.get('disk_total', 0)
-                        if isinstance(raw_disk, str):
-                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", raw_disk)
-                            if nums: disk_total_val = float(nums[0])
-                        else:
-                            disk_total_val = float(raw_disk)
-                        if disk_total_val > 0:
-                            disk_used = disk_total_val * (disk / 100.0)
-                            refs['disk_sub'].set_text(fmt_capacity(disk_used))
-                        else:
-                            refs['disk_sub'].set_text(f"{disk:.1f}%")
-                    except: refs['disk_sub'].set_text(f"{disk:.1f}%")
+                if res.get('disk_used'): refs['disk_sub'].set_text(str(res.get('disk_used')))
+                else: refs['disk_sub'].set_text(f"{disk:.1f}%")
 
                 n_up = res.get('net_speed_out', 0); n_down = res.get('net_speed_in', 0)
                 refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
@@ -9118,72 +9201,167 @@ async def render_desktop_status_page():
     sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
     for s in sorted_init_list: create_server_card(s)
     render_tabs(); apply_filter(CURRENT_PROBE_TAB)
+    
 
-    # ✨✨✨ [终极修复] JS端 setOption(option, true) 强制不合并 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
-        var mapData = {chart_data}; window.regionStats = {region_stats_json}; window.mapNameMap = {name_map_json}; 
+        var mapData = {chart_data}; 
+        window.regionStats = {region_stats_json}; 
+        window.countryCentroids = {centroids_json}; 
         
-        var defaultPt = [116.4, 39.9]; 
-        var manualCentroids = {{ 'France': [2.21, 46.22], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37], 'Russia': [105.31, 61.52], 'Netherlands': [5.29, 52.13], 'Portugal': [-8.22, 39.39], 'Spain': [-3.74, 40.46] }};
-        
-        function fixFlags() {{ if (mapData.flags) {{ mapData.flags.forEach(function(f) {{ if (f.country && manualCentroids[f.country]) {{ f.value = manualCentroids[f.country]; }} }}); }} }}
+        var defaultPt = [170.0, 20.0];
+        var defaultZoom = 1.35; 
+        var focusedZoom = 4.0; 
+        var isZoomed = false; 
 
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
             if (!chartDom || typeof echarts === 'undefined') {{ setTimeout(checkAndRender, 100); return; }}
+            
             fetch('/static/world.json').then(r => r.json()).then(w => {{
-                echarts.registerMap('world', w); var myChart = echarts.init(chartDom); window.publicMapChart = myChart; 
-                fixFlags();
-                if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => {{ defaultPt = [p.coords.longitude, p.coords.latitude]; renderMap(); }}, e => {{ renderMap(); }}); }} else {{ renderMap(); }}
-                var mapState = 'A'; var focusedCenter = null; var defaultZoom = 1.0; var focusedZoom = 4.0; 
+                echarts.registerMap('world', w); 
+                var myChart = echarts.init(chartDom); 
+                window.publicMapChart = myChart; 
                 
-                function renderMap(viewCenter) {{
-                    viewCenter = viewCenter || defaultPt; var flyDest = defaultPt;
-                    var lines = mapData.cities.map(pt => ({{ coords: [pt.value, flyDest] }}));
+                if (navigator.geolocation) {{ 
+                    navigator.geolocation.getCurrentPosition(
+                        p => {{ defaultPt = [p.coords.longitude, p.coords.latitude]; if(!isZoomed) renderMap(); }},
+                        e => {{ if(!isZoomed) renderMap(); }}
+                    ); 
+                }} else {{ if(!isZoomed) renderMap(); }}
+                
+                function renderMap(center, zoomLevel, roamState) {{
+                    var viewCenter = center || defaultPt;
+                    var viewZoom = zoomLevel || defaultZoom;
+                    var viewRoam = roamState !== undefined ? roamState : false;
+                    
+                    var mapLeft = isZoomed ? 'center' : '50%'; 
+                    var mapTop = '1%';
+
+                    var lines = mapData.cities.map(pt => ({{ coords: [pt.value, defaultPt] }}));
+                    
+                    // 获取当前主题状态
                     var isDark = document.body.classList.contains('body--dark');
-                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; var borderColor = isDark ? '#404a59' : '#a5b4fc'; var bgColor = 'transparent'; 
+                    
+                    // 地图本身的颜色定义
+                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; 
+                    var borderColor = isDark ? '#404a59' : '#a5b4fc'; 
+                    var bgColor = 'transparent'; 
+
+                    // ✨✨✨ 新增：定义 Tooltip 的深浅模式主题色 ✨✨✨
+                    var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
+                    var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
+                    var ttTextMain = isDark ? '#fff' : '#1e293b';
+                    var ttTextSub = isDark ? '#94a3b8' : '#64748b';
+                    var ttSeparator = isDark ? 'rgba(255,255,255,0.1)' : '#e2e8f0';
+                    var ttItemText = isDark ? '#e2e8f0' : '#334155';
+                    // --------------------------------------------------
+                    
                     var option = {{
                         backgroundColor: bgColor,
                         tooltip: {{
-                            trigger: 'item', backgroundColor: isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)',
-                            borderColor: isDark ? '#334155' : '#e2e8f0', textStyle: {{ color: isDark ? '#f1f5f9' : '#1e293b' }},
+                            show: true,
+                            trigger: 'item',
+                            enterable: true,
+                            backgroundColor: 'transparent',
+                            borderColor: 'transparent',
+                            borderWidth: 0,
+                            padding: 0,
+                            textStyle: {{ color: ttTextMain }}, // 使用动态主文本色
+                            extraCssText: 'box-shadow: none;', 
+                            
                             formatter: function(params) {{
-                                if (!params.name || !window.regionStats[params.name]) return;
-                                var info = window.regionStats[params.name];
-                                return '<div style="font-weight:bold; margin-bottom:5px;">' + info.flag + ' ' + info.cn + '</div>' + '<div>服务器: ' + info.total + '</div>' + '<div>在线: <span style="color:#22c55e">' + info.online + '</span></div>';
+                                var searchKey = params.name;
+                                if (params.componentType === 'series' && params.data && params.data.country_key) {{
+                                    searchKey = params.data.country_key;
+                                }}
+
+                                var stats = window.regionStats[searchKey];
+                                if (!stats) return; 
+                                
+                                var serverListHtml = '';
+                                var displayLimit = 5;
+                                for (var i = 0; i < Math.min(stats.list.length, displayLimit); i++) {{
+                                    var srv = stats.list[i];
+                                    var statusColor = srv.status === 'online' ? '#22c55e' : '#ef4444'; 
+                                    var statusText = srv.status === 'online' ? '在线' : '离线';
+                                    // ✨ 使用动态列表文本色 (ttItemText)
+                                    serverListHtml += `
+                                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:13px; color:${{ttItemText}};">
+                                            <div style="display:flex; align-items:center; gap:8px;">
+                                                <span style="width:8px; height:8px; border-radius:50%; background-color:${{statusColor}};"></span>
+                                                <span style="max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${{srv.name}}</span>
+                                            </div>
+                                            <span style="color:${{statusColor}}; font-size:12px;">${{statusText}}</span>
+                                        </div>`;
+                                }}
+                                if (stats.list.length > displayLimit) {{
+                                    // ✨ 使用动态副文本色 (ttTextSub)
+                                    serverListHtml += `<div style="font-size:12px; color:${{ttTextSub}}; margin-top:4px;">+${{stats.list.length - displayLimit}} 更多...</div>`;
+                                }}
+
+                                // ✨ 将容器、标题、副标题、分割线的样式全部替换为动态变量
+                                return `
+                                    <div style="background-color: ${{ttBg}}; border: ${{ttBorder}}; border-radius: 12px; padding: 16px; min-width: 260px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); backdrop-filter: blur(8px);">
+                                        <div style="font-size: 18px; font-weight: 800; color: ${{ttTextMain}}; margin-bottom: 8px; display:flex; align-items:center; gap:8px;">
+                                            <span>${{stats.flag}}</span>
+                                            <span>${{stats.cn}}</span> 
+                                        </div>
+                                        <div style="font-size: 13px; color: ${{ttTextSub}}; margin-bottom: 12px; border-bottom: 1px solid ${{ttSeparator}}; padding-bottom: 8px;">
+                                            共 ${{stats.total}} 个服务器，<span style="color:#22c55e">${{stats.online}} 个在线</span>，<span style="color:#ef4444">${{stats.offline}} 个离线</span>
+                                        </div>
+                                        <div>${{serverListHtml}}</div>
+                                    </div>`;
                             }}
                         }},
                         geo: {{
-                            map: 'world', roam: true, zoom: mapState === 'B' ? focusedZoom : defaultZoom, center: viewCenter, aspectScale: 0.85, label: {{ show: false }},
+                            map: 'world', left: mapLeft, top: mapTop, roam: viewRoam, zoom: viewZoom, center: viewCenter, aspectScale: 0.85, label: {{ show: false }},
                             itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }},
-                            emphasis: {{ label: {{ show: false }}, itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }} }},
+                            emphasis: {{ 
+                                label: {{ show: false }}, 
+                                itemStyle: {{ areaColor: isDark ? '#1e3a8a' : '#bfdbfe', borderWidth: 2, borderColor: '#60a5fa' }} 
+                            }},
                             regions: mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: isDark ? '#1e40af' : '#93c5fd' }} }}))
                         }},
                         series: [
-                            {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
+                            {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, data: mapData.cities }},
                             {{ type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5] }}, data: mapData.flags }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: flyDest }}] }}
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: defaultPt }}], tooltip: {{ show: false }} }}
                         ]
                     }};
-                    // ✨ 关键点：第二个参数 true 表示不合并，完全重置！解决空数据不刷新问题
                     myChart.setOption(option, true);
                 }}
                 
                 window.updateMapData = function(newData) {{ 
                     mapData = newData; 
-                    fixFlags(); 
-                    renderMap(); 
+                    // 保持当前的缩放和中心点状态
+                    renderMap(isZoomed ? myChart.getOption().geo[0].center : defaultPt, isZoomed ? myChart.getOption().geo[0].zoom : defaultZoom, isZoomed ? 'move' : false); 
                 }}; 
 
                 myChart.on('click', function(params) {{
-                    if (params.componentType === 'geo' || (params.componentType === 'series' && params.seriesType === 'map')) {{
-                        if (mapState === 'A') {{ mapState = 'B'; myChart.setOption({{ geo: {{ center: undefined, zoom: focusedZoom }} }}); }} 
-                        else {{ mapState = 'A'; myChart.setOption({{ geo: {{ center: defaultPt, zoom: defaultZoom }} }}); }}
+                    var searchKey = params.name;
+                    if (params.componentType === 'series' && params.data && params.data.country_key) {{
+                        searchKey = params.data.country_key;
+                    }}
+
+                    var stats = window.regionStats[searchKey];
+                    if (stats) {{
+                        var targetCoord = window.countryCentroids[searchKey];
+                        if (!targetCoord) return;
+                        isZoomed = true; 
+                        renderMap(targetCoord, focusedZoom, 'move'); 
                     }}
                 }});
-                window.changeTheme = function(isDark) {{ renderMap(); }}; window.addEventListener('resize', () => myChart.resize());
+
+                myChart.getZr().on('mousewheel', function() {{ if (isZoomed) {{ isZoomed = false; renderMap(defaultPt, defaultZoom, false); }} }});
+                
+                // 主题切换时触发重绘
+                window.changeTheme = function(isDark) {{ 
+                    renderMap(isZoomed ? myChart.getOption().geo[0].center : defaultPt, isZoomed ? myChart.getOption().geo[0].zoom : defaultZoom, isZoomed ? 'move' : false); 
+                }}; 
+                
+                window.addEventListener('resize', () => myChart.resize());
             }});
         }}
         checkAndRender();
@@ -9194,17 +9372,21 @@ async def render_desktop_status_page():
         nonlocal local_ui_version
         try:
             is_count_mismatch = (len(SERVERS_CACHE) != len(RENDERED_CARDS))
-            
             if GLOBAL_UI_VERSION != local_ui_version or is_count_mismatch:
-                print("[DIAG] Loop update triggered (Mismatch or Version change)")
                 local_ui_version = GLOBAL_UI_VERSION
                 render_tabs(); sync_cards_pool(); apply_filter(CURRENT_PROBE_TAB)
-                new_map, new_pie, new_cnt, new_stats, new_map_names = prepare_map_data()
+                
+                # 获取 5 个参数
+                new_map, new_pie, new_cnt, new_stats, new_centroids = prepare_map_data()
+                
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
                 if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
                 
-                # 强制 JS 重绘
-                ui.run_javascript(f'''if(window.updateMapData){{ window.updateMapData({new_map}); window.regionStats = {new_stats}; window.mapNameMap = {new_map_names}; }}''')
+                ui.run_javascript(f'''if(window.updateMapData){{ 
+                    window.regionStats = {new_stats}; 
+                    window.countryCentroids = {new_centroids};
+                    window.updateMapData({new_map}); 
+                }}''')
 
             real_online_count = 0
             for s in SERVERS_CACHE:
@@ -9213,11 +9395,10 @@ async def render_desktop_status_page():
         except Exception as e:
             print(f"Loop Update Error: {e}") 
             traceback.print_exc() 
-        
         ui.timer(5.0, loop_update, once=True)
 
     ui.timer(0.1, loop_update, once=True)
-
+    
 # ================= 手机端专用：实时动效 Dashboard 最终完整版 =================
 async def render_mobile_status_page():
     global CURRENT_PROBE_TAB
