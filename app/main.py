@@ -4101,7 +4101,7 @@ def open_sub_editor(d):
 # 用于记录当前探针页面选中的标签，防止刷新重置
 CURRENT_PROBE_TAB = 'ALL' 
 
-# ================= 快捷创建分组弹窗 =================
+# ================= 快捷创建分组弹窗 (修复版：标签模式) =================
 def open_quick_group_create_dialog(callback=None):
     # 准备选择状态字典
     selection_map = {s['url']: False for s in SERVERS_CACHE}
@@ -4111,44 +4111,44 @@ def open_quick_group_create_dialog(callback=None):
         # 1. 顶部：输入名称
         with ui.column().classes('w-full p-4 border-b bg-gray-50 gap-3 flex-shrink-0'):
             with ui.row().classes('w-full justify-between items-center'):
-                ui.label('新建分组').classes('text-lg font-bold')
+                ui.label('新建分组 (标签模式)').classes('text-lg font-bold')
                 ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
             
             name_input = ui.input('分组名称', placeholder='例如: 生产环境').props('outlined dense autofocus').classes('w-full bg-white')
 
         # 2. 中间：选择服务器列表
         with ui.column().classes('w-full flex-grow overflow-hidden relative'):
-            # 全选工具栏
             with ui.row().classes('w-full p-2 bg-gray-100 justify-between items-center border-b flex-shrink-0'):
                 ui.label('勾选加入该组的服务器:').classes('text-xs font-bold text-gray-500 ml-2')
                 with ui.row().classes('gap-1'):
                     ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=xs color=primary')
                     ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=xs color=grey')
 
-            # 滚动列表
             scroll_area = ui.scroll_area().classes('w-full flex-grow p-2')
             with scroll_area:
                 checkbox_refs = {}
                 with ui.column().classes('w-full gap-1'):
-                    # 按名称排序显示
-                    sorted_srv = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
+                    # 按名称排序
+                    try: sorted_srv = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
+                    except: sorted_srv = SERVERS_CACHE
                     
                     for s in sorted_srv:
                         with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition cursor-pointer'):
-                            # 复选框
                             chk = ui.checkbox(value=False).props('dense')
                             checkbox_refs[s['url']] = chk
                             chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                             
-                            # 点击行也可以触发勾选
                             ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
 
                             # 显示名称
                             ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
                             
-                            # 显示原分组提示
-                            old_group = s.get('group', '-')
-                            ui.label(old_group).classes('text-xs text-gray-400 font-mono')
+                            # 显示原区域 (辅助判断)
+                            # 这里不再显示 group，而是显示根据 IP/Name 检测到的区域，避免混淆
+                            detected = "未知"
+                            try: detected = detect_country_group(s['name'], s)
+                            except: pass
+                            ui.label(detected).classes('text-xs text-gray-400 font-mono')
 
             def toggle_all(state):
                 for chk in checkbox_refs.values():
@@ -4165,62 +4165,51 @@ def open_quick_group_create_dialog(callback=None):
             existing = set(ADMIN_CONFIG.get('custom_groups', []))
             if new_name in existing: return safe_notify('分组已存在', 'warning')
             
-            # 1. 保存分组名到配置
+            # 1. 保存分组名
             if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
             ADMIN_CONFIG['custom_groups'].append(new_name)
             await save_admin_config()
             
-            # 2. 更新选中服务器的分组属性
+            # 2. 更新选中服务器的【标签】，绝不修改 group
             count = 0
             for s in SERVERS_CACHE:
                 if selection_map.get(s['url'], False):
-                    s['group'] = new_name
-                    count += 1
-            
+                    # 初始化 tags 列表
+                    if 'tags' not in s or not isinstance(s['tags'], list):
+                        s['tags'] = []
+                    # 避免重复添加
+                    if new_name not in s['tags']:
+                        s['tags'].append(new_name)
+                        count += 1
+                    
+                    # ✨✨✨ 自动修复逻辑 ✨✨✨
+                    # 如果该服务器之前的 group 属性被错误地设置为了这个分组名，
+                    # 我们需要把它“释放”回 GeoIP 自动检测，或者保留为空让它自动归类
+                    if s.get('group') == new_name:
+                        # 尝试通过 GeoIP 恢复区域分组，或者直接置空
+                        geo_group = "默认分组"
+                        try: 
+                            # 再次调用检测逻辑，但不传 server_config 以强制重新计算地理位置
+                            geo_group = detect_country_group(s['name'], None) 
+                        except: pass
+                        s['group'] = geo_group
+
             if count > 0:
                 await save_servers()
             
-            safe_notify(f'✅ 分组 "{new_name}" 创建成功，已添加 {count} 台服务器', 'positive')
+            render_sidebar_content.refresh() # 刷新侧边栏
+            
+            safe_notify(f'✅ 分组 "{new_name}" 创建成功，{count} 台服务器已打标签', 'positive')
             d.close()
-            if callback: await callback(new_name)
+            
+            if callback and callable(callback): 
+                try: await callback(new_name)
+                except: pass
 
         with ui.row().classes('w-full p-4 border-t bg-white justify-end gap-2 flex-shrink-0'):
             ui.button('取消', on_click=d.close).props('flat color=grey')
             ui.button('创建并保存', on_click=save).classes('bg-blue-600 text-white shadow-md')
 
-    d.open()
-
-# ================= 快捷创建分组弹窗  =================
-def open_quick_group_create_dialog(callback=None):
-    with ui.dialog() as d, ui.card().classes('w-80 p-6 flex flex-col gap-4'):
-        ui.label('新建分组').classes('text-lg font-bold')
-        
-        name_input = ui.input('分组名称', placeholder='例如: 生产环境').props('outlined dense autofocus').classes('w-full')
-        
-        async def save():
-            new_name = name_input.value.strip()
-            if not new_name: return safe_notify('名称不能为空', 'warning')
-            
-            # 查重
-            existing = set(ADMIN_CONFIG.get('custom_groups', []))
-            for s in SERVERS_CACHE:
-                if s.get('group'): existing.add(s['group'])
-            
-            if new_name in existing:
-                return safe_notify('分组已存在', 'warning')
-            
-            # 保存
-            if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
-            ADMIN_CONFIG['custom_groups'].append(new_name)
-            await save_admin_config()
-            
-            safe_notify(f'✅ 分组 "{new_name}" 创建成功', 'positive')
-            d.close()
-            if callback: await callback(new_name) # 回调刷新页面
-
-        with ui.row().classes('w-full justify-end gap-2'):
-            ui.button('取消', on_click=d.close).props('flat color=grey')
-            ui.button('创建', on_click=save).classes('bg-blue-600 text-white')
     d.open()
 
 # ================= 1.探针视图(分组)排序弹窗 =================
@@ -5209,7 +5198,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 =================
+# ================= 小巧卡片式弹窗 (修复版：分离基础信息保存) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -5245,9 +5234,48 @@ async def open_server_dialog(idx=None):
                 t_ssh = ui.tab('SSH / 探针', icon='terminal')
                 t_xui = ui.tab('X-UI面板', icon='settings')
 
-        # --- 通用字段 ---
-        name_input = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
-        group_input = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('w-full').props('outlined dense')
+        # ================= ✨✨✨ 独立的基础信息保存逻辑 ✨✨✨ =================
+        async def save_basic_info_only():
+            if not is_edit: 
+                safe_notify("新增服务器请使用下方的保存按钮", "warning")
+                return
+
+            new_name = name_input.value.strip()
+            new_group = group_input.value
+            
+            # 如果名称为空，尝试自动生成
+            if not new_name:
+                new_name = await generate_smart_name(data)
+            
+            # 更新内存数据
+            SERVERS_CACHE[idx]['name'] = new_name
+            SERVERS_CACHE[idx]['group'] = new_group
+            
+            # 仅保存文件，不触发探针安装
+            await save_servers()
+            render_sidebar_content.refresh()
+            
+            # 刷新单机视图（如果开着的话）
+            try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
+            except: pass
+            
+            safe_notify("✅ 基础信息已更新 (未触发生效脚本)", "positive")
+            d.close()
+
+        # --- 通用字段区域 ---
+        with ui.column().classes('w-full gap-2'):
+            name_input = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
+            
+            with ui.row().classes('w-full items-center gap-2 no-wrap'):
+                group_input = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('flex-grow').props('outlined dense')
+                
+                # ✨ 只有在编辑模式下，才显示这个独立的保存按钮
+                if is_edit:
+                    ui.button(icon='save', on_click=save_basic_info_only) \
+                        .props('flat dense round color=primary') \
+                        .tooltip('仅保存名称和分组 (不重新部署)')
+
+        # ======================================================================
         
         inputs = {}
 
@@ -5256,7 +5284,7 @@ async def open_server_dialog(idx=None):
         btn_keycap_delete = 'bg-white rounded-xl font-bold tracking-wide w-full border-t border-x border-gray-100 border-b-4 border-red-100 text-red-500 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-red-50'
         btn_keycap_red_confirm = 'rounded-lg font-bold tracking-wide text-white border-b-4 border-red-900 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1'
 
-        # ==================== 保存逻辑 ====================
+        # ==================== 保存逻辑 (完整保存) ====================
         async def save_panel_data(panel_type):
             final_name = name_input.value.strip()
             final_group = group_input.value
@@ -5280,7 +5308,7 @@ async def open_server_dialog(idx=None):
                 })
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
-            # --- X-UI 保存逻辑 (✨✨✨ 核心修改：智能补全端口 ✨✨✨) ---
+            # --- X-UI 保存逻辑 ---
             elif panel_type == 'xui':
                 if not inputs.get('xui_url'): return
                 x_url_raw = inputs['xui_url'].value.strip()
@@ -5291,16 +5319,13 @@ async def open_server_dialog(idx=None):
                     safe_notify("必填项不能为空", "negative")
                     return
 
-                # 1. 补全协议 (如果缺)
-                if '://' not in x_url_raw: 
-                    x_url_raw = f"http://{x_url_raw}"
+                # 1. 补全协议
+                if '://' not in x_url_raw: x_url_raw = f"http://{x_url_raw}"
                 
-                # 2. 补全默认端口 54321 (如果缺)
-                # 逻辑：提取 :// 后面的部分，检查是否包含冒号
+                # 2. 补全默认端口
                 try:
                     parts = x_url_raw.split('://')
                     body = parts[1]
-                    # 如果 body 里没有冒号 (排除ipv6的复杂情况，暂且简单判断)
                     if ':' not in body:
                         x_url_raw = f"{x_url_raw}:54321"
                         safe_notify(f"已自动添加默认端口: {x_url_raw}", "positive")
@@ -5315,7 +5340,6 @@ async def open_server_dialog(idx=None):
                     'probe_installed': probe_val
                 })
                 
-                # 补全 SSH 信息 (如果开启探针但缺失 SSH)
                 if probe_val:
                     if not new_server_data.get('ssh_host'):
                         if '://' in x_url_raw: new_server_data['ssh_host'] = x_url_raw.split('://')[-1].split(':')[0]
@@ -5398,7 +5422,6 @@ async def open_server_dialog(idx=None):
                     ui.button('配置 X-UI 信息', icon='add', on_click=lambda: _activate_panel('xui')).props('flat bg-purple-50 text-purple-600')
             else:
                 inputs['xui_url'] = ui.input(value=data.get('url',''), label='面板 URL (http://ip:port)').classes('w-full').props('outlined dense')
-                # ✨✨✨ 新增提示 ✨✨✨
                 ui.label('默认端口 54321，如不填写将自动补全').classes('text-[10px] text-gray-400 ml-1 -mt-1 mb-1')
                 
                 with ui.row().classes('w-full gap-2'):
@@ -5421,7 +5444,7 @@ async def open_server_dialog(idx=None):
                         p_url = inputs['xui_url'].value
                         if p_url:
                             clean_ip = p_url.split('://')[-1].split(':')[0]
-                            if ':' in clean_ip: clean_ip = clean_ip.split(':')[0] # 去掉可能存在的端口
+                            if ':' in clean_ip: clean_ip = clean_ip.split(':')[0]
                             inputs['ssh_host'].set_value(clean_ip)
                 inputs['probe_chk'].on_value_change(auto_fill_ssh)
 
@@ -6474,7 +6497,7 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
         remark = node.get('ps') or node.get('remark') or '未命名节点'
         ui.label(remark).classes('font-bold truncate w-full text-left pl-2 text-slate-700 text-sm')
 
-        # 3. 分组 / IP (✨✨✨ 修复：自动解析域名为 IP ✨✨✨)
+        # 3. 分组 / IP / 区域 (核心修复部分)
         if use_special_mode:
             with ui.row().classes('w-full justify-center items-center gap-1.5 no-wrap'):
                 # A. 状态图标
@@ -6483,18 +6506,25 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
                 if not srv.get('probe_installed') and not node.get('_is_custom'): color = 'text-orange-400'
                 ui.icon('bolt').classes(f'{color} text-sm')
                 
-                # B. IP 显示 (调用 get_real_ip_display 智能解析)
-                # 即使填的是域名，这里也会显示解析后的 IP (如果有缓存)
-                # 如果没有缓存，会先显示域名，后台解析完自动更新
+                # B. IP 显示
                 display_ip = get_real_ip_display(srv['url'])
-                
                 ip_lbl = ui.label(display_ip).classes('text-[10px] font-mono text-gray-500 font-bold bg-gray-100 px-1.5 py-0.5 rounded select-all')
-                
-                # 绑定后台更新 (如果还在解析中，解析完了会自动刷新这个 Label)
                 bind_ip_label(srv['url'], ip_lbl)
         else:
-            group = srv.get('group', '默认分组')
-            ui.label(group).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
+            # ================= ✨✨✨ 修复开始 ✨✨✨ =================
+            # 获取原始分组
+            group_display = srv.get('group', '默认分组')
+            
+            # 如果是默认分组，尝试计算出真实的物理区域（例如：🇺🇸 美国）
+            if group_display in ['默认分组', '自动注册', '未分组', '自动导入']:
+                try:
+                    # 调用检测函数，传入 None 忽略现有 group 字段，强制通过名称/IP重算
+                    detected = detect_country_group(srv.get('name', ''), None)
+                    if detected: group_display = detected
+                except: pass
+            
+            ui.label(group_display).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
+            # ================= ✨✨✨ 修复结束 ✨✨✨ =================
 
         # 4. 流量
         if node.get('_is_custom'):
@@ -6527,7 +6557,7 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
                 dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
                 ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
 
-        # 8. 操作按钮 (✨ 已修复：加回了复制明文配置按钮 ✨)
+        # 8. 操作按钮
         with ui.row().classes('gap-1 justify-center w-full no-wrap'):
             
             # (1) 复制标准链接
@@ -6551,7 +6581,6 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
 
             # (3) 设置按钮
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
-
 
 # ================= 核心：静默刷新 UI 数据  =================
 async def refresh_dashboard_ui():
@@ -6989,9 +7018,11 @@ class BulkEditor:
                         if not self.selected_urls: return safe_notify('未选择服务器', 'warning')
                         with ui.dialog() as sub_d, ui.card().classes('w-80'):
                             ui.label('移动到分组').classes('font-bold mb-2')
-                            groups = sorted(list(get_all_groups_set()))
                             
-                            # ✨✨✨ 关键修改：new_value_mode='add-unique' 允许用户手打新分组 ✨✨✨
+                            # ✨✨✨ 修复点：函数名修正 get_all_groups_set -> get_all_groups ✨✨✨
+                            groups = get_all_groups()
+                            
+                            # 允许用户手打新分组
                             sel = ui.select(groups, label='选择或输入分组', with_input=True, new_value_mode='add-unique').classes('w-full')
                             
                             ui.button('确定移动', on_click=lambda: do_move(sel.value)).classes('w-full mt-4 bg-blue-600 text-white')
@@ -7004,16 +7035,20 @@ class BulkEditor:
                                         s['group'] = target_group
                                         count += 1
                                 
-                                # 同时也更新一下自定义分组列表
+                                # 同时也更新一下自定义分组列表，防止新输入的分组消失
                                 if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
-                                if target_group not in ADMIN_CONFIG['custom_groups']:
+                                if target_group not in ADMIN_CONFIG['custom_groups'] and target_group != '默认分组':
                                     ADMIN_CONFIG['custom_groups'].append(target_group)
                                     await save_admin_config()
 
                                 await save_servers()
                                 sub_d.close(); self.dialog.close() # 关闭所有弹窗
+                                
+                                # 刷新侧边栏和主内容
                                 render_sidebar_content.refresh()
-                                await refresh_content('ALL')
+                                try: await refresh_content('ALL') 
+                                except: pass
+                                
                                 safe_notify(f'已移动 {count} 个服务器到 [{target_group}]', 'positive')
                         sub_d.open()
 
@@ -7324,7 +7359,7 @@ class BatchSSH:
 batch_ssh_manager = BatchSSH()
 
 
-# =================  全能分组管理 (防重复国旗 + 真实IP) =================
+# =================  全能分组管理 (修复版：标签管理 + 区域回退) =================
 def open_combined_group_management(group_name):
     with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-[600px] h-[80vh] flex flex-col p-0 gap-0 overflow-hidden'):
         
@@ -7357,14 +7392,21 @@ def open_combined_group_management(group_name):
                         selection_map = {} 
                         checkbox_refs = {} 
                         
-                        try: sorted_servers = sorted(SERVERS_CACHE, key=lambda x: smart_sort_key(x))
+                        try: sorted_servers = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
                         except: sorted_servers = SERVERS_CACHE 
 
                         if not sorted_servers:
                             ui.label('暂无服务器数据').classes('w-full text-center text-gray-400 mt-4')
 
                         for s in sorted_servers:
-                            is_in_group = group_name in s.get('tags', [])
+                            # 判断逻辑：只要 tags 里有这个组名，就算选中
+                            tags = s.get('tags', [])
+                            if not isinstance(tags, list): tags = []
+                            is_in_group = group_name in tags
+                            
+                            # 兼容旧数据：如果 group 字段也是这个名字，也算选中
+                            if s.get('group') == group_name: is_in_group = True
+                            
                             selection_map[s['url']] = is_in_group
                             
                             with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition'):
@@ -7375,58 +7417,49 @@ def open_combined_group_management(group_name):
                                 # 信息展示
                                 with ui.column().classes('gap-0 ml-2 flex-grow overflow-hidden'):
                                     with ui.row().classes('items-center gap-2'):
+                                        ui.label(s['name']).classes('text-sm font-bold truncate')
                                         
-                                        # ✨✨✨ 修复：国旗防重复判断 ✨✨✨
-                                        name_text = s['name']
-                                        try:
-                                            country = detect_country_group(name_text)
-                                            flag = country.split(' ')[0] # 提取国旗 Emoji
-                                            # 只有当名字里不包含这个国旗时，才添加
-                                            if flag not in name_text:
-                                                name_text = f"{flag} {name_text}"
-                                        except: pass
-                                        
-                                        ui.label(name_text).classes('text-sm font-bold truncate')
-
-                                # ✨✨✨ 修复：显示真实解析 IP ✨✨✨
-                                ip_addr = get_real_ip_display(s['url'])
-
-                                status = s.get('_status')
-                                if status == 'online':
-                                    stat_color = 'green-500'; stat_icon = 'bolt'
-                                elif status == 'offline':
-                                    stat_color = 'red-500'; stat_icon = 'bolt'
-                                else:
-                                    stat_color = 'grey-400'; stat_icon = 'help_outline'
-
-                                with ui.row().classes('items-center gap-1'):
-                                    ui.icon(stat_icon).classes(f'text-{stat_color} text-sm')
-                                    # ✨ IP 静默更新
-                                    ip_lbl = ui.label(ip_addr).classes('text-xs font-mono text-gray-500')
-                                    bind_ip_label(s['url'], ip_lbl)
+                                # 真实区域展示 (帮助用户确认它原来属于哪里)
+                                try:
+                                    real_region = detect_country_group(s['name'], None) # 传入 None 强制不读 group 字段
+                                    ui.label(real_region).classes('text-xs font-mono text-gray-400')
+                                except: pass
 
                 def toggle_all(state):
                     for url, chk in checkbox_refs.items():
                         chk.value = state
                         selection_map[url] = state
 
-        # 3. 底部按钮栏 (保持不变)
+        # 3. 底部按钮栏
         with ui.row().classes('w-full p-4 border-t bg-gray-50 justify-between items-center flex-shrink-0'):
+            
+            # === 删除分组 ===
             async def delete_group():
                 with ui.dialog() as confirm_d, ui.card():
                     ui.label(f'确定永久删除分组 "{group_name}"?').classes('font-bold text-red-600')
-                    ui.label('组内的服务器不会被删除，仅移除标签。').classes('text-xs text-gray-500')
+                    ui.label('服务器将保留，仅移除此标签，并恢复回原区域分组。').classes('text-xs text-gray-500')
                     with ui.row().classes('w-full justify-end mt-4 gap-2'):
                         ui.button('取消', on_click=confirm_d.close).props('flat dense')
                         async def do_del():
+                            # 1. 从列表删除
                             if 'custom_groups' in ADMIN_CONFIG and group_name in ADMIN_CONFIG['custom_groups']:
                                 ADMIN_CONFIG['custom_groups'].remove(group_name)
+                            
+                            # 2. 清理服务器数据
                             for s in SERVERS_CACHE:
-                                if group_name in s.get('tags', []):
+                                # 移除 tag
+                                if 'tags' in s and group_name in s['tags']:
                                     s['tags'].remove(group_name)
+                                
+                                # ✨✨✨ 关键修复：如果 group 字段等于该组名，重置为自动检测 ✨✨✨
+                                if s.get('group') == group_name:
+                                    try: s['group'] = detect_country_group(s['name'], None)
+                                    except: s['group'] = '默认分组'
+
                             await save_admin_config()
                             await save_servers()
                             confirm_d.close(); d.close()
+                            
                             render_sidebar_content.refresh()
                             if content_container: content_container.clear()
                             safe_notify(f'分组 "{group_name}" 已删除', 'positive')
@@ -7435,9 +7468,12 @@ def open_combined_group_management(group_name):
 
             ui.button('删除分组', icon='delete', color='red', on_click=delete_group).props('flat')
 
+            # === 保存修改 ===
             async def save_changes():
                 new_name = name_input.value.strip()
                 if not new_name: return safe_notify('分组名称不能为空', 'warning')
+                
+                # 1. 更新分组名列表
                 if new_name != group_name:
                     if 'custom_groups' in ADMIN_CONFIG:
                         if group_name in ADMIN_CONFIG['custom_groups']:
@@ -7446,21 +7482,41 @@ def open_combined_group_management(group_name):
                         else:
                             ADMIN_CONFIG['custom_groups'].append(new_name)
                     await save_admin_config()
+
+                # 2. 更新服务器 Tags
                 for s in SERVERS_CACHE:
-                    if 'tags' not in s: s['tags'] = []
+                    if 'tags' not in s or not isinstance(s['tags'], list): s['tags'] = []
+                    
                     should_have_tag = selection_map.get(s['url'], False)
+                    
                     if should_have_tag:
+                        # 添加新标签
                         if new_name not in s['tags']: s['tags'].append(new_name)
+                        # 移除旧标签 (如果改名了)
                         if new_name != group_name and group_name in s['tags']:
                             s['tags'].remove(group_name)
+                            
+                        # ✨✨✨ 自动修复：如果 group 被占用了，释放它 ✨✨✨
+                        if s.get('group') == group_name or s.get('group') == new_name:
+                             try: s['group'] = detect_country_group(s['name'], None)
+                             except: s['group'] = '默认分组'
+
                     else:
+                        # 未选中，移除标签
                         if new_name in s['tags']: s['tags'].remove(new_name)
                         if group_name in s['tags']: s['tags'].remove(group_name)
+                        
+                        # 同时也修复 group 字段
+                        if s.get('group') == group_name:
+                             try: s['group'] = detect_country_group(s['name'], None)
+                             except: s['group'] = '默认分组'
+
                 await save_servers()
                 d.close()
                 render_sidebar_content.refresh()
+                # 尝试刷新内容区（如果当前正好在该分组视图）
                 await refresh_content('TAG', new_name)
-                safe_notify('分组设置已保存', 'positive')
+                safe_notify('分组设置已保存，区域显示已恢复', 'positive')
 
             ui.button('保存修改', icon='save', on_click=save_changes).classes('bg-slate-900 text-white shadow-lg')
 
@@ -7539,10 +7595,15 @@ def render_sidebar_content():
                 'flex-grow text-xs font-bold text-white rounded-lg '
                 'border-b-4 active:border-b-0 active:translate-y-[4px] transition-all '
             )
-            # ✨ 这里的 open_create_group_dialog 现在能找到了
-            ui.button('新建分组', icon='create_new_folder', on_click=open_create_group_dialog).props('dense unelevated').classes(f'bg-blue-500 border-blue-700 hover:bg-blue-400 {func_btn_base}')
-            ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)).props('dense unelevated').classes(f'bg-green-500 border-green-700 hover:bg-green-400 {func_btn_base}')
-
+            # ✨ 修正点：props 里面填回了具体的样式字符串，而不是 ...
+            ui.button('新建分组', icon='create_new_folder', on_click=open_quick_group_create_dialog) \
+                .props('dense unelevated') \
+                .classes(f'bg-blue-500 border-blue-700 hover:bg-blue-400 {func_btn_base}')
+            
+            ui.button('添加服务器', icon='add', color='green', on_click=lambda: open_server_dialog(None)) \
+                .props('dense unelevated') \
+                .classes(f'bg-green-500 border-green-700 hover:bg-green-400 {func_btn_base}')
+                
         # --- A. 全部服务器 ---
         list_item_3d = (
             'w-full items-center justify-between p-3 border border-gray-200 rounded-xl mb-1 '
