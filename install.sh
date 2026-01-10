@@ -98,8 +98,10 @@ migrate_old_data() {
         mv "$OLD_INSTALL_DIR" "$INSTALL_DIR"
         print_success "目录重命名完成。"
         
-        # 3. 清理旧的 docker-compose.yml (稍后会生成新的)
-        rm -f "$INSTALL_DIR/docker-compose.yml"
+        # 3. [关键修复] 将旧配置重命名为备份，供 update 读取，而不是删除
+        if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+            mv "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.bak"
+        fi
         
         echo -e "${YELLOW}=================================================${PLAIN}"
     fi
@@ -124,8 +126,7 @@ deploy_base() {
     print_info "正在下载主程序..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
 
-    # ✨✨✨ 新增：下载探针安装脚本到 static 目录 ✨✨✨
-    # 这样可以通过 http://面板IP:端口/static/x-install.sh 访问，作为 GitHub 的备用源
+    # 下载探针安装脚本到 static 目录
     print_info "正在下载最新探针脚本..."
     curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
 
@@ -134,8 +135,7 @@ deploy_base() {
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
 
-    # ✨✨✨ 新增：下载世界地图数据到 static 目录 ✨✨✨
-    # 这样可以加速内网加载，避免访问 jsDelivr 超时
+    # 下载世界地图数据到 static 目录
     print_info "正在下载地图数据..."
     curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
 
@@ -316,21 +316,31 @@ update_panel() {
     fi
 
     if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录，请先执行安装。"; fi
-    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ]; then print_error "配置文件丢失，无法更新。"; fi
+    
+    # [修复] 检查配置是否存在（支持主文件或备份文件）
+    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ] && [ ! -f "${INSTALL_DIR}/docker-compose.yml.bak" ]; then 
+        print_error "配置文件丢失，无法更新。"
+    fi
 
     echo -e "${BLUE}=================================================${PLAIN}"
     print_info "正在执行 X-Fusion Panel 智能更新..."
     
     cd ${INSTALL_DIR}
     
-    cp docker-compose.yml docker-compose.yml.bak
-    print_info "已备份旧配置"
+    # [修复] 如果有现役配置，先备份为 .bak；如果没现役配置但有 .bak（刚迁移完），则跳过备份步骤
+    if [ -f "docker-compose.yml" ]; then
+        cp docker-compose.yml docker-compose.yml.bak
+        print_info "已备份旧配置"
+    fi
+
+    # [修复] 统一从 .bak 读取旧配置（确保无论是迁移还是更新都能读到）
+    CONFIG_FILE="docker-compose.yml.bak"
 
     # 提取旧配置
-    OLD_USER=$(grep "XUI_USERNAME=" docker-compose.yml | cut -d= -f2)
-    OLD_PASS=$(grep "XUI_PASSWORD=" docker-compose.yml | cut -d= -f2)
-    OLD_KEY=$(grep "XUI_SECRET_KEY=" docker-compose.yml | cut -d= -f2)
-    PORT_LINE=$(grep ":8080" docker-compose.yml | head -n 1)
+    OLD_USER=$(grep "XUI_USERNAME=" $CONFIG_FILE | cut -d= -f2)
+    OLD_PASS=$(grep "XUI_PASSWORD=" $CONFIG_FILE | cut -d= -f2)
+    OLD_KEY=$(grep "XUI_SECRET_KEY=" $CONFIG_FILE | cut -d= -f2)
+    PORT_LINE=$(grep ":8080" $CONFIG_FILE | head -n 1)
     
     if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
         BIND_IP="127.0.0.1"
@@ -360,14 +370,14 @@ update_panel() {
     print_info "更新静态资源..."
     mkdir -p static
     
-    # ✨✨✨ 新增：更新时同步最新的探针脚本 ✨✨✨
+    # [修复] 补齐探针安装脚本
     curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
     
     curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
 
-    # ✨✨✨ 新增：更新时同步世界地图数据 ✨✨✨
+    # [修复] 补齐世界地图数据
     print_info "更新地图数据..."
     curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
 
