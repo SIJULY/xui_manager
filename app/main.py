@@ -4129,107 +4129,129 @@ def open_sub_editor(d):
 # 用于记录当前探针页面选中的标签，防止刷新重置
 CURRENT_PROBE_TAB = 'ALL' 
 
-# ================= 快捷创建分组弹窗 (修复版：标签模式) =================
+# ================= 快捷创建分组弹窗 (升级版：带搜索筛选) =================
 def open_quick_group_create_dialog(callback=None):
     # 准备选择状态字典
     selection_map = {s['url']: False for s in SERVERS_CACHE}
+    
+    # ✨ 新增：存储每一行的 UI 引用，用于控制显隐
+    # 结构: { 'url': { 'row': ui_row_element, 'chk': checkbox_element, 'search_text': 'name+ip' } }
+    ui_rows = {} 
 
-    with ui.dialog() as d, ui.card().classes('w-full max-w-lg h-[80vh] flex flex-col p-0'):
+    with ui.dialog() as d, ui.card().classes('w-full max-w-lg h-[85vh] flex flex-col p-0'):
         
-        # 1. 顶部：输入名称
+        # 1. 顶部区域：名称 + 搜索
         with ui.column().classes('w-full p-4 border-b bg-gray-50 gap-3 flex-shrink-0'):
             with ui.row().classes('w-full justify-between items-center'):
                 ui.label('新建分组 (标签模式)').classes('text-lg font-bold')
                 ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
             
-            name_input = ui.input('分组名称', placeholder='例如: 生产环境').props('outlined dense autofocus').classes('w-full bg-white')
+            # 分组名称输入
+            name_input = ui.input('分组名称', placeholder='例如: 甲骨文云').props('outlined dense autofocus').classes('w-full bg-white')
+            
+            # ✨✨✨ 新增：搜索过滤框 ✨✨✨
+            search_input = ui.input(placeholder='🔍 搜索筛选服务器 (名称/IP)...').props('outlined dense clearable').classes('w-full bg-white')
+            
+            # 绑定搜索事件
+            def on_search(e):
+                keyword = str(e.value).lower().strip()
+                for url, item in ui_rows.items():
+                    # 匹配逻辑：如果关键字在 (名称 + IP) 里，就显示，否则隐藏
+                    is_match = keyword in item['search_text']
+                    item['row'].set_visibility(is_match)
+            
+            search_input.on_value_change(on_search)
 
         # 2. 中间：选择服务器列表
         with ui.column().classes('w-full flex-grow overflow-hidden relative'):
+            # 工具栏
             with ui.row().classes('w-full p-2 bg-gray-100 justify-between items-center border-b flex-shrink-0'):
-                ui.label('勾选加入该组的服务器:').classes('text-xs font-bold text-gray-500 ml-2')
+                ui.label('勾选加入该组:').classes('text-xs font-bold text-gray-500 ml-2')
                 with ui.row().classes('gap-1'):
-                    ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=xs color=primary')
-                    ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=xs color=grey')
+                    # ✨ 逻辑升级：全选只针对【当前可见】的项
+                    ui.button('全选 (当前)', on_click=lambda: toggle_visible(True)).props('flat dense size=xs color=primary')
+                    ui.button('清空', on_click=lambda: toggle_visible(False)).props('flat dense size=xs color=grey')
 
             scroll_area = ui.scroll_area().classes('w-full flex-grow p-2')
             with scroll_area:
-                checkbox_refs = {}
                 with ui.column().classes('w-full gap-1'):
                     # 按名称排序
                     try: sorted_srv = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
                     except: sorted_srv = SERVERS_CACHE
                     
                     for s in sorted_srv:
-                        with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition cursor-pointer'):
+                        # 准备搜索文本 (名称 + IP)
+                        search_key = f"{s['name']} {s['url']}".lower()
+                        
+                        # 渲染每一行
+                        with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition cursor-pointer') as row:
                             chk = ui.checkbox(value=False).props('dense')
-                            checkbox_refs[s['url']] = chk
+                            
+                            # 绑定勾选事件
                             chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                             
+                            # 点击行也能勾选
                             ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
 
                             # 显示名称
                             ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
                             
-                            # 显示原区域 (辅助判断)
-                            # 这里不再显示 group，而是显示根据 IP/Name 检测到的区域，避免混淆
+                            # 显示原区域
                             detected = "未知"
                             try: detected = detect_country_group(s['name'], s)
                             except: pass
                             ui.label(detected).classes('text-xs text-gray-400 font-mono')
+                        
+                        # ✨ 存入字典，供搜索和全选使用
+                        ui_rows[s['url']] = {
+                            'row': row, 
+                            'chk': chk, 
+                            'search_text': search_key
+                        }
 
-            def toggle_all(state):
-                for chk in checkbox_refs.values():
-                    chk.value = state
-                for k in selection_map:
-                    selection_map[k] = state
+            # ✨ 升级版全选函数
+            def toggle_visible(state):
+                count = 0
+                for item in ui_rows.values():
+                    # 只操作当前可见的行
+                    if item['row'].visible:
+                        item['chk'].value = state # 这会自动触发上面的 on_value_change 更新 selection_map
+                        count += 1
+                if state and count > 0:
+                    safe_notify(f"已选中当前显示的 {count} 个服务器", "positive")
 
-        # 3. 底部：保存
+        # 3. 底部：保存 (逻辑保持不变)
         async def save():
             new_name = name_input.value.strip()
             if not new_name: return safe_notify('名称不能为空', 'warning')
             
-            # 查重
             existing = set(ADMIN_CONFIG.get('custom_groups', []))
             if new_name in existing: return safe_notify('分组已存在', 'warning')
             
-            # 1. 保存分组名
             if 'custom_groups' not in ADMIN_CONFIG: ADMIN_CONFIG['custom_groups'] = []
             ADMIN_CONFIG['custom_groups'].append(new_name)
             await save_admin_config()
             
-            # 2. 更新选中服务器的【标签】，绝不修改 group
             count = 0
             for s in SERVERS_CACHE:
                 if selection_map.get(s['url'], False):
-                    # 初始化 tags 列表
-                    if 'tags' not in s or not isinstance(s['tags'], list):
-                        s['tags'] = []
-                    # 避免重复添加
+                    if 'tags' not in s or not isinstance(s['tags'], list): s['tags'] = []
                     if new_name not in s['tags']:
                         s['tags'].append(new_name)
                         count += 1
                     
-                    # ✨✨✨ 自动修复逻辑 ✨✨✨
-                    # 如果该服务器之前的 group 属性被错误地设置为了这个分组名，
-                    # 我们需要把它“释放”回 GeoIP 自动检测，或者保留为空让它自动归类
                     if s.get('group') == new_name:
-                        # 尝试通过 GeoIP 恢复区域分组，或者直接置空
                         geo_group = "默认分组"
-                        try: 
-                            # 再次调用检测逻辑，但不传 server_config 以强制重新计算地理位置
-                            geo_group = detect_country_group(s['name'], None) 
+                        try: geo_group = detect_country_group(s['name'], None) 
                         except: pass
                         s['group'] = geo_group
 
             if count > 0:
                 await save_servers()
             
-            render_sidebar_content.refresh() # 刷新侧边栏
-            
+            render_sidebar_content.refresh()
             safe_notify(f'✅ 分组 "{new_name}" 创建成功，{count} 台服务器已打标签', 'positive')
             d.close()
-            
             if callback and callable(callback): 
                 try: await callback(new_name)
                 except: pass
