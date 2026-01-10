@@ -1472,22 +1472,28 @@ GLOBE_STRUCTURE = r"""
 # ================= 2D 平面地图：JS 逻辑 (已锁定视角) =================
 GLOBE_JS_LOGIC = r"""
 (function() {
-    const serverData = window.GLOBE_DATA || [];
-    const realTotal = window.SERVER_TOTAL || serverData.length;
+    // 初始化数据
+    var serverData = window.GLOBE_DATA || [];
+    var realTotal = window.SERVER_TOTAL || serverData.length;
     
-    const container = document.getElementById('earth-render-area');
+    // 更新统计数字
+    var nodeCountEl = document.getElementById('node-count');
+    var regionCountEl = document.getElementById('region-count');
+    
+    function updateStats(data) {
+        if(nodeCountEl) nodeCountEl.textContent = data.length;
+        const uniqueRegions = new Set(data.map(s => s.name));
+        if(regionCountEl) regionCountEl.textContent = uniqueRegions.size;
+    }
+    updateStats(serverData);
+
+    var container = document.getElementById('earth-render-area');
     if (!container) return;
-
-    const nodeCountEl = document.getElementById('node-count');
-    const regionCountEl = document.getElementById('region-count');
     
-    if(nodeCountEl) nodeCountEl.textContent = realTotal;
-    
-    const uniqueRegions = new Set(serverData.map(s => s.name));
-    if(regionCountEl) regionCountEl.textContent = uniqueRegions.size;
+    var myChart = echarts.init(container);
+    var currentOption = null; // 保存当前的配置
 
-    const myChart = echarts.init(container);
-
+    // 定义高亮区域映射
     const searchKeys = {
         '🇺🇸': 'United States', 'US': 'United States', 'USA': 'United States',
         '🇨🇦': 'Canada', 'CA': 'Canada',
@@ -1499,56 +1505,28 @@ GLOBE_JS_LOGIC = r"""
         '🇷🇺': 'Russia', 'RU': 'Russia',
         '🇮🇹': 'Italy', 'IT': 'Italy',
         '🇪🇸': 'Spain', 'ES': 'Spain',
-        '🇵🇱': 'Poland', 'PL': 'Poland',
-        '🇺🇦': 'Ukraine', 'UA': 'Ukraine',
-        '🇸🇪': 'Sweden', 'SE': 'Sweden',
-        '🇨🇭': 'Switzerland', 'CH': 'Switzerland',
-        '🇹🇷': 'Turkey', 'TR': 'Turkey',
-        '🇮🇪': 'Ireland', 'IE': 'Ireland',
-        '🇫🇮': 'Finland', 'FI': 'Finland',
-        '🇳🇴': 'Norway', 'NO': 'Norway',
-        '🇦🇹': 'Austria', 'AT': 'Austria',
-        '🇧🇪': 'Belgium', 'BE': 'Belgium',
-        '🇵🇹': 'Portugal', 'PT': 'Portugal',
-        '🇬🇷': 'Greece', 'GR': 'Greece',
-        '🇩🇰': 'Denmark', 'DK': 'Denmark',
-        '🇨🇳': 'China', 'CN': 'China',
-        '🇭🇰': 'China', 'HK': 'China', 
-        '🇲🇴': 'China', 'MO': 'China',
-        '🇹🇼': 'Taiwan', 'TW': 'Taiwan',
+        '🇨🇳': 'China', 'CN': 'China', '🇭🇰': 'China', 'HK': 'China', '🇹🇼': 'China', 'TW': 'China',
         '🇯🇵': 'Japan', 'JP': 'Japan',
         '🇰🇷': 'Korea', 'KR': 'Korea',
         '🇸🇬': 'Singapore', 'SG': 'Singapore',
         '🇮🇳': 'India', 'IN': 'India',
         '🇦🇺': 'Australia', 'AU': 'Australia',
-        '🇳🇿': 'New Zealand', 'NZ': 'New Zealand',
         '🇻🇳': 'Vietnam', 'VN': 'Vietnam',
         '🇹🇭': 'Thailand', 'TH': 'Thailand',
         '🇲🇾': 'Malaysia', 'MY': 'Malaysia',
         '🇮🇩': 'Indonesia', 'ID': 'Indonesia',
         '🇵🇭': 'Philippines', 'PH': 'Philippines',
-        '🇰🇭': 'Cambodia', 'KH': 'Cambodia',
-        '🇦🇪': 'United Arab Emirates', 'UAE': 'United Arab Emirates', 'AE': 'United Arab Emirates',
-        '🇿🇦': 'South Africa', 'ZA': 'South Africa',
-        '🇸🇦': 'Saudi Arabia', 'SA': 'Saudi Arabia',
-        '🇮🇱': 'Israel', 'IL': 'Israel',
-        '🇪🇬': 'Egypt', 'EG': 'Egypt',
-        '🇮🇷': 'Iran', 'IR': 'Iran',
-        '🇳🇬': 'Nigeria', 'NG': 'Nigeria',
         '🇧🇷': 'Brazil', 'BR': 'Brazil',
-        '🇦🇷': 'Argentina', 'AR': 'Argentina',
-        '🇨🇱': 'Chile', 'CL': 'Chile',
-        '🇨🇴': 'Colombia', 'CO': 'Colombia',
-        '🇵🇪': 'Peru', 'PE': 'Peru'
+        '🇦🇷': 'Argentina', 'AR': 'Argentina'
     };
 
-    function renderMap(mapGeoJSON, userLat, userLon) {
-        
+    function buildOption(mapGeoJSON, data, userLat, userLon) {
         const mapFeatureNames = mapGeoJSON.features.map(f => f.properties.name);
         const activeMapNames = new Set();
 
-        serverData.forEach(s => {
+        data.forEach(s => {
             let keyword = null;
+            // 尝试从名字匹配国家
             for (let key in searchKeys) {
                 if ((s.name && s.name.includes(key)) || (s.country && s.country.includes(key))) {
                     keyword = searchKeys[key];
@@ -1570,16 +1548,12 @@ GLOBE_JS_LOGIC = r"""
         const highlightRegions = Array.from(activeMapNames).map(name => ({
             name: name,
             itemStyle: {
-                areaColor: '#0055ff',
-                borderColor: '#00ffff',
-                borderWidth: 1.5,
-                shadowColor: 'rgba(0, 255, 255, 0.8)',
-                shadowBlur: 20,
-                opacity: 0.9
+                areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5,
+                shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9
             }
         }));
 
-        const scatterData = serverData.map(s => ({
+        const scatterData = data.map(s => ({
             name: s.name, value: [s.lon, s.lat], itemStyle: { color: '#00ffff' }
         }));
         
@@ -1588,74 +1562,72 @@ GLOBE_JS_LOGIC = r"""
             symbolSize: 15, label: { show: true, position: 'top', formatter: 'My PC', color: '#FFD700' }
         });
 
-        const linesData = serverData.map(s => ({
+        const linesData = data.map(s => ({
             coords: [[s.lon, s.lat], [userLon, userLat]]
         }));
 
-        const option = {
+        return {
             backgroundColor: '#100C2A',
             geo: {
-                map: 'world',
-                roam: false, // ✨✨✨ 禁止漫游（拖拽+缩放）✨✨✨
-                zoom: 1.2,   // 设置一个合适的默认缩放比例
-                center: [15, 10], // 设置中心点，确保地图居中显示
+                map: 'world', roam: false, zoom: 1.2, center: [15, 10],
                 label: { show: false },
-                itemStyle: {
-                    areaColor: '#1B2631',
-                    borderColor: '#404a59',
-                    borderWidth: 1
-                },
-                emphasis: {
-                    itemStyle: { areaColor: '#2a333d' },
-                    label: { show: false }
-                },
+                itemStyle: { areaColor: '#1B2631', borderColor: '#404a59', borderWidth: 1 },
+                emphasis: { itemStyle: { areaColor: '#2a333d' }, label: { show: false } },
                 regions: highlightRegions 
             },
             series: [
                 {
-                    type: 'lines',
-                    coordinateSystem: 'geo',
-                    zlevel: 2,
-                    effect: {
-                        show: true, period: 4, trailLength: 0.5, 
-                        color: '#00ffff', symbol: 'arrow', symbolSize: 6
-                    },
-                    lineStyle: {
-                        color: '#00ffff', width: 1, opacity: 0, curveness: 0.2
-                    },
+                    type: 'lines', coordinateSystem: 'geo', zlevel: 2,
+                    effect: { show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 },
+                    lineStyle: { color: '#00ffff', width: 1, opacity: 0, curveness: 0.2 },
                     data: linesData
                 },
                 {
-                    type: 'scatter',
-                    coordinateSystem: 'geo',
-                    zlevel: 3,
-                    symbol: 'circle', symbolSize: 12,
+                    type: 'scatter', coordinateSystem: 'geo', zlevel: 3, symbol: 'circle', symbolSize: 12,
                     itemStyle: { color: '#00ffff', shadowBlur: 10, shadowColor: '#333' },
-                    label: {
-                        show: true, position: 'right', formatter: '{b}', 
-                        color: '#fff', fontSize: 16, fontWeight: 'bold', 
-                        textBorderColor: '#000', textBorderWidth: 2
-                    },
+                    label: { show: true, position: 'right', formatter: '{b}', color: '#fff', fontSize: 16, fontWeight: 'bold', textBorderColor: '#000', textBorderWidth: 2 },
                     data: scatterData
                 }
             ]
         };
-        myChart.setOption(option);
     }
+
+    // ✨✨✨ 暴露给外部的更新函数 ✨✨✨
+    window.updateGlobeMap = function(newData) {
+        if (!window.cachedWorldJson || !myChart) return;
+        
+        // 更新统计
+        updateStats(newData);
+        
+        // 使用缓存的坐标和地图数据重绘
+        let uLat = window.cachedUserLat || 39.9;
+        let uLon = window.cachedUserLon || 116.4;
+        
+        const option = buildOption(window.cachedWorldJson, newData, uLat, uLon);
+        myChart.setOption(option);
+    };
 
     fetch('/static/world.json')
         .then(response => response.json())
         .then(worldJson => {
             echarts.registerMap('world', worldJson);
+            window.cachedWorldJson = worldJson; // 缓存 GeoJSON
             
             let uLat = 39.9, uLon = 116.4; 
+            
+            const initMap = (lat, lon) => {
+                window.cachedUserLat = lat; window.cachedUserLon = lon;
+                const option = buildOption(worldJson, serverData, lat, lon);
+                myChart.setOption(option);
+            };
+
             if (navigator.geolocation) {
                 navigator.geolocation.getCurrentPosition(
-                    (p) => { renderMap(worldJson, p.coords.latitude, p.coords.longitude); },
-                    (e) => { renderMap(worldJson, uLat, uLon); }
+                    (p) => { initMap(p.coords.latitude, p.coords.longitude); },
+                    (e) => { initMap(uLat, uLon); }
                 );
             } else {
-                renderMap(worldJson, uLat, uLon);
+                initMap(uLat, uLon);
             }
 
             window.addEventListener('resize', () => myChart.resize());
@@ -6499,59 +6471,78 @@ async def refresh_dashboard_ui():
         
         # --- 1. 计算数据 ---
         for s in SERVERS_CACHE:
-            # 获取两类节点数据
             res = NODES_DATA.get(s['url'], []) or []
             custom = s.get('custom_nodes', []) or []
-            
             name = s.get('name', '未命名')
             srv_traffic = 0
             
-            # === A. 统计面板节点 (XUI) ===
             if res:
                 online_servers += 1
                 total_nodes += len(res)
                 for n in res: 
-                    u = int(n.get('up', 0)); d = int(n.get('down', 0)); t = u + d
+                    t = int(n.get('up', 0)) + int(n.get('down', 0))
                     total_traffic_bytes += t; srv_traffic += t
                     proto = str(n.get('protocol', 'unknown')).upper()
                     protocol_count[proto] = protocol_count.get(proto, 0) + 1
             
-            # === B. 统计自定义节点 (Hy2/XHTTP) [修复点] ===
             if custom:
-                total_nodes += len(custom) # 累加自定义节点数量
+                total_nodes += len(custom)
                 for cn in custom:
-                    # 统计协议分布
                     c_proto = str(cn.get('protocol', 'custom')).upper()
                     protocol_count[c_proto] = protocol_count.get(c_proto, 0) + 1
 
             server_traffic_map[name] = srv_traffic
 
-        # --- 2. 更新 UI (静默更新) ---
-        
-        # 更新顶部卡片数字
+        # --- 2. 更新 UI 文字和图表 ---
+        # 顶部卡片
         if DASHBOARD_REFS.get('servers'): DASHBOARD_REFS['servers'].set_text(f"{online_servers}/{total_servers}")
         if DASHBOARD_REFS.get('nodes'): DASHBOARD_REFS['nodes'].set_text(str(total_nodes))
         if DASHBOARD_REFS.get('traffic'): DASHBOARD_REFS['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
         if DASHBOARD_REFS.get('subs'): DASHBOARD_REFS['subs'].set_text(str(len(SUBS_CACHE)))
 
-        # 更新柱状图 (流量排行)
+        # 柱状图
         if DASHBOARD_REFS.get('bar_chart'):
             sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
             names = [x[0] for x in sorted_traffic]
             values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
-            
             DASHBOARD_REFS['bar_chart'].options['xAxis']['data'] = names
             DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = values
             DASHBOARD_REFS['bar_chart'].update()
 
-        # 更新饼图 (协议分布)
+        # 饼图
         if DASHBOARD_REFS.get('pie_chart'):
             pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
+            if not pie_data: pie_data = [{'name': '暂无数据', 'value': 0}]
             DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
             DASHBOARD_REFS['pie_chart'].update()
 
-        if DASHBOARD_REFS.get('map_info'):
-             DASHBOARD_REFS['map_info'].set_text('Live Rendering')
+        # --- ✨✨✨ 3. 新增：更新 3D 地图 (Globe) ✨✨✨ ---
+        globe_data_list = []
+        seen_locations = set()
+        for s in SERVERS_CACHE:
+            lat, lon = None, None
+            if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
+            else:
+                coords = get_coords_from_name(s.get('name', ''))
+                if coords: lat, lon = coords[0], coords[1]
+            
+            if lat is not None and lon is not None:
+                coord_key = (round(lat, 2), round(lon, 2))
+                if coord_key not in seen_locations:
+                    seen_locations.add(coord_key)
+                    flag_only = "📍"
+                    country_name = s.get('_detected_region', '')
+                    try:
+                        full_group = detect_country_group(s.get('name', ''), s)
+                        flag_only = full_group.split(' ')[0]
+                    except: pass
+                    globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name})
+        
+        # 只有当前是在仪表盘页面时才执行 JS，防止报错
+        if CURRENT_VIEW_STATE.get('scope') == 'DASHBOARD':
+            import json
+            json_data = json.dumps(globe_data_list, ensure_ascii=False)
+            ui.run_javascript(f'if(window.updateGlobeMap) window.updateGlobeMap({json_data});')
 
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
@@ -6669,7 +6660,7 @@ async def load_dashboard_stats():
         }
 
     with content_container:
-        # JS 轮询脚本 (保持不变)
+        # JS 轮询脚本 (保持不变，作为前端双重保险)
         ui.run_javascript("""
         if (window.dashInterval) clearInterval(window.dashInterval);
         window.dashInterval = setInterval(async () => {
@@ -6713,29 +6704,26 @@ async def load_dashboard_stats():
 
         ui.label('系统概览').classes('text-3xl font-bold mb-4 text-slate-800 tracking-tight')
         
-        # === A. 顶部统计卡片 (✨✨✨ 高度缩小至 2/3 ✨✨✨) ===
+        # === A. 顶部统计卡片 (✨✨✨ 关键修改：赋值给 DASHBOARD_REFS ✨✨✨) ===
         with ui.row().classes('w-full gap-4 mb-6 items-stretch'):
-            def create_stat_card(dom_id, title, sub_text, icon, gradient, init_val):
-                # 修改点 1: p-6 -> p-3 (减少内边距)
-                # 修改点 2: 移除 hover:scale 动画，改为简单的阴影变化，防止布局抖动
+            # 增加 ref_key 参数
+            def create_stat_card(ref_key, dom_id, title, sub_text, icon, gradient, init_val):
                 with ui.card().classes(f'flex-1 p-3 shadow border-none text-white {gradient} rounded-xl relative overflow-hidden'):
-                    # 修改点 3: 调整装饰圆圈位置 (-top-6 -> -top-4)
                     ui.element('div').classes('absolute -right-4 -top-4 w-20 h-20 bg-white opacity-10 rounded-full')
                     with ui.row().classes('items-center justify-between w-full relative z-10'):
-                        with ui.column().classes('gap-0'): # 修改点 4: gap-1 -> gap-0
+                        with ui.column().classes('gap-0'):
                             ui.label(title).classes('opacity-90 text-[10px] font-bold uppercase tracking-wider')
-                            # 修改点 5: text-3xl -> text-2xl (数值字体变小)
-                            ui.label(init_val).props(f'id={dom_id}').classes('text-2xl font-extrabold tracking-tight my-0.5')
+                            # ✨✨✨ 赋值给全局引用字典 ✨✨✨
+                            DASHBOARD_REFS[ref_key] = ui.label(init_val).props(f'id={dom_id}').classes('text-2xl font-extrabold tracking-tight my-0.5')
                             ui.label(sub_text).classes('opacity-70 text-[10px] font-medium')
-                        # 修改点 6: text-4xl -> text-3xl (图标变小)
                         ui.icon(icon).classes('text-3xl opacity-80')
 
-            create_stat_card('stat-servers', '在线服务器', 'Online / Total', 'dns', 'bg-gradient-to-br from-blue-500 to-indigo-600', init_data['servers'])
-            create_stat_card('stat-nodes', '节点总数', 'Active Nodes', 'hub', 'bg-gradient-to-br from-purple-500 to-pink-600', init_data['nodes'])
-            create_stat_card('stat-traffic', '总流量消耗', 'Upload + Download', 'bolt', 'bg-gradient-to-br from-emerald-500 to-teal-600', init_data['traffic'])
-            create_stat_card('stat-subs', '订阅配置', 'Subscriptions', 'rss_feed', 'bg-gradient-to-br from-orange-400 to-red-500', init_data['subs'])
+            create_stat_card('servers', 'stat-servers', '在线服务器', 'Online / Total', 'dns', 'bg-gradient-to-br from-blue-500 to-indigo-600', init_data['servers'])
+            create_stat_card('nodes', 'stat-nodes', '节点总数', 'Active Nodes', 'hub', 'bg-gradient-to-br from-purple-500 to-pink-600', init_data['nodes'])
+            create_stat_card('traffic', 'stat-traffic', '总流量消耗', 'Upload + Download', 'bolt', 'bg-gradient-to-br from-emerald-500 to-teal-600', init_data['traffic'])
+            create_stat_card('subs', 'stat-subs', '订阅配置', 'Subscriptions', 'rss_feed', 'bg-gradient-to-br from-orange-400 to-red-500', init_data['subs'])
 
-        # === B. 图表区域 (✨✨✨ 饼图缩小 ✨✨✨) ===
+        # === B. 图表区域 (✨✨✨ 关键修改：赋值给 DASHBOARD_REFS ✨✨✨) ===
         with ui.row().classes('w-full gap-4 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
             
             # --- 流量排行 (左侧) ---
@@ -6746,31 +6734,31 @@ async def load_dashboard_stats():
                         ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse')
                         ui.label('Live').classes('text-[10px] font-bold text-green-700')
                 
-                ui.echart({
+                # ✨✨✨ 赋值 Bar Chart ✨✨✨
+                DASHBOARD_REFS['bar_chart'] = ui.echart({
                     'tooltip': {'trigger': 'axis'},
                     'grid': {'left': '2%', 'right': '3%', 'bottom': '2%', 'top': '10%', 'containLabel': True},
                     'xAxis': {'type': 'category', 'data': init_data['bar_chart']['names'], 'axisLabel': {'interval': 0, 'rotate': 30, 'color': '#64748b', 'fontSize': 10}},
                     'yAxis': {'type': 'value', 'splitLine': {'lineStyle': {'type': 'dashed', 'color': '#f1f5f9'}}},
                     'series': [{'type': 'bar', 'data': init_data['bar_chart']['values'], 'barWidth': '40%', 'itemStyle': {'borderRadius': [3, 3, 0, 0], 'color': '#6366f1'}}]
-                }).classes('w-full h-56').props('id=chart-bar') # 稍微降低高度
+                }).classes('w-full h-56').props('id=chart-bar')
 
-            # --- 区域分布 (右侧 - 缩小版) ---
-            # 修改点 7: p-6 -> p-4
+            # --- 区域分布 (右侧) ---
             with ui.card().classes('w-full xl:w-1/3 p-4 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 ui.label('🌏 服务器分布').classes('text-base font-bold text-slate-700 mb-1')
                 
                 color_palette = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#6366f1', '#ec4899', '#14b8a6', '#f97316']
                 
-                # 修改点 8: h-80 -> h-56 (高度显著减小)
-                ui.echart({
+                # ✨✨✨ 赋值 Pie Chart ✨✨✨
+                DASHBOARD_REFS['pie_chart'] = ui.echart({
                     'tooltip': {'trigger': 'item', 'formatter': '{b}: <br/><b>{c} 台</b> ({d}%)'},
                     'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 10, 'textStyle': {'color': '#64748b', 'fontSize': 11}},
                     'color': color_palette,
                     'series': [{
                         'name': '服务器分布', 
                         'type': 'pie', 
-                        'radius': ['40%', '70%'], # 调整内径比例，让圆环看起来更精致
-                        'center': ['50%', '42%'], #稍微上移中心点，给Legend留空间
+                        'radius': ['40%', '70%'],
+                        'center': ['50%', '42%'],
                         'avoidLabelOverlap': False,
                         'itemStyle': {'borderRadius': 4, 'borderColor': '#fff', 'borderWidth': 1},
                         'label': { 'show': False, 'position': 'center' },
@@ -6780,20 +6768,21 @@ async def load_dashboard_stats():
                     }]
                 }).classes('w-full h-56').props('id=chart-pie')
 
-        # === C. 底部地图区域 (保持不变) ===
+        # === C. 底部地图区域 (结构保持不变，更新逻辑在 refresh_dashboard_ui 中) ===
         with ui.row().classes('w-full gap-6 mb-6'):
             with ui.card().classes('w-full p-0 shadow-md border-none rounded-xl bg-slate-900 overflow-hidden relative'):
                 with ui.row().classes('w-full px-6 py-3 bg-slate-800/50 border-b border-gray-700 justify-between items-center z-10 relative'):
                     with ui.row().classes('gap-2 items-center'):
                         ui.icon('public', color='blue-4').classes('text-xl')
                         ui.label('全球节点实景 (Global View)').classes('text-base font-bold text-white')
-                    ui.label('Live Rendering').classes('text-[10px] text-gray-400')
+                    # ✨✨✨ 赋值 Label 以便显示更新状态 ✨✨✨
+                    DASHBOARD_REFS['map_info'] = ui.label('Live Rendering').classes('text-[10px] text-gray-400')
 
+                # 计算初始地图数据
                 globe_data_list = []
                 seen_locations = set()
                 total_server_count = len(SERVERS_CACHE)
-                flag_map_py = {'CN':'China', 'HK':'Hong Kong', 'TW':'Taiwan', 'US':'United States', 'JP':'Japan', 'KR':'South Korea', 'SG':'Singapore', 'RU':'Russia', 'DE':'Germany', 'GB':'United Kingdom'}
-
+                
                 for s in SERVERS_CACHE:
                     lat, lon = None, None
                     if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
@@ -6810,13 +6799,16 @@ async def load_dashboard_stats():
                             try:
                                 full_group = detect_country_group(s.get('name', ''), s)
                                 flag_only = full_group.split(' ')[0]
-                                if not country_name and flag_only in flag_map_py: country_name = flag_map_py[flag_only]
                             except: pass
                             globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only, 'country': country_name})
 
                 import json
                 json_data = json.dumps(globe_data_list, ensure_ascii=False)
+                
+                # 渲染 HTML 容器
                 ui.html(GLOBE_STRUCTURE, sanitize=False).classes('w-full h-[650px] overflow-hidden')
+                
+                # 注入数据和 JS 逻辑 (注意：GLOBE_JS_LOGIC 需要使用上面修复后的版本)
                 ui.run_javascript(f'window.GLOBE_DATA = {json_data}; window.SERVER_TOTAL = {total_server_count};')
                 ui.run_javascript(GLOBE_JS_LOGIC)
         
@@ -8430,37 +8422,43 @@ def open_mobile_server_detail(server_conf):
     except Exception as e:
         print(f"Mobile Detail error: {e}")
         
-# ================= [电脑端] 详情弹窗 =================
+# ================= [电脑端] 详情弹窗 (最终完美版) =================
 def open_pc_server_detail(server_conf):
     try:
         # 1. 获取当前主题状态
         is_dark = app.storage.user.get('is_dark', True)
         
         # 2. 定义双模样式 
-        
-        # 文字颜色：白天深蓝灰 / 黑夜浅灰
         LABEL_STYLE = 'text-slate-500 dark:text-gray-400 text-sm font-medium'
         VALUE_STYLE = 'text-[#1e293b] dark:text-gray-200 font-mono text-sm font-bold'
         SECTION_TITLE = 'text-[#1e293b] dark:text-gray-200 text-base font-black mb-4 flex items-center gap-2'
-        
-        # 背景颜色：
-        # 白天：高透白底 + 高斯模糊 (backdrop-blur-xl) | 黑夜：深色实底
         DIALOG_BG = 'bg-white/85 backdrop-blur-xl dark:bg-[#0d1117] dark:backdrop-blur-none'
-        # 内部卡片：白天半透白 | 黑夜：黑灰
         CARD_BG   = 'bg-white/60 dark:bg-[#161b22]' 
-        
-        # 边框与投影：
-        # 白天：半透白边框 + 淡蓝阴影 | 黑夜：深灰边框 + 无阴影
         BORDER_STYLE = 'border border-white/50 dark:border-[#30363d]'
         SHADOW_STYLE = 'shadow-[0_8px_32px_0_rgba(31,38,135,0.15)] dark:shadow-2xl'
-        
-        # 进度条底色
         TRACK_COLOR = 'blue-1' if not is_dark else 'grey-9'
 
         visible_series = {0: True, 1: True, 2: True}
         is_smooth = {'value': False}
 
-        # 样式注入
+        # 智能容量格式化
+        def fmt_capacity(b):
+            if b is None: return "0 B"
+            try:
+                if isinstance(b, str):
+                    import re
+                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", b)
+                    val = float(nums[0]) if nums else 0
+                else:
+                    val = float(b)
+                if val > 1024 * 1024:
+                    if val < 1024**3: return f"{val/1024**2:.1f} MB"
+                    return f"{val/1024**3:.1f} GB"
+                if val > 0: return f"{val:.1f} GB"
+                return "0 B"
+            except:
+                return str(b)
+
         ui.add_head_html('''
             <style>
                 .ping-card-base { border-width: 2px; border-style: solid; transition: all 0.3s; }
@@ -8468,10 +8466,9 @@ def open_pc_server_detail(server_conf):
             </style>
         ''')
         
-        # 应用新的背景和阴影样式
         with ui.dialog() as d, ui.card().classes(f'p-0 overflow-hidden flex flex-col {DIALOG_BG} {SHADOW_STYLE}').style('width: 1000px; max-width: 95vw; border-radius: 12px;'):
             
-            # --- 标题栏 (背景适配) ---
+            # --- 标题栏 ---
             with ui.row().classes(f'w-full items-center justify-between p-4 {CARD_BG} border-b border-white/50 dark:border-[#30363d] flex-shrink-0'):
                 with ui.row().classes('items-center gap-3'):
                     flag = "🏳️"
@@ -8487,7 +8484,7 @@ def open_pc_server_detail(server_conf):
                 
                 # 第一行：左右分栏
                 with ui.row().classes('w-full gap-6 no-wrap items-stretch'):
-                    # 左侧：资源 (背景适配)
+                    # 左侧：资源
                     with ui.column().classes(f'flex-1 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
                         ui.label('资源使用情况').classes(SECTION_TITLE)
                         def progress_block(label, key, icon, color_class):
@@ -8496,19 +8493,17 @@ def open_pc_server_detail(server_conf):
                                     with ui.row().classes('items-center gap-2'):
                                         ui.icon(icon).classes('text-gray-400 dark:text-gray-500 text-xs'); ui.label(label).classes(LABEL_STYLE)
                                     refs[f'{key}_pct'] = ui.label('0.0%').classes('text-gray-500 dark:text-gray-400 text-xs font-mono')
-                                # 进度条底色适配
                                 refs[f'{key}_bar'] = ui.linear_progress(value=0, show_value=False).props(f'color={color_class} track-color={TRACK_COLOR}').classes('h-1.5 rounded-full')
                                 with ui.row().classes('w-full justify-end'):
-                                    refs[f'{key}_val'] = ui.label('0 GB / 0 GB').classes('text-[11px] text-gray-500 font-mono mt-1')
+                                    refs[f'{key}_val'] = ui.label('-- / --').classes('text-[11px] text-gray-500 font-mono mt-1')
                         progress_block('CPU', 'cpu', 'settings_suggest', 'blue-5')
                         progress_block('RAM', 'mem', 'memory', 'green-5')
                         progress_block('DISK', 'disk', 'storage', 'purple-5')
 
-                    # 右侧：系统 (背景适配)
+                    # 右侧：系统
                     with ui.column().classes(f'w-[400px] p-5 rounded-xl {CARD_BG} {BORDER_STYLE} justify-between'):
                         ui.label('系统资讯').classes(SECTION_TITLE)
                         def info_line(label, icon, key):
-                            # 分割线颜色适配
                             with ui.row().classes('w-full items-center justify-between py-3 border-b border-white/50 dark:border-[#30363d] last:border-0'):
                                 with ui.row().classes('items-center gap-2'):
                                     ui.icon(icon).classes('text-gray-400 dark:text-gray-500 text-sm'); ui.label(label).classes(LABEL_STYLE)
@@ -8518,7 +8513,7 @@ def open_pc_server_detail(server_conf):
                         info_line('虚拟化', 'cloud_queue', 'virt')
                         info_line('在线时长', 'timer', 'uptime')
 
-                # 第二行：延迟卡片 (背景适配)
+                # 第二行：延迟卡片
                 with ui.row().classes('w-full gap-4 mt-6'):
                     def toggle_series(idx, card_el, color_cls):
                         visible_series[idx] = not visible_series[idx]
@@ -8529,9 +8524,7 @@ def open_pc_server_detail(server_conf):
 
                     def ping_card(name, color, key, idx):
                         color_border_cls = f'border-{color}-500'
-                        # 使用 CARD_BG
                         base_cls = f'flex-1 p-4 rounded-xl {CARD_BG} ping-card-base cursor-pointer {color_border_cls}'
-                        
                         with ui.element('div').classes(base_cls) as card:
                             card.on('click', lambda _, i=idx, c=card, col=color_border_cls: toggle_series(i, c, col))
                             with ui.row().classes('w-full justify-between items-center mb-1'):
@@ -8539,26 +8532,20 @@ def open_pc_server_detail(server_conf):
                             with ui.row().classes('items-baseline gap-1'):
                                 refs[f'{key}_cur'] = ui.label('--').classes(f'text-2xl font-black font-mono text-[#1e293b] dark:text-white')
                                 ui.label('ms').classes('text-gray-500 text-[10px]')
-                    
                     ping_card('电信', 'blue', 'ping_ct', 0)
                     ping_card('联通', 'orange', 'ping_cu', 1)
                     ping_card('移动', 'green', 'ping_cm', 2)
 
-                # 第三行：趋势图 (背景适配)
+                # 第三行：趋势图
                 with ui.column().classes(f'w-full mt-6 p-5 rounded-xl {CARD_BG} {BORDER_STYLE} overflow-hidden'):
-                    
-                    # 工具栏
                     with ui.row().classes('w-full justify-between items-center mb-4'):
                         with ui.row().classes('items-center gap-4'):
                             ui.label('网络质量趋势').classes(f'text-sm font-bold text-[#1e293b] dark:text-gray-200')
-                            # 平滑开关背景适配
                             switch_bg = 'bg-blue-50/50 dark:bg-[#0d1117]'
                             with ui.row().classes(f'items-center gap-2 cursor-pointer {switch_bg} px-3 py-1 rounded-full border border-white/50 dark:border-[#30363d]').on('click', lambda: smooth_sw.set_value(not smooth_sw.value)):
                                 smooth_sw = ui.switch().props('dense size=sm color=blue')
                                 ui.label('平滑曲线').classes('text-xs text-slate-500 dark:text-gray-400 select-none')
                                 smooth_sw.on_value_change(lambda e: is_smooth.update({'value': e.value}))
-
-                        # 标签页背景适配
                         tab_bg = 'bg-blue-50/50 dark:bg-[#0d1117]'
                         with ui.tabs().props('dense no-caps indicator-color=blue active-color=blue').classes(f'{tab_bg} rounded-lg p-1') as chart_tabs:
                             tab_cls = 'px-4 text-xs text-slate-500 dark:text-gray-400'
@@ -8574,7 +8561,6 @@ def open_pc_server_detail(server_conf):
                             result.append(alpha * data[i] + (1 - alpha) * result[-1])
                         return [int(x) for x in result]
 
-                    # ECharts 颜色适配
                     chart_text = '#64748b' if not is_dark else '#94a3b8'
                     split_line = '#e2e8f0' if not is_dark else '#30363d'
                     tooltip_bg = 'rgba(255, 255, 255, 0.95)' if not is_dark else 'rgba(13, 17, 23, 0.95)'
@@ -8586,16 +8572,11 @@ def open_pc_server_detail(server_conf):
                         'color': ['#3b82f6', '#f97316', '#22c55e'], 
                         'legend': { 'show': False },
                         'tooltip': {
-                            'trigger': 'axis',
-                            'backgroundColor': tooltip_bg,
-                            'borderColor': tooltip_border,
-                            'textStyle': {'color': tooltip_text},
+                            'trigger': 'axis', 'backgroundColor': tooltip_bg, 'borderColor': tooltip_border, 'textStyle': {'color': tooltip_text},
                             'axisPointer': {'type': 'line', 'lineStyle': {'color': '#8b949e', 'type': 'dashed'}},
                             'formatter': '{b}<br/>{a0}: {c0}ms<br/>{a1}: {c1}ms<br/>{a2}: {c2}ms'
                         },
-                        'dataZoom': [
-                            {'type': 'inside', 'xAxisIndex': 0, 'zoomLock': False}
-                        ],
+                        'dataZoom': [{'type': 'inside', 'xAxisIndex': 0, 'zoomLock': False}],
                         'grid': { 'left': '1%', 'right': '1%', 'bottom': '5%', 'top': '15%', 'containLabel': True },
                         'xAxis': { 'type': 'category', 'boundaryGap': False, 'axisLabel': { 'color': chart_text } },
                         'yAxis': { 'type': 'value', 'splitLine': { 'lineStyle': { 'color': split_line } }, 'axisLabel': { 'color': chart_text } },
@@ -8613,15 +8594,62 @@ def open_pc_server_detail(server_conf):
                         raw_cache = PROBE_DATA_CACHE.get(server_conf['url'], {})
                         static = raw_cache.get('static', {})
 
-                        refs['cpu_pct'].set_text(f"{status.get('cpu_usage', 0)}%"); refs['cpu_bar'].set_value(status.get('cpu_usage', 0) / 100)
+                        # ✨✨✨ CPU 百分比修正：强制 1 位小数 ✨✨✨
+                        cpu_val = float(status.get('cpu_usage', 0))
+                        refs['cpu_pct'].set_text(f"{cpu_val:.1f}%") 
+                        refs['cpu_bar'].set_value(cpu_val / 100)
                         
-                        mem_p, mem_t = status.get('mem_usage', 0), status.get('mem_total', 0)
-                        refs['mem_pct'].set_text(f"{mem_p}%"); refs['mem_bar'].set_value(mem_p / 100)
-                        refs['mem_val'].set_text(f"{round(mem_t * (mem_p / 100), 2)} GB / {mem_t} GB")
+                        # ✨✨✨ 内存 百分比修正 + 智能容量 ✨✨✨
+                        mem_p = float(status.get('mem_usage', 0))
+                        refs['mem_pct'].set_text(f"{mem_p:.1f}%") # 强制 1 位小数
+                        refs['mem_bar'].set_value(mem_p / 100)
+                        
+                        mem_t_raw = status.get('mem_total', 0)
+                        total_str = fmt_capacity(mem_t_raw)
+                        
+                        used_str = "--"
+                        if status.get('mem_used'):
+                            used_str = fmt_capacity(status.get('mem_used'))
+                        else:
+                            try:
+                                val_t = 0
+                                if isinstance(mem_t_raw, str):
+                                    import re
+                                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", mem_t_raw)
+                                    val_t = float(nums[0]) if nums else 0
+                                else:
+                                    val_t = float(mem_t_raw)
+                                numeric_used = val_t * (mem_p / 100.0)
+                                used_str = fmt_capacity(numeric_used)
+                            except:
+                                used_str = "--"
+                        refs['mem_val'].set_text(f"{used_str} / {total_str}")
 
-                        disk_p, disk_t = status.get('disk_usage', 0), status.get('disk_total', 0)
-                        refs['disk_pct'].set_text(f"{disk_p}%"); refs['disk_bar'].set_value(disk_p / 100)
-                        refs['disk_val'].set_text(f"{round(disk_t * (disk_p / 100), 2)} GB / {disk_t} GB")
+                        # ✨✨✨ 硬盘 百分比修正 + 智能容量 ✨✨✨
+                        disk_p = float(status.get('disk_usage', 0))
+                        refs['disk_pct'].set_text(f"{disk_p:.1f}%") # 强制 1 位小数
+                        refs['disk_bar'].set_value(disk_p / 100)
+                        
+                        disk_t_raw = status.get('disk_total', 0)
+                        disk_total_str = fmt_capacity(disk_t_raw)
+                        
+                        disk_used_str = "--"
+                        if status.get('disk_used'):
+                            disk_used_str = fmt_capacity(status.get('disk_used'))
+                        else:
+                            try:
+                                val_d = 0
+                                if isinstance(disk_t_raw, str):
+                                    import re
+                                    nums = re.findall(r"[-+]?\d*\.\d+|\d+", disk_t_raw)
+                                    val_d = float(nums[0]) if nums else 0
+                                else:
+                                    val_d = float(disk_t_raw)
+                                numeric_disk_used = val_d * (disk_p / 100.0)
+                                disk_used_str = fmt_capacity(numeric_disk_used)
+                            except:
+                                disk_used_str = "--"
+                        refs['disk_val'].set_text(f"{disk_used_str} / {disk_total_str}")
 
                         raw_arch = static.get('arch', '').lower()
                         display_arch = "AMD" if "x86" in raw_arch or "amd" in raw_arch else "ARM" if "arm" in raw_arch or "aarch" in raw_arch else raw_arch.upper()
@@ -8643,7 +8671,6 @@ def open_pc_server_detail(server_conf):
                             elif current_mode == '3h': duration = 10800
                             elif current_mode == '6h': duration = 21600 
                             else: duration = 3600
-                            
                             cutoff = time.time() - duration
                             sliced = [p for p in history_data if p['ts'] > cutoff]
                             if sliced:
@@ -8651,25 +8678,22 @@ def open_pc_server_detail(server_conf):
                                 raw_cu = [p['cu'] for p in sliced]
                                 raw_cm = [p['cm'] for p in sliced]
                                 times = [p['time_str'] for p in sliced]
-
                                 if is_smooth['value']:
                                     final_ct = calculate_ewma(raw_ct)
                                     final_cu = calculate_ewma(raw_cu)
                                     final_cm = calculate_ewma(raw_cm)
                                 else:
                                     final_ct, final_cu, final_cm = raw_ct, raw_cu, raw_cm
-
                                 chart.options['xAxis']['data'] = times
                                 chart.options['series'][0]['data'] = final_ct if visible_series[0] else []
                                 chart.options['series'][1]['data'] = final_cu if visible_series[1] else []
                                 chart.options['series'][2]['data'] = final_cm if visible_series[2] else []
-                                
                                 chart.update()
                     except: pass
 
                 chart_tabs.on_value_change(update_dark_detail)
 
-            # --- 底部 (背景适配) ---
+            # --- 底部 ---
             with ui.row().classes(f'w-full justify-center p-2 {CARD_BG} border-t border-white/50 dark:border-[#30363d]'):
                 ui.label('Powered by X-Fusion Monitor').classes('text-[10px] text-gray-500 dark:text-gray-600 font-mono italic')
 
@@ -8737,11 +8761,12 @@ async def status_page_router(request: Request):
         
 # ================= 电脑端大屏显示  =================        
 import asyncio 
+import traceback
 
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
-    # 1. 启用 Dark Mode 管理
+    # 1. 启用 Dark Mode
     dark_mode = ui.dark_mode()
     if app.storage.user.get('is_dark') is None:
         app.storage.user['is_dark'] = True
@@ -8757,25 +8782,17 @@ async def render_desktop_status_page():
             body { margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; transition: background-color 0.3s ease; }
             body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
             body.body--dark { background-color: #0b1121; }
-
             .status-card { transition: all 0.3s ease; border-radius: 16px; }
             body:not(.body--dark) .status-card { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.8); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #1e293b; }
             body.body--dark .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); color: #e2e8f0; }
             .status-card:hover { transform: translateY(-3px); }
-            
             .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; }
             body.body--dark .offline-card { background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; }
             body:not(.body--dark) .offline-card { background: rgba(254, 226, 226, 0.95) !important; }
-
             .scrollbar-hide::-webkit-scrollbar { display: none; }
             .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
             .prog-bar { transition: width 0.5s ease-out; }
-            
-            #public-map-container {
-                contain: strict;
-                transform: translateZ(0);
-                will-change: transform;
-            }
+            #public-map-container { contain: strict; transform: translateZ(0); will-change: transform; z-index: 0; }
         </style>
     ''')
 
@@ -8792,106 +8809,86 @@ async def render_desktop_status_page():
         groups_list.extend(customs) 
         return groups_list
     
-    def get_ping_color_safe(val):
-        if val <= 0: return 'text-red-500', '超时'
-        if val < 80: return 'text-green-500 dark:text-green-400', f'{val}ms'
-        if val < 150: return 'text-yellow-600 dark:text-yellow-400', f'{val}ms'
-        return 'text-red-500 dark:text-red-400', f'{val}ms'
-    
+    def fmt_capacity(b):
+        if b is None: return "0 B"
+        try:
+            if isinstance(b, str):
+                import re
+                nums = re.findall(r"[-+]?\d*\.\d+|\d+", b)
+                val = float(nums[0]) if nums else 0
+            else:
+                val = float(b)
+            if val > 1024 * 1024:
+                if val < 1024**3: return f"{val/1024**2:.1f} MB"
+                return f"{val/1024**3:.1f} GB"
+            if val > 0: return f"{val:.1f} GB"
+            return "0 B"
+        except: return str(b)
+
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
-    
-    def fmt_speed(b):
-        if b < 1024: return f"{int(b)} B"
-        if b < 1024**2: return f"{int(b/1024)} K"
-        return f"{int(b/1024**2)} M"
+    def fmt_speed(b): return f"{int(b)} B" if b < 1024 else (f"{int(b/1024)} K" if b < 1024**2 else f"{int(b/1024**2)} M")
 
     def prepare_map_data():
-        # 分离城市点（用于飞线）和国旗点（用于显示国旗）
-        city_points_map = {} 
-        flag_points_map = {} 
-        
-        active_regions = set()
-        region_stats = {} 
-        name_to_flag_map = {} 
-        
-        CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
-        from collections import Counter; country_counter = Counter()
-        snapshot = list(SERVERS_CACHE)
-        
-        for s in snapshot:
-            group_str = detect_country_group(s['name'], s)
-            country_counter[group_str] += 1
-            parts = group_str.split(' ')
-            flag_icon = parts[0] if len(parts) > 0 else "📍" 
-            cn_name = parts[1] if len(parts) > 1 else group_str
+        try:
+            city_points_map = {} 
+            flag_points_map = {} 
+            active_regions = set()
+            region_stats = {} 
+            name_to_flag_map = {} 
+            CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), '雅加达': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07) }
+            from collections import Counter; country_counter = Counter()
+            snapshot = list(SERVERS_CACHE)
             
-            lat, lon = None, None
-            for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
-                if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
-            if not lat:
-                if 'lat' in s: lat, lon = s['lat'], s['lon']
-                else: 
-                    coords = get_coords_from_name(s.get('name', ''))
-                    if coords: lat, lon = coords[0], coords[1]
+            for s in snapshot:
+                group_str = detect_country_group(s['name'], s); country_counter[group_str] += 1
+                parts = group_str.split(' '); flag_icon = parts[0] if len(parts) > 0 else "📍"; cn_name = parts[1] if len(parts) > 1 else group_str
+                lat, lon = None, None
+                for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
+                    if city_key in s.get('name', ''): lat, lon = c_lat, c_lon; break
+                if not lat:
+                    if 'lat' in s: lat, lon = s['lat'], s['lon']
+                    else: 
+                        coords = get_coords_from_name(s.get('name', ''))
+                        if coords: lat, lon = coords[0], coords[1]
+                map_name_en = get_echarts_region_name(s.get('name', ''))
+                if not map_name_en: map_name_en = s.get('_detected_region', '')
+                if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
+                if lat and lon:
+                    coord_key = f"{lat},{lon}"
+                    if coord_key not in city_points_map: city_points_map[coord_key] = {'name': s['name'], 'value': [lon, lat]}
+                    if flag_icon not in flag_points_map: flag_points_map[flag_icon] = {'name': flag_icon, 'value': [lon, lat], 'country': map_name_en }
+                if map_name_en: active_regions.add(map_name_en); name_to_flag_map[map_name_en] = flag_icon
+                if flag_icon not in region_stats: region_stats[flag_icon] = {'flag': flag_icon, 'cn': cn_name, 'total': 0, 'online': 0, 'list': []}
+                rs = region_stats[flag_icon]; rs['total'] += 1
+                is_on = s.get('_status') == 'online'
+                if is_on: rs['online'] += 1
+                if len(rs['list']) < 15: rs['list'].append({'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline'})
             
-            map_name_en = get_echarts_region_name(s.get('name', ''))
-            if not map_name_en: map_name_en = s.get('_detected_region', '')
-            if map_name_en and map_name_en.upper() in MATCH_MAP: map_name_en = MATCH_MAP[map_name_en.upper()]
+            pie_data = []
+            if country_counter:
+                sorted_counts = country_counter.most_common(5)
+                for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
+                others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
+                if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
+            else:
+                pie_data.append({'name': '暂无数据', 'value': 0}) # 防止饼图为空
 
-            if lat and lon:
-                coord_key = f"{lat},{lon}"
-                if coord_key not in city_points_map:
-                    city_points_map[coord_key] = {'name': s['name'], 'value': [lon, lat]}
-                
-                # 国旗点：每个国家只存一个，name 直接设为 Emoji
-                if flag_icon not in flag_points_map:
-                    flag_points_map[flag_icon] = {
-                        'name': flag_icon, # ✨ 核心：name就是国旗图标
-                        'value': [lon, lat],
-                        'country': map_name_en 
-                    }
+            city_list = list(city_points_map.values()); flag_list = list(flag_points_map.values())
             
-            if map_name_en:
-                active_regions.add(map_name_en)
-                name_to_flag_map[map_name_en] = flag_icon
-            
-            if flag_icon not in region_stats:
-                region_stats[flag_icon] = {'flag': flag_icon, 'cn': cn_name, 'total': 0, 'online': 0, 'list': []}
-            
-            rs = region_stats[flag_icon]
-            rs['total'] += 1
-            is_on = s.get('_status') == 'online'
-            if is_on: rs['online'] += 1
-            if len(rs['list']) < 15:
-                rs['list'].append({'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline'})
-
-        pie_data = []
-        sorted_counts = country_counter.most_common(5)
-        for k, v in sorted_counts: pie_data.append({'name': f"{k} ({v})", 'value': v})
-        others = sum(country_counter.values()) - sum(x[1] for x in sorted_counts)
-        if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
-        
-        city_list = list(city_points_map.values())
-        flag_list = list(flag_points_map.values())
-
-        return (json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions)}, ensure_ascii=False), 
-                pie_data, len(active_regions), 
-                json.dumps(region_stats, ensure_ascii=False),
-                json.dumps(name_to_flag_map, ensure_ascii=False))
+            # 关键：确保返回完整的JSON结构，即使列表为空
+            return (json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions)}, ensure_ascii=False), pie_data, len(active_regions), json.dumps(region_stats, ensure_ascii=False), json.dumps(name_to_flag_map, ensure_ascii=False))
+        except Exception as e:
+            print(f"[ERROR] prepare_map_data failed: {e}")
+            # 失败兜底
+            return (json.dumps({'cities': [], 'flags': [], 'regions': []}), [], 0, "{}", "{}")
 
     chart_data, pie_data, region_count, region_stats_json, name_map_json = prepare_map_data()
 
     # ================= UI 布局 =================
-    
-    # 1. 独立地图层
-    with ui.element('div').classes('fixed top-0 left-0 w-full h-[35vh] min-h-[300px] max-h-[500px] z-0') \
-        .style('z-index: 0; contain: size layout paint;'): 
+    with ui.element('div').classes('fixed top-0 left-0 w-full h-[35vh] min-h-[300px] max-h-[500px] z-0').style('z-index: 0; contain: size layout paint;'): 
         ui.html('<div id="public-map-container" style="width:100%; height:100%;"></div>', sanitize=False).classes('w-full h-full')
 
-    # 2. 覆盖层
     with ui.column().classes('w-full h-screen p-0 gap-0 overflow-hidden flex flex-col absolute top-0 left-0 pointer-events-none'):
-        
-        # --- 顶部 Header ---
         with ui.element('div').classes('w-full h-[35vh] min-h-[300px] max-h-[500px] relative p-0 shrink-0 pointer-events-none'):
             with ui.row().classes('absolute top-6 left-8 right-8 z-50 justify-between items-start pointer-events-auto'):
                 with ui.column().classes('gap-1'):
@@ -8905,7 +8902,6 @@ async def render_desktop_status_page():
                         with ui.row().classes('items-center gap-1'):
                             ui.icon('language').classes('text-blue-500 dark:text-blue-400 text-xs drop-shadow-sm')
                             header_refs['region_count'] = ui.label(f'分布区域: {region_count}').classes('text-slate-600 dark:text-slate-300 drop-shadow-sm')
-                
                 with ui.row().classes('items-center gap-2'):
                     def toggle_dark():
                         dark_mode.value = not dark_mode.value
@@ -8915,34 +8911,21 @@ async def render_desktop_status_page():
                             pie_chart_ref.options['legend']['textStyle']['color'] = color
                             pie_chart_ref.update()
                         ui.run_javascript(f'if(window.changeTheme) window.changeTheme({str(dark_mode.value).lower()});')
-
                     ui.button(icon='dark_mode', on_click=toggle_dark).props('flat round dense').classes('text-slate-700 dark:text-yellow-400 bg-white/50')
                     ui.button('后台管理', icon='login', on_click=lambda: ui.navigate.to('/login')).props('flat dense').classes('font-bold text-xs text-slate-700 dark:text-slate-300 bg-white/50 rounded px-2')
-            
             with ui.element('div').classes('absolute left-4 bottom-4 z-40 pointer-events-auto'):
                 text_color = '#e2e8f0' if dark_mode.value else '#334155'
-                pie_chart_ref = ui.echart({
-                    'backgroundColor': 'transparent', 
-                    'tooltip': {'trigger': 'item'}, 
-                    'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': text_color, 'fontSize': 11}}, 
-                    'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': 'transparent', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': 'auto', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]
-                }).classes('w-64 h-72')
+                pie_chart_ref = ui.echart({'backgroundColor': 'transparent', 'tooltip': {'trigger': 'item'}, 'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': text_color, 'fontSize': 11}}, 'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': 'transparent', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': 'auto', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]}).classes('w-64 h-72')
 
-        # --- 3. 列表区域 ---
-        with ui.column().classes('w-full flex-grow relative gap-0 overflow-hidden flex flex-col bg-white/80 dark:bg-[#0f172a]/90 backdrop-blur-xl pointer-events-auto border-t border-white/10') \
-            .style('z-index: 10; contain: content;'): 
-            
+        with ui.column().classes('w-full flex-grow relative gap-0 overflow-hidden flex flex-col bg-white/80 dark:bg-[#0f172a]/90 backdrop-blur-xl pointer-events-auto border-t border-white/10').style('z-index: 10; contain: content;'): 
             with ui.row().classes('w-full px-6 py-2 border-b border-gray-200/50 dark:border-gray-800 items-center shrink-0'):
                 with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide') as tab_container: pass 
-            
             with ui.scroll_area().classes('w-full flex-grow p-4 md:p-6'):
                 grid_container = ui.grid().classes('w-full gap-4 md:gap-5 pb-20').style('grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))')
 
-    # ================= 逻辑定义 =================
     def render_tabs():
         tab_container.clear()
-        groups = get_probe_groups()
-        global CURRENT_PROBE_TAB 
+        groups = get_probe_groups(); global CURRENT_PROBE_TAB 
         if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
         with tab_container:
             with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-slate-600 dark:text-gray-500 bg-transparent') as tabs:
@@ -8955,535 +8938,252 @@ async def render_desktop_status_page():
     async def card_autoupdate_loop(url):
         while True:
             await asyncio.sleep(random.uniform(2.0, 3.0))
-            
+            if url not in [s['url'] for s in SERVERS_CACHE]:
+                break
             item = RENDERED_CARDS.get(url)
             if not item: break 
             if not item['card'].visible: continue 
-
-            refs = item['refs']
-            server_data = item['data']
-            cache_vals = item.get('cache', {}) 
+            refs = item['refs']; server_data = item['data']; cache_vals = item.get('cache', {}) 
+            current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
+            if current_server: server_data = current_server
+            else: continue
 
             res = None
-            try:
-                res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
-            except Exception:
-                res = None
+            try: res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
+            except Exception: res = None
+
+            is_probe_online = (res and res.get('status') == 'online')
+            is_xui_alive = (res and res.get('cpu_usage') is not None)
+            is_any_online = is_probe_online or is_xui_alive
 
             has_changed = False
-            if res and res.get('status') == 'online':
-                if (cache_vals.get('status') != 'online' or 
-                    abs(cache_vals.get('cpu', -1) - float(res.get('cpu_usage', 0))) > 0.1 or
-                    abs(cache_vals.get('mem', -1) - float(res.get('mem_usage', 0))) > 0.1 or
-                    cache_vals.get('net_up', -1) != res.get('net_speed_out', 0) or
-                    cache_vals.get('net_down', -1) != res.get('net_speed_in', 0)):
-                    has_changed = True
-            elif res and res.get('status') != cache_vals.get('status'):
-                has_changed = True 
-            
+            if is_any_online: has_changed = True
+            elif cache_vals.get('status') != 'offline': has_changed = True
             if not has_changed: continue
 
-            if res and res.get('status') == 'online':
+            if is_any_online:
                 if cache_vals.get('status') != 'online':
                     refs['card'].classes(remove='offline-card')
-                    refs['status_icon'].set_name('bolt')
-                    refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500')
                     cache_vals['status'] = 'online'
 
-                cache = PROBE_DATA_CACHE.get(url, {})
-                static = cache.get('static', {})
+                if is_probe_online:
+                    refs['status_icon'].set_name('bolt'); refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500 text-purple-400')
+                    refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-purple-500')
+                else:
+                    refs['status_icon'].set_name('api'); refs['status_icon'].classes(replace='text-purple-400', remove='text-gray-400 text-red-500 text-green-500')
+                    refs['online_dot'].classes(replace='bg-purple-500', remove='bg-gray-500 bg-red-500 bg-green-500')
+
+                cache = PROBE_DATA_CACHE.get(url, {}); static = cache.get('static', {})
                 os_str = static.get('os', 'Linux')
-                arch_raw = static.get('arch', '')
-                if 'aarch64' in arch_raw.lower() or 'arm' in arch_raw.lower(): display_arch = "ARM"
-                elif 'x86_64' in arch_raw.lower() or 'amd64' in arch_raw.lower(): display_arch = "AMD"
-                else: display_arch = arch_raw
-
-                import re
-                os_lower = os_str.lower()
-                icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
-                simple_os = os_str
-                simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
-                simple_os = re.sub(r' LTS', '', simple_os, flags=re.I)
-                simple_os = re.sub(r'\s*\(.*?\)', '', simple_os)
-                match = re.search(r'(Ubuntu|Debian|CentOS) (\d+(\.\d+)?)', simple_os, re.I)
-                if match: simple_os = f"{match.group(1)} {match.group(2)}"
-
-                if 'ubuntu' in os_lower: icon_name = 'fa-brands fa-ubuntu'; icon_color = 'text-orange-500'
-                elif 'debian' in os_lower: icon_name = 'fa-brands fa-linux'; icon_color = 'text-red-500' 
-                elif 'centos' in os_lower: icon_name = 'fa-brands fa-centos'; icon_color = 'text-purple-500'
-                elif 'windows' in os_lower: icon_name = 'fa-brands fa-windows'; icon_color = 'text-blue-500'
-                elif 'apple' in os_lower or 'macos' in os_lower: icon_name = 'fa-brands fa-apple'; icon_color = 'text-gray-300'
+                if not is_probe_online and not os_str: os_str = "X-UI / Monitor"
+                import re; os_lower = os_str.lower(); icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
+                simple_os = os_str; simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
+                refs['os_icon'].set_name(icon_name); refs['os_icon'].classes(replace=icon_color); refs['os_info'].set_text(f"{simple_os}")
                 
-                refs['os_icon'].set_name(icon_name)
-                refs['os_icon'].classes(replace=icon_color)
-                refs['os_info'].set_text(f"{simple_os} / {display_arch}")
-                
-                refs['summary_cores'].set_text(f"{res.get('cpu_cores', 1)} Cores")
-                refs['summary_ram'].set_text(f"{res.get('mem_total', 0)} GB")
-                refs['summary_disk'].set_text(f"{res.get('disk_total', 0)} GB")
-                
+                cores = res.get('cpu_cores')
+                refs['summary_cores'].set_text(f"{cores} C" if cores else "N/A")
+                refs['summary_ram'].set_text(fmt_capacity(res.get('mem_total', 0)))
+                refs['summary_disk'].set_text(fmt_capacity(res.get('disk_total', 0)))
                 refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}")
                 refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
 
                 cpu = float(res.get('cpu_usage', 0))
-                if cache_vals.get('cpu') != cpu:
-                    refs['cpu_bar'].style(f'width: {cpu}%')
-                    refs['cpu_pct'].set_text(f'{cpu:.1f}%')
-                    cache_vals['cpu'] = cpu
+                refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
                 
                 mem = float(res.get('mem_usage', 0))
-                if cache_vals.get('mem') != mem:
-                    mem_total = float(res.get('mem_total', 0))
-                    refs['mem_bar'].style(f'width: {mem}%')
-                    refs['mem_pct'].set_text(f'{mem:.1f}%')
-                    refs['mem_sub'].set_text(f"{round(mem_total*(mem/100), 2)} GB")
-                    cache_vals['mem'] = mem
+                refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%')
+                if res.get('mem_used'):
+                    refs['mem_sub'].set_text(str(res.get('mem_used')))
+                else:
+                    try:
+                        mem_total_val = 0
+                        raw_total = res.get('mem_total', 0)
+                        if isinstance(raw_total, str):
+                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", raw_total)
+                            if nums: mem_total_val = float(nums[0])
+                        else:
+                            mem_total_val = float(raw_total)
+                        if mem_total_val > 0:
+                            mem_used = mem_total_val * (mem / 100.0)
+                            refs['mem_sub'].set_text(fmt_capacity(mem_used))
+                        else:
+                            refs['mem_sub'].set_text(f"{mem:.1f}%")
+                    except: refs['mem_sub'].set_text(f"{mem:.1f}%")
 
                 disk = float(res.get('disk_usage', 0))
-                if cache_vals.get('disk') != disk:
-                    disk_total = float(res.get('disk_total', 0))
-                    refs['disk_bar'].style(f'width: {disk}%')
-                    refs['disk_pct'].set_text(f'{disk:.1f}%')
-                    refs['disk_sub'].set_text(f"{round(disk_total*(disk/100), 2)} GB")
-                    cache_vals['disk'] = disk
+                refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%')
+                if res.get('disk_used'):
+                    refs['disk_sub'].set_text(str(res.get('disk_used')))
+                else:
+                    try:
+                        disk_total_val = 0
+                        raw_disk = res.get('disk_total', 0)
+                        if isinstance(raw_disk, str):
+                            nums = re.findall(r"[-+]?\d*\.\d+|\d+", raw_disk)
+                            if nums: disk_total_val = float(nums[0])
+                        else:
+                            disk_total_val = float(raw_disk)
+                        if disk_total_val > 0:
+                            disk_used = disk_total_val * (disk / 100.0)
+                            refs['disk_sub'].set_text(fmt_capacity(disk_used))
+                        else:
+                            refs['disk_sub'].set_text(f"{disk:.1f}%")
+                    except: refs['disk_sub'].set_text(f"{disk:.1f}%")
 
-                n_up = res.get('net_speed_out', 0)
-                n_down = res.get('net_speed_in', 0)
-                if cache_vals.get('net_up') != n_up:
-                        refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s")
-                        cache_vals['net_up'] = n_up
-                if cache_vals.get('net_down') != n_down:
-                        refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
-                        cache_vals['net_down'] = n_down
+                n_up = res.get('net_speed_out', 0); n_down = res.get('net_speed_in', 0)
+                refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
 
                 up = str(res.get('uptime', '-'))
-                if cache_vals.get('uptime') != up:
-                    colored_up = re.sub(
-                        r'(\d+)(\s*(?:days?|天))', 
-                        r'<span class="text-green-500 font-bold text-sm">\1</span>\2', 
-                        up, 
-                        flags=re.IGNORECASE
-                    )
-                    refs['uptime'].set_content(colored_up)
-                    cache_vals['uptime'] = up
-                
-                refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-orange-500')
-            
+                colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
+                refs['uptime'].set_content(colored_up)
             else:
                 if cache_vals.get('status') != 'offline':
-                    # 1. 变红、变离线样式 (保留)
                     refs['card'].classes(add='offline-card')
-                    refs['status_icon'].set_name('flash_off')
-                    refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400')
-                    refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500')
-                    
-                    # 2. 【关键】不要覆盖 Uptime，让它保持最后一次在线时的文字
-                    # 3. 标记状态缓存为 offline，防止重复刷新 UI
+                    refs['status_icon'].set_name('flash_off'); refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400 text-purple-400')
+                    refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500 bg-purple-500')
                     cache_vals['status'] = 'offline'
 
     def create_server_card(s):
-        url = s['url']
-        refs = {}
+        url = s['url']; refs = {}
         with grid_container:
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group').style('contain: content;') as card:
-                refs['card'] = card
-                
-                item_cache = {
-                    'status': None, 'cpu': -1, 'mem': -1, 'disk': -1, 
-                    'net_in': -1, 'net_out': -1, 'uptime': ''
-                }
-                
-                # 1. 顶栏
+                refs['card'] = card; item_cache = {'status': None}
                 with ui.row().classes('w-full items-center mb-1 gap-2 flex-nowrap'):
-                    flag = "🏳️"
+                    flag = "🏳️"; 
                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
                     except: pass
                     ui.label(flag).classes('text-2xl md:text-3xl flex-shrink-0 leading-none') 
-                    ui.label(s['name']).classes(
-                        'text-base md:text-lg font-bold text-slate-800 dark:text-gray-100 '
-                        'truncate flex-grow min-w-0 cursor-pointer hover:text-blue-500 transition leading-tight'
-                    ).on('click', lambda _, s=s: open_pc_server_detail(s))
+                    ui.label(s['name']).classes('text-base md:text-lg font-bold text-slate-800 dark:text-gray-100 truncate flex-grow min-w-0 cursor-pointer hover:text-blue-500 transition leading-tight').on('click', lambda _, s=s: open_pc_server_detail(s))
                     refs['status_icon'] = ui.icon('bolt').props('size=32px').classes('text-gray-400 flex-shrink-0')
-                
-                # 2. OS 信息
                 with ui.row().classes('w-full justify-between items-center px-1 mb-2'):
                     with ui.row().classes('items-center gap-1.5'):
-                        ui.icon('dns').classes('text-xs text-gray-400') 
-                        ui.label('OS').classes('text-xs text-slate-500 dark:text-gray-400 font-bold')
+                        ui.icon('dns').classes('text-xs text-gray-400'); ui.label('OS').classes('text-xs text-slate-500 dark:text-gray-400 font-bold')
                     with ui.row().classes('items-center gap-1.5'):
-                        refs['os_icon'] = ui.icon('computer').classes('text-xs text-slate-400')
-                        refs['os_info'] = ui.label('Loading...').classes('text-xs font-mono font-bold text-slate-700 dark:text-gray-300 whitespace-nowrap')
-                
+                        refs['os_icon'] = ui.icon('computer').classes('text-xs text-slate-400'); refs['os_info'] = ui.label('Loading...').classes('text-xs font-mono font-bold text-slate-700 dark:text-gray-300 whitespace-nowrap')
                 ui.separator().classes('mb-3 opacity-50 dark:opacity-30')
-
-                # 4. 硬件信息
                 with ui.row().classes('w-full justify-between px-1 mb-1 md:mb-2'):
                     label_cls = 'text-xs font-mono text-slate-500 dark:text-gray-400 font-bold'
-                    with ui.row().classes('items-center gap-1'):
-                        ui.icon('grid_view').classes('text-blue-500 dark:text-blue-400 text-xs'); refs['summary_cores'] = ui.label('--').classes(label_cls)
-                    with ui.row().classes('items-center gap-1'):
-                        ui.icon('memory').classes('text-green-500 dark:text-green-400 text-xs'); refs['summary_ram'] = ui.label('--').classes(label_cls)
-                    with ui.row().classes('items-center gap-1'):
-                        ui.icon('storage').classes('text-purple-500 dark:text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes(label_cls)
-                
-                # 5. 进度条
+                    with ui.row().classes('items-center gap-1'): ui.icon('grid_view').classes('text-blue-500 dark:text-blue-400 text-xs'); refs['summary_cores'] = ui.label('--').classes(label_cls)
+                    with ui.row().classes('items-center gap-1'): ui.icon('memory').classes('text-green-500 dark:text-green-400 text-xs'); refs['summary_ram'] = ui.label('--').classes(label_cls)
+                    with ui.row().classes('items-center gap-1'): ui.icon('storage').classes('text-purple-500 dark:text-purple-400 text-xs'); refs['summary_disk'] = ui.label('--').classes(label_cls)
                 with ui.column().classes('w-full gap-2 md:gap-3'):
                     def stat_row(label, color_cls, light_track_color):
                         with ui.column().classes('w-full gap-1'):
                             with ui.row().classes('w-full items-center justify-between'):
                                 ui.label(label).classes('text-xs text-slate-500 dark:text-gray-500 font-bold w-8')
-                                bg_cls = f'bg-{light_track_color} dark:bg-gray-700/50'
-                                with ui.element('div').classes(f'flex-grow h-2 md:h-2.5 {bg_cls} rounded-full overflow-hidden mx-2 transition-colors'):
+                                with ui.element('div').classes(f'flex-grow h-2 md:h-2.5 bg-{light_track_color} dark:bg-gray-700/50 rounded-full overflow-hidden mx-2 transition-colors'):
                                     bar = ui.element('div').classes(f'h-full {color_cls} prog-bar').style('width: 0%')
                                 pct = ui.label('0%').classes('text-xs font-mono font-bold text-slate-700 dark:text-white w-8 text-right')
                             sub = ui.label('').classes('text-[10px] text-slate-400 dark:text-gray-500 font-mono text-right w-full pr-1')
                         return bar, pct, sub
-                    
                     refs['cpu_bar'], refs['cpu_pct'], refs['cpu_sub'] = stat_row('CPU', 'bg-blue-500', 'blue-100')
                     refs['mem_bar'], refs['mem_pct'], refs['mem_sub'] = stat_row('内存', 'bg-green-500', 'green-100')
                     refs['disk_bar'], refs['disk_pct'], refs['disk_sub'] = stat_row('硬盘', 'bg-purple-500', 'purple-100')
-                
                 ui.separator().classes('bg-slate-200 dark:bg-white/5 my-1')
-                
-                # 6. 底部网格
                 with ui.column().classes('w-full gap-1'):
                     label_sub_cls = 'text-xs text-slate-400 dark:text-gray-500'
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
-                        ui.label('网络').classes(label_sub_cls)
-                        with ui.row().classes('gap-2 font-mono whitespace-nowrap'):
-                            refs['net_up'] = ui.label('↑ 0B').classes('text-xs text-orange-500 dark:text-orange-400 font-bold')
-                            refs['net_down'] = ui.label('↓ 0B').classes('text-xs text-green-600 dark:text-green-400 font-bold')
+                        ui.label('网络').classes(label_sub_cls); 
+                        with ui.row().classes('gap-2 font-mono whitespace-nowrap'): refs['net_up'] = ui.label('↑ 0B').classes('text-xs text-orange-500 dark:text-orange-400 font-bold'); refs['net_down'] = ui.label('↓ 0B').classes('text-xs text-green-600 dark:text-green-400 font-bold')
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('流量').classes(label_sub_cls)
-                        with ui.row().classes('gap-2 font-mono whitespace-nowrap text-xs text-slate-600 dark:text-gray-300'):
-                            refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
+                        with ui.row().classes('gap-2 font-mono whitespace-nowrap text-xs text-slate-600 dark:text-gray-300'): refs['traf_up'] = ui.label('↑ 0B'); refs['traf_down'] = ui.label('↓ 0B')
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('在线').classes(label_sub_cls)
-                        with ui.row().classes('items-center gap-1'):
-                            # [修改] 使用 ui.html 并加入 sanitize=False
-                            refs['uptime'] = ui.html('--', sanitize=False).classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right')
-                            refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
-                
+                        with ui.row().classes('items-center gap-1'): refs['uptime'] = ui.html('--', sanitize=False).classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right'); refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
         RENDERED_CARDS[url] = {'card': card, 'refs': refs, 'data': s, 'cache': item_cache}
         asyncio.create_task(card_autoupdate_loop(url))
 
     def apply_filter(group_name):
-        global CURRENT_PROBE_TAB
-        CURRENT_PROBE_TAB = group_name
+        global CURRENT_PROBE_TAB; CURRENT_PROBE_TAB = group_name
         for url, item in RENDERED_CARDS.items():
-            card = item['card']
-            server_data = item['data']
+            card = item['card']; server_data = item['data']
             should_show = (group_name == 'ALL') or (group_name in server_data.get('tags', []))
             if card.visible != should_show: card.set_visibility(should_show)
 
     def sync_cards_pool():
+        print(f"[DIAG] Syncing cards. Cache: {len(SERVERS_CACHE)}, Rendered: {len(RENDERED_CARDS)}")
         current_urls = set(s['url'] for s in SERVERS_CACHE)
         rendered_urls = set(RENDERED_CARDS.keys())
-        new_urls = current_urls - rendered_urls
-        for url in new_urls:
+        new_urls = current_urls - rendered_urls; deleted_urls = rendered_urls - current_urls
+        for url in new_urls: 
             s = next((srv for srv in SERVERS_CACHE if srv['url'] == url), None)
             if s: create_server_card(s)
-        deleted_urls = rendered_urls - current_urls
-        for url in deleted_urls:
-            item = RENDERED_CARDS.pop(url)
-            if item and item['card']: item['card'].delete()
+        for url in deleted_urls: 
+            item = RENDERED_CARDS.pop(url, None)
+            if item and item.get('card'): item['card'].delete()
         for s in SERVERS_CACHE:
             if s['url'] in RENDERED_CARDS: RENDERED_CARDS[s['url']]['data'] = s
 
-    # --- 初始化 ---
     sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
-    for s in sorted_init_list:
-        create_server_card(s)
-    
-    render_tabs()
-    apply_filter(CURRENT_PROBE_TAB)
+    for s in sorted_init_list: create_server_card(s)
+    render_tabs(); apply_filter(CURRENT_PROBE_TAB)
 
+    # ✨✨✨ [终极修复] JS端 setOption(option, true) 强制不合并 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
-        var mapData = {chart_data};
-        window.regionStats = {region_stats_json}; 
-        window.mapNameMap = {name_map_json}; 
+        var mapData = {chart_data}; window.regionStats = {region_stats_json}; window.mapNameMap = {name_map_json}; 
         
-        // --- 核心修复：更新数据时也要触发国旗坐标校正 ---
-        window.updateMapData = function(newData) {{ 
-            mapData = newData;
-            fixFlags(); 
-        }}; 
-        
-        // 1. 初始化飞线终点 (Home Point)
-        if (!window.FLY_HOME_PT) {{
-            window.FLY_HOME_PT = null; 
-        }}
-
         var defaultPt = [116.4, 39.9]; 
-
-        var mapState = 'A'; 
-        var focusedCenter = null;
+        var manualCentroids = {{ 'France': [2.21, 46.22], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37], 'Russia': [105.31, 61.52], 'Netherlands': [5.29, 52.13], 'Portugal': [-8.22, 39.39], 'Spain': [-3.74, 40.46] }};
         
-        // [修改] 放大倍数设为 6.0
-        var defaultZoom = 1.0; 
-        var focusedZoom = 6.0;
-        
-        var defaultLeft = '45%';
-        
-        var isDragging = false;
-        var hasPanned = false; 
-        var downX = 0, downY = 0;
-        var lastInteraction = 0; 
-        
-        var manualCentroids = {{
-            'France': [2.21, 46.22],
-            'United States': [-95.71, 37.09],
-            'United Kingdom': [-3.43, 55.37],
-            'Russia': [105.31, 61.52],
-            'Netherlands': [5.29, 52.13],
-            'Portugal': [-8.22, 39.39],
-            'Spain': [-3.74, 40.46]
-        }};
-        
-        function fixFlags() {{
-            if (mapData.flags) {{
-                mapData.flags.forEach(function(f) {{
-                    if (f.country && manualCentroids[f.country]) {{
-                        f.value = manualCentroids[f.country];
-                    }}
-                }});
-            }}
-        }}
+        function fixFlags() {{ if (mapData.flags) {{ mapData.flags.forEach(function(f) {{ if (f.country && manualCentroids[f.country]) {{ f.value = manualCentroids[f.country]; }} }}); }} }}
 
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
             if (!chartDom || typeof echarts === 'undefined') {{ setTimeout(checkAndRender, 100); return; }}
             fetch('/static/world.json').then(r => r.json()).then(w => {{
-                echarts.registerMap('world', w);
-                var myChart = echarts.init(chartDom);
-                window.publicMapChart = myChart; 
-                
-                function getRegionCenter(name) {{
-                    if (manualCentroids[name]) return manualCentroids[name];
-                    
-                    var feat = w.features.find(f => f.properties.name === name);
-                    if (!feat) return null;
-                    var minX = 180, maxX = -180, minY = 90, maxY = -90;
-                    function scan(coords) {{
-                        if (typeof coords[0] === 'number') {{
-                            if (coords[0] < minX) minX = coords[0];
-                            if (coords[0] > maxX) maxX = coords[0];
-                            if (coords[1] < minY) minY = coords[1];
-                            if (coords[1] > maxY) maxY = coords[1];
-                        }} else {{
-                            coords.forEach(scan);
-                        }}
-                    }}
-                    scan(feat.geometry.coordinates);
-                    return [(minX + maxX)/2, (minY + maxY)/2];
-                }}
-
+                echarts.registerMap('world', w); var myChart = echarts.init(chartDom); window.publicMapChart = myChart; 
                 fixFlags();
-
+                if (navigator.geolocation) {{ navigator.geolocation.getCurrentPosition(p => {{ defaultPt = [p.coords.longitude, p.coords.latitude]; renderMap(); }}, e => {{ renderMap(); }}); }} else {{ renderMap(); }}
+                var mapState = 'A'; var focusedCenter = null; var defaultZoom = 1.0; var focusedZoom = 4.0; 
+                
                 function renderMap(viewCenter) {{
-                    var flyDest = window.FLY_HOME_PT || viewCenter;
-                    if (!window.FLY_HOME_PT && mapState === 'A') {{
-                        flyDest = viewCenter;
-                    }} else if (window.FLY_HOME_PT) {{
-                        flyDest = window.FLY_HOME_PT;
-                    }}
-
-                    var regions = mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: '#0055ff', borderColor: '#00ffff', borderWidth: 1.5, shadowColor: 'rgba(0, 255, 255, 0.8)', shadowBlur: 20, opacity: 0.9 }} }}));
-                    
+                    viewCenter = viewCenter || defaultPt; var flyDest = defaultPt;
                     var lines = mapData.cities.map(pt => ({{ coords: [pt.value, flyDest] }}));
-                    
                     var isDark = document.body.classList.contains('body--dark');
-                    var areaColor = isDark ? '#1B2631' : '#e0e7ff';
-                    var borderColor = isDark ? '#404a59' : '#a5b4fc';
-                    
-                    var currentLeft = (mapState === 'B') ? 'center' : defaultLeft;
-
+                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; var borderColor = isDark ? '#404a59' : '#a5b4fc'; var bgColor = 'transparent'; 
                     var option = {{
-                        backgroundColor: 'transparent',
+                        backgroundColor: bgColor,
                         tooltip: {{
-                            trigger: 'item',
-                            enterable: true,
-                            padding: 0,
-                            borderWidth: 0,
-                            backgroundColor: 'transparent',
-                            position: function (point, params, dom, rect, size) {{
-                                var x = point[0]; 
-                                var y = point[1]; 
-                                var boxWidth = size.contentSize[0];
-                                var boxHeight = size.contentSize[1];
-                                var viewHeight = size.viewSize[1];
-                                if (y > viewHeight * 0.6) {{ return [x - (boxWidth / 2), y - boxHeight - 10]; }} 
-                                else {{ return [x - (boxWidth / 2), y + 25]; }}
-                            }},
+                            trigger: 'item', backgroundColor: isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)',
+                            borderColor: isDark ? '#334155' : '#e2e8f0', textStyle: {{ color: isDark ? '#f1f5f9' : '#1e293b' }},
                             formatter: function(params) {{
-                                var rawName = params.name;
-                                if (!rawName) return;
-                                var info = window.regionStats[rawName];
-                                if (!info && window.mapNameMap[rawName]) {{ var flag = window.mapNameMap[rawName]; info = window.regionStats[flag]; }} 
-                                else if (!info) {{
-                                    var mapKeys = Object.keys(window.mapNameMap);
-                                    for (var i = 0; i < mapKeys.length; i++) {{
-                                        var k = mapKeys[i];
-                                        if (rawName.includes(k) || k.includes(rawName)) {{ info = window.regionStats[window.mapNameMap[k]]; break; }}
-                                    }}
-                                }}
-                                if (!info) return;
-                                var isD = document.body.classList.contains('body--dark');
-                                var bg = isD ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
-                                var textMain = isD ? '#fff' : '#1e293b';
-                                var textSub = isD ? '#94a3b8' : '#64748b';
-                                var shadow = isD ? '0 0 15px rgba(0,0,0,0.5)' : '0 10px 25px rgba(0,0,0,0.15)';
-                                var backdrop = 'blur(10px)';
-                                var listHtml = '';
-                                var displayList = info.list.slice(0, 5); 
-                                displayList.forEach(function(item) {{
-                                    var dotColor = (item.status === 'online') ? '#22c55e' : '#ef4444';
-                                    var statText = (item.status === 'online') ? '线上' : '离线';
-                                    listHtml += '<div style="display:flex; justify-content:space-between; align-items:center; font-size:12px; margin-bottom:4px; color:'+textSub+';">' + 
-                                                '<div style="display:flex; align-items:center; gap:6px;">' +
-                                                '<span style="width:6px; height:6px; border-radius:50%; background:'+dotColor+';"></span>' +
-                                                '<span style="max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">' + item.name + '</span>' +
-                                                '</div>' +
-                                                '<span style="font-size:10px; color:'+(item.status==='online'?textSub:dotColor)+';">' + statText + '</span>' +
-                                                '</div>';
-                                }});
-                                if (info.total > 5) {{ listHtml += '<div style="font-size:10px; color:'+textSub+'; margin-top:4px; text-align:center;">+' + (info.total - 5) + ' 更多...</div>'; }}
-                                return '<div style="background:'+bg+'; backdrop-filter:'+backdrop+'; -webkit-backdrop-filter:'+backdrop+'; border-radius:12px; padding:12px 16px; border:none; box-shadow:'+shadow+'; min-width:200px;">' + 
-                                       '<div style="font-weight:900; font-size:16px; margin-bottom:4px; color:'+textMain+'; display:flex; align-items:center; gap:6px;">' + 
-                                       '<span>' + info.flag + '</span>' + 
-                                       '<span>' + info.cn + '</span>' + 
-                                       '</div>' +
-                                       '<div style="font-size:11px; color:#94a3b8; margin-bottom:10px; font-family:monospace;">' +
-                                       '共 ' + info.total + ' 个伺服器, ' + info.online + ' 个在线, ' + (info.total - info.online) + ' 个离线' +
-                                       '</div>' +
-                                       '<div style="border-top:1px solid '+(isD?'rgba(255,255,255,0.1)':'rgba(0,0,0,0.05)')+'; padding-top:8px;">' +
-                                       listHtml +
-                                       '</div>' +
-                                       '</div>';
+                                if (!params.name || !window.regionStats[params.name]) return;
+                                var info = window.regionStats[params.name];
+                                return '<div style="font-weight:bold; margin-bottom:5px;">' + info.flag + ' ' + info.cn + '</div>' + '<div>服务器: ' + info.total + '</div>' + '<div>在线: <span style="color:#22c55e">' + info.online + '</span></div>';
                             }}
                         }},
-                        geo: {{ 
-                            map: 'world', 
-                            roam: mapState === 'B' ? 'move' : false, 
-                            zoom: mapState === 'B' ? focusedZoom : defaultZoom,
-                            aspectScale: 0.85, 
-                            scaleLimit: {{ min: 0.5, max: 10 }}, 
-                            center: viewCenter, 
-                            left: currentLeft,
-                            top: '-15%', 
-                            bottom: '15%',
-                            label: {{ show: false }}, 
-                            itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }}, 
-                            tooltip: {{ show: true }}, 
-                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }}, label: {{ show: false }} }}, 
-                            regions: regions 
+                        geo: {{
+                            map: 'world', roam: true, zoom: mapState === 'B' ? focusedZoom : defaultZoom, center: viewCenter, aspectScale: 0.85, label: {{ show: false }},
+                            itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }},
+                            emphasis: {{ label: {{ show: false }}, itemStyle: {{ areaColor: isDark ? '#2a333d' : '#c7d2fe' }} }},
+                            regions: mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: isDark ? '#1e40af' : '#93c5fd' }} }}))
                         }},
                         series: [
-                            {{ type: 'map', map: 'world', geoIndex: 0, data: mapData.regions.map(n => ({{ name: n, value: 1 }})), itemStyle: {{ opacity: 0 }} }},
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, label: {{ show: false }}, data: mapData.cities }},
-                            // [✨ 最终修正] 使用 scatter, symbolSize=0 (彻底隐藏点), 显示 Label (国旗)
-                            // 这样既没有“双重圆点”的视觉干扰，国旗又能 100% 显示
-                            {{ type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 24, offset: [0, -5] }}, data: mapData.flags }},
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, data: mapData.cities }},
+                            {{ type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5] }}, data: mapData.flags }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: flyDest }}] }}
                         ]
                     }};
-                    myChart.setOption(option);
+                    // ✨ 关键点：第二个参数 true 表示不合并，完全重置！解决空数据不刷新问题
+                    myChart.setOption(option, true);
                 }}
                 
-                if (!window.FLY_HOME_PT) {{
-                    if (navigator.geolocation) {{ 
-                        navigator.geolocation.getCurrentPosition(
-                            p => {{
-                                window.FLY_HOME_PT = [p.coords.longitude, p.coords.latitude];
-                                renderMap(defaultPt); 
-                            }}, 
-                            e => {{
-                                window.FLY_HOME_PT = defaultPt;
-                                renderMap(defaultPt);
-                            }}
-                        ); 
-                    }} else {{ 
-                        window.FLY_HOME_PT = defaultPt;
-                        renderMap(defaultPt);
-                    }}
-                }} else {{
-                     var restoreCenter = (mapState === 'B' && focusedCenter) ? focusedCenter : defaultPt;
-                     renderMap(restoreCenter);
-                }}
-
-                chartDom.addEventListener('wheel', function(e) {{
-                    if (mapState === 'B') {{
-                        mapState = 'A';
-                        focusedCenter = null;
-                        hasPanned = false;
-                        renderMap(defaultPt);
-                    }}
-                }});
-
-                myChart.getZr().on('mousedown', function(e) {{
-                    isDragging = false;
-                    downX = e.offsetX;
-                    downY = e.offsetY;
-                }});
-
-                myChart.getZr().on('mouseup', function(e) {{
-                    var dist = Math.sqrt(Math.pow(e.offsetX - downX, 2) + Math.pow(e.offsetY - downY, 2));
-                    if (dist > 5) {{
-                        isDragging = true;
-                        if (mapState === 'B') {{
-                            hasPanned = true; 
-                        }}
-                    }}
-                }});
-
-                myChart.getZr().on('click', function(e) {{
-                    if (isDragging) return; 
-                    if (Date.now() - lastInteraction < 200) return; 
-
-                    if (mapState === 'B') {{
-                        // B状态下点击任何地方 -> 不再返回 A (用户要求)
-                        // 仅保留拖动功能，滚轮返回 A
-                    }}
-                    lastInteraction = Date.now();
-                }});
+                window.updateMapData = function(newData) {{ 
+                    mapData = newData; 
+                    fixFlags(); 
+                    renderMap(); 
+                }}; 
 
                 myChart.on('click', function(params) {{
-                    var targetCenter = null;
-
-                    if ((params.componentType === 'series' && params.seriesType === 'effectScatter') || 
-                        (params.componentType === 'series' && params.seriesType === 'scatter')) {{
-                         if (params.data && params.data.value) {{
-                             targetCenter = params.data.value.slice(0, 2);
-                         }}
-                    }} 
-                    else if (params.componentType === 'geo' || params.componentType === 'series') {{
-                         if (mapData.regions.includes(params.name)) {{
-                             targetCenter = getRegionCenter(params.name);
-                         }}
-                    }}
-
-                    if (targetCenter) {{
-                        mapState = 'B';
-                        focusedCenter = targetCenter;
-                        hasPanned = false;
-                        renderMap(focusedCenter);
-                        lastInteraction = Date.now();
+                    if (params.componentType === 'geo' || (params.componentType === 'series' && params.seriesType === 'map')) {{
+                        if (mapState === 'A') {{ mapState = 'B'; myChart.setOption({{ geo: {{ center: undefined, zoom: focusedZoom }} }}); }} 
+                        else {{ mapState = 'A'; myChart.setOption({{ geo: {{ center: defaultPt, zoom: defaultZoom }} }}); }}
                     }}
                 }});
-                
-                window.addEventListener('resize', () => myChart.resize());
-                
-                var wasDark = document.body.classList.contains('body--dark');
-                new MutationObserver(function(mutations) {{
-                    var isDark = document.body.classList.contains('body--dark');
-                    if (wasDark !== isDark) {{
-                        wasDark = isDark;
-                        var currentView = (mapState === 'B' && focusedCenter) ? focusedCenter : defaultPt;
-                        renderMap(currentView);
-                    }}
-                }}).observe(document.body, {{ attributes: true, attributeFilter: ['class'] }});
+                window.changeTheme = function(isDark) {{ renderMap(); }}; window.addEventListener('resize', () => myChart.resize());
             }});
         }}
         checkAndRender();
@@ -9493,30 +9193,26 @@ async def render_desktop_status_page():
     async def loop_update():
         nonlocal local_ui_version
         try:
-            if GLOBAL_UI_VERSION != local_ui_version:
+            is_count_mismatch = (len(SERVERS_CACHE) != len(RENDERED_CARDS))
+            
+            if GLOBAL_UI_VERSION != local_ui_version or is_count_mismatch:
+                print("[DIAG] Loop update triggered (Mismatch or Version change)")
                 local_ui_version = GLOBAL_UI_VERSION
-                render_tabs()
-                sync_cards_pool()
-                apply_filter(CURRENT_PROBE_TAB)
+                render_tabs(); sync_cards_pool(); apply_filter(CURRENT_PROBE_TAB)
                 new_map, new_pie, new_cnt, new_stats, new_map_names = prepare_map_data()
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
                 if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
                 
-                ui.run_javascript(f'''
-                    if(window.updateMapData){{
-                        window.updateMapData({new_map});
-                        window.regionStats = {new_stats};
-                        window.mapNameMap = {new_map_names};
-                    }}
-                ''')
+                # 强制 JS 重绘
+                ui.run_javascript(f'''if(window.updateMapData){{ window.updateMapData({new_map}); window.regionStats = {new_stats}; window.mapNameMap = {new_map_names}; }}''')
 
             real_online_count = 0
             for s in SERVERS_CACHE:
                 if s.get('_status') == 'online': real_online_count += 1
             if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
-            
         except Exception as e:
             print(f"Loop Update Error: {e}") 
+            traceback.print_exc() 
         
         ui.timer(5.0, loop_update, once=True)
 
