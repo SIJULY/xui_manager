@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-Fusion Panel 一键安装/管理脚本
+# X-Fusion Panel 一键安装/管理脚本 (智能双模版)
 # GitHub: https://github.com/SIJULY/x-fusion-panel
 # ==============================================================================
 
@@ -10,10 +10,10 @@ PROJECT_NAME="x-fusion-panel"
 INSTALL_DIR="/root/${PROJECT_NAME}"
 OLD_INSTALL_DIR="/root/xui_manager" 
 
-# 仓库地址
+# 仓库地址 (保持您原本的设置)
 REPO_URL="https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main"
 
-CADDY_CONFIG_PATH="/etc/caddy/Caddyfile"
+# Caddy 配置标记
 CADDY_MARK_START="# X-Fusion Panel Config Start"
 CADDY_MARK_END="# X-Fusion Panel Config End"
 
@@ -86,31 +86,25 @@ migrate_old_data() {
         print_info "检测到旧版安装目录 ($OLD_INSTALL_DIR)"
         print_info "正在自动迁移数据到新目录 ($INSTALL_DIR)..."
         
-        # 1. 停止旧容器
         cd "$OLD_INSTALL_DIR"
         if docker compose ps | grep -q "xui_manager"; then
             print_info "停止旧版容器..."
             docker compose down
         fi
         
-        # 2. 移动目录
         cd /root
         mv "$OLD_INSTALL_DIR" "$INSTALL_DIR"
         print_success "目录重命名完成。"
         
-        # 3. [关键修复] 将旧配置重命名为备份，供 update 读取，而不是删除
         if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
             mv "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.bak"
         fi
-        
         echo -e "${YELLOW}=================================================${PLAIN}"
     fi
 }
 
 deploy_base() {
     check_docker
-    
-    # 执行迁移检查
     migrate_old_data
 
     mkdir -p ${INSTALL_DIR}/app
@@ -122,40 +116,37 @@ deploy_base() {
     print_info "正在拉取最新代码 (X-Fusion)..."
     curl -sS -O ${REPO_URL}/Dockerfile
     curl -sS -O ${REPO_URL}/requirements.txt
-
-    print_info "正在下载主程序..."
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
 
-    # 下载探针安装脚本到 static 目录
-    print_info "正在下载最新探针脚本..."
+    # 静态资源
+    print_info "正在更新资源文件..."
     curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
-
-    print_info "正在下载静态资源 (xterm.js)..."
     curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
-
-    # 下载世界地图数据到 static 目录
-    print_info "正在下载地图数据..."
     curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
 
     if [ ! -f "app/main.py" ]; then
         print_error "主程序下载失败！请检查 GitHub 仓库地址是否正确。"
     fi
 
-    # 初始化空文件 (如果不存在)
+    # 初始化空文件 (防止挂载报错)
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
     if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
+    if [ ! -f "Caddyfile" ]; then touch Caddyfile; fi
 }
 
+# --- ✨ 核心修改：动态生成 Docker Compose ---
 generate_compose() {
     local BIND_IP=$1
     local PORT=$2
     local USER=$3
     local PASS=$4
     local SECRET=$5 
+    local ENABLE_CADDY=$6  # 新增参数：是否启用 Caddy
 
+    # 1. 生成基础服务配置 (Panel + Subconverter)
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
 services:
@@ -166,10 +157,9 @@ services:
     ports:
       - "${BIND_IP}:${PORT}:8080"
     volumes:
-      - ./data/servers.json:/app/data/servers.json
-      - ./data/subscriptions.json:/app/data/subscriptions.json
-      - ./data/nodes_cache.json:/app/data/nodes_cache.json
-      - ./data/admin_config.json:/app/data/admin_config.json
+      # ✨ 修复：使用文件夹映射，彻底解决数据丢失问题
+      - ./data:/app/data
+      - ./app/main.py:/app/main.py
       - ./static:/app/static
     environment:
       - TZ=Asia/Shanghai
@@ -181,65 +171,58 @@ services:
     image: tindy2013/subconverter:latest
     container_name: subconverter
     restart: always
+    # ✨ 修复：显式暴露到宿主机的 127.0.0.1
+    # 这样无论是 Docker 内部的 Caddy 还是宿主机的 Nginx 都能访问它
     ports:
       - "127.0.0.1:25500:25500"
+    environment:
+      - TZ=Asia/Shanghai
 EOF
-}
 
-install_caddy_if_needed() {
-    if ! command -v caddy &> /dev/null; then
-        print_info "未检测到 Caddy，正在安装..."
-        wait_for_apt_lock
-        # 检测系统类型并安装
-        if [ -f /etc/debian_version ]; then
-            apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-            curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-            apt-get update
-            apt-get install -y caddy
-        elif [ -f /etc/redhat-release ]; then
-            yum install -y yum-utils
-            yum-config-manager --add-repo https://dl.cloudsmith.io/public/caddy/stable/rpm.repo
-            yum install -y caddy
-        else
-             print_warning "不支持的系统，请手动安装 Caddy。"
-        fi
-    fi
-    
-    if command -v caddy &> /dev/null; then
-        if ! systemctl is-active --quiet caddy; then
-            systemctl enable --now caddy
-        fi
+    # 2. 如果启用 Caddy，追加 Caddy 服务块
+    if [ "$ENABLE_CADDY" == "true" ]; then
+        cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
+
+  caddy:
+    image: caddy:latest
+    container_name: caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./caddy_data:/data
+    depends_on:
+      - x-fusion-panel
+      - subconverter
+EOF
     fi
 }
 
-configure_caddy() {
+configure_caddy_docker() {
     local DOMAIN=$1
-    local PORT=$2
-    if [ -f "$CADDY_CONFIG_PATH" ]; then
-        sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$CADDY_CONFIG_PATH"
-    fi
-    if [ -s "$CADDY_CONFIG_PATH" ] && [ "$(tail -c 1 "$CADDY_CONFIG_PATH")" != "" ]; then
-        echo "" >> "$CADDY_CONFIG_PATH"
-    fi
+    local DOCKER_CADDY_FILE="${INSTALL_DIR}/Caddyfile"
 
-    cat >> "$CADDY_CONFIG_PATH" << EOF
+    if [ ! -f "$DOCKER_CADDY_FILE" ]; then touch "$DOCKER_CADDY_FILE"; fi
+    sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$DOCKER_CADDY_FILE"
+    if [ -s "$DOCKER_CADDY_FILE" ] && [ "$(tail -c 1 "$DOCKER_CADDY_FILE")" != "" ]; then echo "" >> "$DOCKER_CADDY_FILE"; fi
+
+    # 使用容器名通信
+    cat >> "$DOCKER_CADDY_FILE" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
-    # 1. 拦截订阅转换请求 (转发给 SubConverter)
+    encode gzip
     handle_path /convert* {
         rewrite * /sub
-        reverse_proxy 127.0.0.1:25500
+        reverse_proxy subconverter:25500 
     }
-
-    # 2. 面板主体 (转发给 Python 面板)
     handle {
-        reverse_proxy 127.0.0.1:${PORT}
+        reverse_proxy x-fusion-panel:8080
     }
 }
 ${CADDY_MARK_END}
 EOF
-    systemctl reload caddy
 }
 
 # --- 菜单动作 ---
@@ -248,12 +231,11 @@ install_panel() {
     wait_for_apt_lock
     deploy_base
 
-    # 如果有旧配置，尝试读取旧账号密码（为了方便迁移）
+    # 读取旧配置
     local def_user="admin"
     local def_pass="admin"
     local def_key=$(cat /proc/sys/kernel/random/uuid | tr -d '-')
 
-    # 简单的配置嗅探 (如果存在旧的 compose 文件)
     if [ -f "${INSTALL_DIR}/docker-compose.yml.bak" ]; then
         grep "XUI_USERNAME" "${INSTALL_DIR}/docker-compose.yml.bak" &>/dev/null && def_user=$(grep "XUI_USERNAME=" "${INSTALL_DIR}/docker-compose.yml.bak" | cut -d= -f2)
         grep "XUI_PASSWORD" "${INSTALL_DIR}/docker-compose.yml.bak" &>/dev/null && def_pass=$(grep "XUI_PASSWORD=" "${INSTALL_DIR}/docker-compose.yml.bak" | cut -d= -f2)
@@ -265,51 +247,62 @@ install_panel() {
     admin_user=${admin_user:-$def_user}
     read -p "请设置面板登录密码 [${def_pass}]: " admin_pass
     admin_pass=${admin_pass:-$def_pass}
-    
-    echo "------------------------------------------------"
-    echo -e "${YELLOW}配置自动注册通讯密钥${PLAIN}"
-    echo -e "推荐密钥: ${GREEN}${def_key}${PLAIN}"
-    read -p "按回车使用此密钥，或输入自定义密钥: " input_key
+    read -p "按回车使用推荐密钥 [${def_key}]: " input_key
     secret_key=${input_key:-$def_key}
     echo "------------------------------------------------"
 
-    echo -e "${YELLOW}================================================================${PLAIN}"
-    echo -e "${RED}⚠️  特别提示  ⚠️${PLAIN}"
-    echo -e "${YELLOW}已有Web服务(Nginx/Caddy)请选 [1] IP模式，否则会导致端口冲突。${PLAIN}"
-    echo -e "${YELLOW}================================================================${PLAIN}"
-    
     echo "请选择访问方式："
     echo "  1) IP + 端口访问"
-    echo "  2) 域名访问 (自动 HTTPS)"
+    echo "  2) 域名访问 (自动申请证书，全新机器推荐)"
+    echo "  3) 域名访问 (共存模式，已有 Nginx/Caddy 用户推荐)"
     read -p "请输入选项 [2]: " net_choice
     net_choice=${net_choice:-2}
 
     if [ "$net_choice" == "1" ]; then
         read -p "请输入开放端口 [8081]: " port
         port=${port:-8081}
-        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key"
-        print_info "正在启动容器 (X-Fusion Panel)..."
+        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key" "false"
+        
+        print_info "正在启动容器..."
         docker compose up -d --build
         ip_addr=$(curl -s ifconfig.me)
-        print_success "安装成功！"
-        echo -e "登录地址: http://${ip_addr}:${port}"
+        print_success "安装成功！登录地址: http://${ip_addr}:${port}"
+
+    elif [ "$net_choice" == "3" ]; then
+        read -p "请输入内部运行端口 [8081]: " port
+        port=${port:-8081}
+        # 共存模式：生成不带 Caddy 的 compose
+        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "false"
+        
+        print_info "正在启动容器..."
+        docker compose up -d --build
+        
+        print_success "安装成功！(共存模式)"
+        echo -e "${YELLOW}请将以下配置添加到您的主 Caddyfile/Nginx 中：${PLAIN}"
+        echo "------------------------------------------------"
+        echo "handle_path /convert* { reverse_proxy 127.0.0.1:25500 }"
+        echo "handle { reverse_proxy 127.0.0.1:${port} }"
+        echo "------------------------------------------------"
+
     else
         read -p "请输入您的域名: " domain
         if [ -z "$domain" ]; then print_error "域名不能为空"; fi
-        read -p "请输入内部运行端口 [8081]: " port
-        port=${port:-8081}
-        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key"
-        print_info "正在启动容器 (X-Fusion Panel)..."
+        port=8081 # 域名模式内部端口固定即可
+        
+        # 写入 Caddy 配置文件 (在启动前写入，防止 Caddy 启动报错)
+        configure_caddy_docker "$domain"
+        
+        # 全新模式：生成带 Caddy 的 compose
+        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "true"
+        
+        print_info "正在启动容器..."
         docker compose up -d --build
-        install_caddy_if_needed
-        configure_caddy "$domain" "$port"
-        print_success "安装成功！"
-        echo -e "登录地址: https://${domain}"
+        
+        print_success "安装成功！登录地址: https://${domain}"
     fi
 }
 
 update_panel() {
-    # 智能判断：如果是旧目录用户运行了更新，先执行迁移
     if [ -d "$OLD_INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
         print_warning "检测到旧版目录，正在迁移到新架构..."
         migrate_old_data
@@ -317,80 +310,62 @@ update_panel() {
 
     if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录，请先执行安装。"; fi
     
-    # [修复] 检查配置是否存在（支持主文件或备份文件）
-    if [ ! -f "${INSTALL_DIR}/docker-compose.yml" ] && [ ! -f "${INSTALL_DIR}/docker-compose.yml.bak" ]; then 
-        print_error "配置文件丢失，无法更新。"
-    fi
-
-    echo -e "${BLUE}=================================================${PLAIN}"
-    print_info "正在执行 X-Fusion Panel 智能更新..."
-    
+    # 备份当前配置
     cd ${INSTALL_DIR}
-    
-    # [修复] 如果有现役配置，先备份为 .bak；如果没现役配置但有 .bak（刚迁移完），则跳过备份步骤
     if [ -f "docker-compose.yml" ]; then
         cp docker-compose.yml docker-compose.yml.bak
-        print_info "已备份旧配置"
     fi
+    
+    if [ ! -f "docker-compose.yml.bak" ]; then print_error "配置文件丢失，无法更新。"; fi
 
-    # [修复] 统一从 .bak 读取旧配置（确保无论是迁移还是更新都能读到）
+    echo -e "${BLUE}=================================================${PLAIN}"
+    print_info "正在执行智能更新 (保留原有网络模式)..."
+
     CONFIG_FILE="docker-compose.yml.bak"
 
-    # 提取旧配置
+    # 1. 提取旧配置
     OLD_USER=$(grep "XUI_USERNAME=" $CONFIG_FILE | cut -d= -f2)
     OLD_PASS=$(grep "XUI_PASSWORD=" $CONFIG_FILE | cut -d= -f2)
     OLD_KEY=$(grep "XUI_SECRET_KEY=" $CONFIG_FILE | cut -d= -f2)
     PORT_LINE=$(grep ":8080" $CONFIG_FILE | head -n 1)
     
+    # 2. 智能判断原有模式
     if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
         BIND_IP="127.0.0.1"
         OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*127.0.0.1:([0-9]+):8080.*/\1/' | tr -d ' "-')
-        IS_DOMAIN_MODE=true
-    else
-        BIND_IP="0.0.0.0"
-        if [[ $PORT_LINE == *"0.0.0.0"* ]]; then
-             OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*0.0.0.0:([0-9]+):8080.*/\1/' | tr -d ' "-')
+        # 如果包含 Caddy 服务，则是全自动模式；否则是共存模式
+        if grep -q "container_name: caddy" $CONFIG_FILE; then
+            ENABLE_CADDY="true"
         else
-             OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*- "([0-9]+):8080.*/\1/' | tr -d ' "-')
+            ENABLE_CADDY="false"
         fi
-        IS_DOMAIN_MODE=false
+    else
+        # IP 模式
+        BIND_IP="0.0.0.0"
+        OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*:([0-9]+):8080.*/\1/' | tr -d ' "-')
+        if [[ $OLD_PORT == *"0.0.0.0"* ]]; then OLD_PORT=$(echo "$OLD_PORT" | cut -d: -f2); fi
+        ENABLE_CADDY="false"
     fi
 
-    # 停止旧容器
+    # 3. 停止并清理
     docker compose down
+    if docker ps -a | grep -q "xui_manager"; then docker rm -f xui_manager 2>/dev/null; fi
 
-    # 彻底删除可能的旧名容器（防止冲突）
-    if docker ps -a | grep -q "xui_manager"; then
-        docker rm -f xui_manager 2>/dev/null
+    # 4. 更新代码
+    deploy_base
+
+    # 5. 重新生成配置 (使用提取出的参数)
+    generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY"
+
+    # 如果是全自动模式，恢复 Caddy 配置
+    if [ "$ENABLE_CADDY" == "true" ] && [ -f "Caddyfile" ]; then
+         EXISTING_DOMAIN=$(grep " {" Caddyfile | head -n 1 | awk '{print $1}')
+         if [ -n "$EXISTING_DOMAIN" ]; then
+             configure_caddy_docker "${EXISTING_DOMAIN}"
+         fi
     fi
 
-    print_info "正在拉取最新代码..."
-    curl -sS -o app/main.py ${REPO_URL}/app/main.py
-    
-    print_info "更新静态资源..."
-    mkdir -p static
-    
-    # [修复] 补齐探针安装脚本
-    curl -sS -o static/x-install.sh "${REPO_URL}/x-install.sh"
-    
-    curl -sS -o static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
-    curl -sS -o static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
-    curl -sS -o static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
-
-    # [修复] 补齐世界地图数据
-    print_info "更新地图数据..."
-    curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
-
-    generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY"
-
-    if [ "$IS_DOMAIN_MODE" = true ] && [ -f "$CADDY_CONFIG_PATH" ]; then
-        EXISTING_DOMAIN=$(grep -B 2 "reverse_proxy 127.0.0.1:${OLD_PORT}" "$CADDY_CONFIG_PATH" | grep " {" | head -n 1 | awk '{print $1}')
-        if [ -n "$EXISTING_DOMAIN" ]; then
-            install_caddy_if_needed
-            configure_caddy "${EXISTING_DOMAIN}" "${OLD_PORT}"
-        fi
-    fi
-
+    # 6. 启动
     print_info "启动新容器..."
     docker compose up -d --build
     print_success "更新完成！"
@@ -400,27 +375,11 @@ uninstall_panel() {
     read -p "确定要卸载吗？(y/n): " confirm
     if [ "$confirm" != "y" ]; then exit 0; fi
     
-    # 删除新目录
     if [ -d "${INSTALL_DIR}" ]; then
         cd ${INSTALL_DIR}
         docker compose down
         cd /root
         rm -rf ${INSTALL_DIR}
-    fi
-    
-    # 也检查旧目录，防止残留
-    if [ -d "${OLD_INSTALL_DIR}" ]; then
-        cd "${OLD_INSTALL_DIR}"
-        docker compose down 2>/dev/null
-        cd /root
-        rm -rf "${OLD_INSTALL_DIR}"
-    fi
-
-    if [ -f "$CADDY_CONFIG_PATH" ]; then
-        if grep -q "$CADDY_MARK_START" "$CADDY_CONFIG_PATH"; then
-            sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$CADDY_CONFIG_PATH"
-            systemctl reload caddy
-        fi
     fi
     print_success "卸载完成。"
 }
