@@ -9624,8 +9624,8 @@ async def render_desktop_status_page():
 
         if total_pages > 1:
             with pagination_ref:
-                # ✨✨✨ 修改：max-pages=5 ✨✨✨
-                p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue outline rounded text-color=white active-color=blue active-text-color=white max-pages=5')
+                # ✨✨✨ 修改：max-pages=7 ✨✨✨
+                p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue outline rounded text-color=white active-color=blue active-text-color=white max-pages=7')
                 p.value = page_state['page']
                 p.on('update:model-value', lambda e: change_page(e.args))
                 ui.label(f'共 {total_items} 台').classes('text-xs text-gray-400 ml-4 self-center')
