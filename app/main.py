@@ -1312,7 +1312,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 后台专用线程池 (处理 90+ 服务器同步)
 BG_EXECUTOR = ThreadPoolExecutor(max_workers=20)
 # 2. 限制后台并发数
-SYNC_SEMAPHORE = asyncio.Semaphore(15) 
+SYNC_SEMAPHORE = asyncio.Semaphore(50) 
 
 
 LAST_AUTO_SYNC_TIME = 0
