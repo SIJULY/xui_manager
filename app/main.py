@@ -9291,29 +9291,36 @@ async def render_desktop_status_page():
     for s in sorted_init_list: create_server_card(s)
     render_tabs(); apply_filter(CURRENT_PROBE_TAB)
     
+    # ✨✨✨ [终极修复版] 包含了：国旗字体 + 北京坐标 + HTTPS 接口 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
         window.regionStats = {region_stats_json}; 
         window.countryCentroids = {centroids_json}; 
         
-        var defaultPt = [170.0, 20.0];
+        // ✅ 修改 1：默认坐标改成北京 [经度, 纬度]
+        var defaultPt = [116.40, 39.90]; 
+        
         var defaultZoom = 1.35; 
         var focusedZoom = 4.0; 
         var isZoomed = false; 
         var myChart = null;
 
+        // ✅ 修改 2：使用支持 HTTPS 的 IP 接口
         function tryIpLocation() {{
-            fetch('http://ip-api.com/json/?fields=lat,lon')
+            fetch('https://ipapi.co/json/')
                 .then(response => response.json())
                 .then(data => {{
-                    if(data.lat && data.lon) {{
-                        console.log("Using IP Location:", data.lat, data.lon);
-                        defaultPt = [data.lon, data.lat];
+                    // 注意接口字段是 latitude/longitude
+                    if(data.latitude && data.longitude) {{
+                        console.log("Using HTTPS IP Location:", data.latitude, data.longitude);
+                        defaultPt = [data.longitude, data.latitude];
                         if(!isZoomed && myChart) renderMap();
                     }}
                 }})
-                .catch(e => console.log("IP Location failed"));
+                .catch(e => {{
+                    console.log("HTTPS IP Location failed, staying at Beijing.");
+                }});
         }}
 
         function checkAndRender() {{
@@ -9353,7 +9360,7 @@ async def render_desktop_status_page():
                     var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
 
-                    // ✨✨✨ 关键修改：字体栈首选 Twemoji Country Flags ✨✨✨
+                    // ✅ 修改 3：定义字体变量 (优先使用 Twemoji)
                     var emojiFont = '"Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif';
 
                     var option = {{
@@ -9365,6 +9372,7 @@ async def render_desktop_status_page():
                                 if (params.data && params.data.country_key) searchKey = params.data.country_key;
                                 var stats = window.regionStats[searchKey];
                                 if (!stats) return;
+                                // 应用字体到 Tooltip
                                 return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding:12px; border-radius:8px; color:${{ttTextMain}}; font-family: ${{emojiFont}};">
                                     <strong>${{stats.flag}} ${{stats.cn}}</strong><br>
                                     在线: ${{stats.online}} / 总计: ${{stats.total}}
@@ -9381,13 +9389,13 @@ async def render_desktop_status_page():
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff' }}, data: mapData.cities }},
                             
-                            // ✨✨✨ 在国旗 Label 中应用字体 ✨✨✨
+                            // ✅ 修改 4：应用字体到国旗 Label
                             {{ 
                                 type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, 
                                 label: {{ 
                                     show: true, position: 'top', formatter: '{{b}}', 
                                     color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5],
-                                    fontFamily: emojiFont // <--- 这里应用了新字体
+                                    fontFamily: emojiFont // <--- 关键点
                                 }}, 
                                 data: mapData.flags 
                             }},
