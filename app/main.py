@@ -6659,7 +6659,7 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
             # (3) 设置按钮
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
-# ================= 核心：静默刷新 UI 数据  =================
+# ================= 核心：静默刷新 UI 数据 (已修复：统一为区域分布) =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -6671,7 +6671,10 @@ async def refresh_dashboard_ui():
         total_traffic_bytes = 0
         
         server_traffic_map = {}
-        protocol_count = {}
+        
+        # ✨✨✨ [修复] 使用 country_counter 替代 protocol_count ✨✨✨
+        from collections import Counter
+        country_counter = Counter()
         
         # --- 1. 计算基础统计数据 ---
         for s in SERVERS_CACHE:
@@ -6680,20 +6683,28 @@ async def refresh_dashboard_ui():
             name = s.get('name', '未命名')
             srv_traffic = 0
             
+            # 统计区域 (与主页逻辑保持一致)
+            try:
+                # 优先读取 group，如果是默认分组则探测
+                g_name = s.get('group')
+                if not g_name or g_name in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区']:
+                    g_name = detect_country_group(name, s)
+                if not g_name: g_name = "🏳️ 其他"
+                country_counter[g_name] += 1
+            except: 
+                country_counter["🏳️ 其他"] += 1
+
             if res:
                 online_servers += 1
                 total_nodes += len(res)
                 for n in res: 
                     t = int(n.get('up', 0)) + int(n.get('down', 0))
                     total_traffic_bytes += t; srv_traffic += t
-                    proto = str(n.get('protocol', 'unknown')).upper()
-                    protocol_count[proto] = protocol_count.get(proto, 0) + 1
+                    # 移除协议统计
             
             if custom:
                 total_nodes += len(custom)
-                for cn in custom:
-                    c_proto = str(cn.get('protocol', 'custom')).upper()
-                    protocol_count[c_proto] = protocol_count.get(c_proto, 0) + 1
+                # 移除自定义节点协议统计
 
             server_traffic_map[name] = srv_traffic
 
@@ -6703,6 +6714,7 @@ async def refresh_dashboard_ui():
         if DASHBOARD_REFS.get('traffic'): DASHBOARD_REFS['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
         if DASHBOARD_REFS.get('subs'): DASHBOARD_REFS['subs'].set_text(str(len(SUBS_CACHE)))
 
+        # 更新柱状图 (保持不变)
         if DASHBOARD_REFS.get('bar_chart'):
             sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
             names = [x[0] for x in sorted_traffic]
@@ -6711,13 +6723,26 @@ async def refresh_dashboard_ui():
             DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = values
             DASHBOARD_REFS['bar_chart'].update()
 
+        # ✨✨✨ [修复] 更新饼图为区域分布 (Top 5 + Others) ✨✨✨
         if DASHBOARD_REFS.get('pie_chart'):
-            pie_data = [{'name': k, 'value': v} for k, v in protocol_count.items()]
+            # 处理数据：排序并合并 Top 5 以外的
+            sorted_regions = country_counter.most_common()
+            
+            pie_data = []
+            if len(sorted_regions) > 5:
+                top_5 = sorted_regions[:5]
+                others_count = sum(item[1] for item in sorted_regions[5:])
+                for k, v in top_5: pie_data.append({'name': f"{k} ({v})", 'value': v})
+                if others_count > 0: pie_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
+            else:
+                for k, v in sorted_regions: pie_data.append({'name': f"{k} ({v})", 'value': v})
+
             if not pie_data: pie_data = [{'name': '暂无数据', 'value': 0}]
+            
             DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
             DASHBOARD_REFS['pie_chart'].update()
 
-        # --- ✨✨✨ 3. 新增：同步刷新地图数据 ✨✨✨ ---
+        # --- 3. 同步刷新地图数据 (保持不变) ---
         globe_data_list = []
         seen_locations = set()
         for s in SERVERS_CACHE:
@@ -6736,14 +6761,11 @@ async def refresh_dashboard_ui():
                         full_group = detect_country_group(s.get('name', ''), s)
                         flag_only = full_group.split(' ')[0]
                     except: pass
-                    # 旧版格式：{lat, lon, name}
                     globe_data_list.append({'lat': lat, 'lon': lon, 'name': flag_only})
         
-        # 只有当前是在仪表盘页面时才执行 JS
         if CURRENT_VIEW_STATE.get('scope') == 'DASHBOARD':
             import json
             json_data = json.dumps(globe_data_list, ensure_ascii=False)
-            # ✨ 核心修复：调用我们刚才改名后的 updateDashboardMap
             ui.run_javascript(f'if(window.updateDashboardMap) window.updateDashboardMap({json_data});')
 
     except Exception as e:
