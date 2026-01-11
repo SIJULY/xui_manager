@@ -7863,7 +7863,7 @@ def render_sidebar_content():
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog) \
             .props('flat align=left').classes(bottom_btn_3d)
         
-# ================== 登录与 MFA 逻辑 ==================
+# ================== 登录与 MFA 逻辑 (修正版) ==================
 @ui.page('/login')
 def login_page(request: Request): 
     # 容器：用于切换登录步骤 (账号密码 -> MFA)
@@ -7888,9 +7888,7 @@ def login_page(request: Request):
 
             ui.button('下一步', on_click=check_cred).classes('w-full bg-slate-900 text-white shadow-lg h-10')
 
-            # --- ✨✨✨ 新增：底部版权信息 ✨✨✨ ---
             ui.label('© Powered by 小龙女她爸').classes('text-xs text-gray-400 mt-6 w-full text-center font-mono opacity-80')
-            # ----------------------------------------
 
     # --- 步骤 2: MFA 验证或设置 ---
     def check_mfa():
@@ -7907,7 +7905,6 @@ def login_page(request: Request):
     def render_setup(secret):
         container.clear()
         
-        # 生成二维码图片 Base64
         totp_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=ADMIN_USER, issuer_name="X-Fusion Panel")
         qr = qrcode.make(totp_uri)
         img_buffer = io.BytesIO()
@@ -7921,7 +7918,6 @@ def login_page(request: Request):
             with ui.row().classes('w-full justify-center mb-2'):
                 ui.image(f'data:image/png;base64,{img_b64}').style('width: 180px; height: 180px')
             
-            # 点击复制密钥功能
             with ui.row().classes('w-full justify-center items-center gap-1 mb-4 bg-gray-100 p-1 rounded cursor-pointer').on('click', lambda: safe_copy_to_clipboard(secret)):
                 ui.label(secret).classes('text-xs font-mono text-gray-600')
                 ui.icon('content_copy').classes('text-gray-400 text-xs')
@@ -7931,7 +7927,6 @@ def login_page(request: Request):
             async def confirm():
                 totp = pyotp.TOTP(secret)
                 if totp.verify(code.value):
-                    # 验证成功，保存密钥
                     ADMIN_CONFIG['mfa_secret'] = secret
                     await save_admin_config()
                     ui.notify('绑定成功', type='positive')
@@ -7946,15 +7941,12 @@ def login_page(request: Request):
         container.clear()
         with container:
             ui.label('安全验证').classes('text-xl font-bold mb-6 w-full text-center')
-            
             with ui.column().classes('w-full items-center mb-6'):
                 ui.icon('verified_user').classes('text-6xl text-blue-600 mb-2')
                 ui.label('请输入 Authenticator 动态码').classes('text-xs text-gray-400')
 
             code = ui.input(placeholder='------').props('outlined input-class=text-center text-xl tracking-widest').classes('w-full mb-6')
             code.on('keydown.enter', lambda: verify())
-            
-            # 自动聚焦输入框 (JS)
             ui.timer(0.1, lambda: ui.run_javascript(f'document.querySelector(".q-field__native").focus()'), once=True)
 
             def verify():
@@ -7968,45 +7960,56 @@ def login_page(request: Request):
             ui.button('验证登录', on_click=verify).classes('w-full bg-slate-900 text-white h-10')
             ui.button('返回', on_click=render_step1).props('flat dense').classes('w-full mt-2 text-gray-400 text-xs')
 
+    # ✨✨✨ [核心修复] finish 函数 ✨✨✨
     def finish():
+        # 1. 基础认证标记
         app.storage.user['authenticated'] = True
         
-        # --- 登录成功后记录真实 IP ---
-        # 优先获取 X-Forwarded-For (适配 Docker/反代)，否则获取直连 IP
+        # 2. 写入全局版本号 (防止被踢出)
+        if 'session_version' not in ADMIN_CONFIG:
+            ADMIN_CONFIG['session_version'] = str(uuid.uuid4())[:8]
+        app.storage.user['session_version'] = ADMIN_CONFIG['session_version']
+        
+        # 3. 记录 IP (用于主页的变动检测弹窗)
         try:
             client_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
-            app.storage.user['login_ip'] = client_ip
-        except:
-            pass # 防止极端情况报错
-        # --------------------------------------
+            # 变量名必须是 last_known_ip，与主页对应
+            app.storage.user['last_known_ip'] = client_ip
+        except: pass
 
         ui.navigate.to('/')
 
     render_step1()
 
-
-# ================= 0. 认证检查辅助函数 (请确保添加了这个函数) =================
+# ================= 0. 认证检查辅助函数 (升级版：支持版本控制) =================
 def check_auth(request: Request):
     """
-    检查用户是否已登录
+    检查用户是否已登录，且会话版本是否有效
     """
-    return app.storage.user.get('authenticated', False)
+    # 1. 基础认证：检查 Cookie 里有没有 authenticated 标记
+    if not app.storage.user.get('authenticated', False):
+        return False
+    
+    # 2. 全局会话版本校验 (实现一键踢人核心逻辑)
+    # 获取当前系统要求的全局版本号 (如 v1)
+    current_global_ver = ADMIN_CONFIG.get('session_version', 'init')
+    # 获取用户 Cookie 里的版本号
+    user_ver = app.storage.user.get('session_version', '')
+    
+    # 如果版本不匹配 (比如管理员刚刚重置了密钥)，视为未登录
+    if current_global_ver != user_ver:
+        return False
+        
+    return True
 
-
-# ================= [本地化版] 主页入口  =================
+# ================= [本地化版] 主页入口 (含 IP 检测与强制下线) =================
 @ui.page('/')
 def main_page(request: Request):
     # ================= 1. 注入全局资源与样式 =================
-    
-    # 1.1 xterm.js 终端依赖
     ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
-
-    #  2D 平面地图依赖 (ECharts) 
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
-
-    # 1.2 核心样式注入
     ui.add_head_html('''
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
@@ -8014,31 +8017,73 @@ def main_page(request: Request):
                 font-family: 'Noto Sans SC', "Roboto", "Helvetica", "Arial", sans-serif, "Noto Color Emoji"; 
                 background-color: #f8fafc; 
             }
-            .nicegui-connection-lost { 
-                display: none !important; 
-                opacity: 0 !important;
-                pointer-events: none !important;
-            }
+            .nicegui-connection-lost { display: none !important; }
         </style>
     ''')
 
-    # ================= 2. 基础认证检查 =================
+    # ================= 2. 认证检查 =================
     if not check_auth(request): 
         return RedirectResponse('/login')
 
-    # ================= 3. 获取并检查 IP =================
+    # ================= 3. IP 变动检测与处理 =================
     try:
+        # 获取当前真实 IP
         current_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
-        recorded_ip = app.storage.user.get('login_ip')
-        
-        if recorded_ip and recorded_ip != current_ip:
-            app.storage.user.clear()
-            ui.notify('环境变动，请重新登录', type='negative')
-            return RedirectResponse('/login')
-            
-        display_ip = recorded_ip if recorded_ip else current_ip
     except:
-        display_ip = "Unknown"
+        current_ip = "Unknown"
+        
+    display_ip = current_ip # 用于右上角显示
+
+    # 获取上次记录的 IP (从 Cookie 读取)
+    last_ip = app.storage.user.get('last_known_ip', '')
+    
+    # 立即更新存储为当前 IP (为下一次检测做准备)
+    app.storage.user['last_known_ip'] = current_ip
+    
+    # ✨✨✨ 核心逻辑：强制下线 (重置密钥) ✨✨✨
+    async def reset_global_session(dialog_ref=None):
+        # 1. 生成新的随机版本号 (例如 "v2")
+        new_ver = str(uuid.uuid4())[:8]
+        ADMIN_CONFIG['session_version'] = new_ver
+        await save_admin_config()
+        
+        if dialog_ref: dialog_ref.close()
+        
+        # 2. 弹出提示并等待
+        ui.notify('🔒 安全密钥已重置，正在强制所有设备下线...', type='warning', close_button=False)
+        await asyncio.sleep(1.5)
+        
+        # 3. 清除当前用户的 Session 并跳转登录页
+        app.storage.user.clear()
+        ui.navigate.to('/login')
+
+    # ✨✨✨ 弹窗逻辑：如果 IP 变了，弹出提示框 ✨✨✨
+    if last_ip and last_ip != current_ip:
+        def open_ip_alert():
+            with ui.dialog() as d, ui.card().classes('w-96 p-5 border-t-4 border-red-500 shadow-2xl'):
+                with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
+                    ui.icon('security', size='md')
+                    ui.label('安全警告：登录 IP 变动').classes('font-bold text-lg')
+                
+                ui.label('检测到您的登录 IP 发生了变化：').classes('text-sm text-gray-600')
+                
+                with ui.grid().classes('grid-cols-2 gap-2 my-4 bg-red-50 p-3 rounded border border-red-100'):
+                    ui.label('上次 IP:').classes('text-xs font-bold text-gray-500')
+                    ui.label(last_ip).classes('text-xs font-mono font-bold text-gray-800')
+                    ui.label('本次 IP:').classes('text-xs font-bold text-gray-500')
+                    ui.label(current_ip).classes('text-xs font-mono font-bold text-blue-600')
+                
+                ui.label('如果是您切换了网络 (如 Wi-Fi 转 4G)，请忽略。').classes('text-xs text-gray-400')
+                ui.label('若非本人操作，请立即重置密钥！').classes('text-xs text-red-500 font-bold mt-1')
+
+                with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                    ui.button('我知道了', on_click=d.close).props('flat dense color=grey')
+                    # 点击此按钮触发强制下线
+                    ui.button('强制所有设备下线', color='red', icon='gpp_bad', on_click=lambda: reset_global_session(d)).props('unelevated dense')
+            d.open()
+        
+        # 延迟 0.5 秒弹出，确保页面加载完毕
+        ui.timer(0.5, open_ip_alert, once=True)
 
     # ================= 4. UI 构建 =================
     
@@ -8052,14 +8097,18 @@ def main_page(request: Request):
             
             # 左侧
             with ui.row().classes('items-center gap-2'):
-                # 使用 drawer.toggle() 切换侧边栏
                 ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round dense color=white')
                 
                 ui.label('X-Fusion Panel').classes('text-lg font-bold ml-2 tracking-wide')
                 ui.label(f"[{display_ip}]").classes('text-xs text-gray-400 font-mono pt-1 hidden sm:block')
 
-            # 右侧
+            # 右侧按钮区
             with ui.row().classes('items-center gap-2 mr-2'):
+                
+                # ✨✨✨ [新增] 主动重置密钥按钮 (盾牌图标) ✨✨✨
+                with ui.button(icon='gpp_bad', color='red', on_click=lambda: reset_global_session(None)).props('flat dense round').tooltip('安全重置：强制所有已登录用户下线'):
+                     ui.badge('Reset', color='orange').props('floating rounded')
+
                 with ui.button(icon='vpn_key', on_click=lambda: safe_copy_to_clipboard(AUTO_REGISTER_SECRET)).props('flat dense round').tooltip('点击复制通讯密钥'):
                     ui.badge('Key', color='red').props('floating rounded')
                 
@@ -8069,46 +8118,34 @@ def main_page(request: Request):
     global content_container
     content_container = ui.column().classes('w-full h-full pl-4 pr-4 pt-4 overflow-y-auto bg-slate-50')
     
-# ================= 5. 启动后台任务 =================
-    
-    # ✨✨✨ [新增] 自动初始化任务：抓取地址 + 双重保活 ✨✨✨
+    # ================= 5. 后台任务 (自动初始化) =================
     async def auto_init_system_settings():
         try:
-            # 1. 获取当前浏览器地址 (例如 https://status.sijuly.tk)
             current_origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
             if not current_origin: return
 
-            # 2. 读取当前配置
             stored_url = ADMIN_CONFIG.get('manager_base_url', '')
-            
-            # 3. 标记是否有变动
             need_save = False
+            
+            # 初始化会话版本 (防止第一次登录报错)
+            if 'session_version' not in ADMIN_CONFIG:
+                ADMIN_CONFIG['session_version'] = 'init_v1'
+                need_save = True
 
-            # --- 逻辑 A: 自动修正通信地址 ---
-            # 如果地址为空，或者还是默认的内部地址/回环地址，就覆盖它
             if not stored_url or 'xui-manager' in stored_url or '127.0.0.1' in stored_url:
                 ADMIN_CONFIG['manager_base_url'] = current_origin
                 need_save = True
-                logger.info(f"♻️ [自动配置] 通信地址已修正为: {current_origin}")
 
-            # --- 逻辑 B: 双重保险，再次确认探针是开启的 ---
             if not ADMIN_CONFIG.get('probe_enabled'):
                 ADMIN_CONFIG['probe_enabled'] = True
                 need_save = True
 
-            # 4. 如果有变动，执行保存并提示
-            if need_save:
-                await save_admin_config()
-                # 仅在首次修正时弹出提示，避免每次刷新都弹
-                ui.notify(f'✅ 系统初始化完成，通信地址已自动绑定: {current_origin}', type='positive', close_button=True)
+            if need_save: await save_admin_config()
+        except: pass
 
-        except Exception as e:
-            pass
-
-    # 开机后延迟 1 秒执行一次 (不阻塞页面加载)
     ui.timer(1.0, auto_init_system_settings, once=True)
 
-    # --- 原有的视图恢复逻辑 (保持不变) ---
+    # 视图恢复逻辑
     async def restore_last_view():
         last_scope = app.storage.user.get('last_view_scope', 'DASHBOARD')
         last_data_id = app.storage.user.get('last_view_data', None)
