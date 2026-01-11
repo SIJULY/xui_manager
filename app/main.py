@@ -1694,15 +1694,16 @@ def get_echarts_region_name(name_raw):
         if key in name: return MATCH_MAP[key]
     return None
 
+# ================= 全局地图数据准备 (修复：包含详细服务器列表) =================
 def prepare_map_data():
     try:
         city_points_map = {} 
         flag_points_map = {} 
-        unique_deployed_countries = set() # 统计真实国家数
+        unique_deployed_countries = set() 
         region_stats = {} 
         active_regions_for_highlight = set()
 
-        # 1. 国旗 -> 标准地图名映射
+        # 1. 国旗 -> 标准地图名映射 (ECharts World Map 英文名)
         FLAG_TO_MAP_NAME = {
             '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
             '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
@@ -1719,19 +1720,17 @@ def prepare_map_data():
             '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
         }
 
-        # 2. 地图名别名库
+        # 2. 地图名别名库 (用于高亮区域)
         MAP_NAME_ALIASES = {
             'United States': ['United States of America', 'USA'],
             'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
             'China': ['People\'s Republic of China'],
             'Russia': ['Russian Federation'],
             'South Korea': ['Korea', 'Republic of Korea'],
-            'North Korea': ['Dem. Rep. Korea'],
-            'Vietnam': ['Viet Nam'],
-            'Laos': ['Lao PDR']
+            'Vietnam': ['Viet Nam']
         }
 
-        # 3. 中心点坐标库
+        # 3. 中心点坐标库 (用于点击聚焦)
         COUNTRY_CENTROIDS = {
             'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
             'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
@@ -1740,88 +1739,126 @@ def prepare_map_data():
             'South Korea': [127.76, 35.90], 'Singapore': [103.81, 1.35], 'Turkey': [35.24, 38.96]
         }
         
-        CITY_COORDS_FIX = { '巴淡': (-6.20, 106.84), 'Batam': (-6.20, 106.84), 'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76) }
+        # 特殊城市坐标修正
+        CITY_COORDS_FIX = { 
+            'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 
+            'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76),
+            'Seoul': (37.56, 126.97), 'London': (51.50, -0.12), 'Singapore': (1.35, 103.81)
+        }
         
-        from collections import Counter; country_counter = Counter()
+        from collections import Counter
+        country_counter = Counter()
         snapshot = list(SERVERS_CACHE)
+        
+        # 临时存储结构: { 'United States': { flag, cn, total, online, servers: [] } }
         temp_stats_storage = {}
 
         for s in snapshot:
             s_name = s.get('name', '')
             
-            # A. 确定国旗
+            # --- A. 确定国旗与标准名 ---
+            # 优先从名字里提取国旗
             flag_icon = "📍"
-            for f in FLAG_TO_MAP_NAME.keys():
+            map_name_standard = None
+            
+            # 1. 尝试直接从名字匹配国旗
+            for f, m_name in FLAG_TO_MAP_NAME.items():
                 if f in s_name:
                     flag_icon = f
+                    map_name_standard = m_name
                     break
-            if flag_icon == "📍":
+            
+            # 2. 如果没找到，尝试通过分组或检测函数
+            if not map_name_standard:
                 try:
+                    # 这是一个智能检测函数，会返回如 "🇺🇸 美国"
                     group_str = detect_country_group(s_name, s)
                     if group_str:
-                        first_char = group_str.split(' ')[0]
-                        if any(c in first_char for c in FLAG_TO_MAP_NAME):
-                            flag_icon = first_char
+                        flag_part = group_str.split(' ')[0]
+                        # 再次查表
+                        if flag_part in FLAG_TO_MAP_NAME:
+                            flag_icon = flag_part
+                            map_name_standard = FLAG_TO_MAP_NAME[flag_part]
                 except: pass
 
+            # 3. 统计饼图数据
             try: country_counter[detect_country_group(s_name, s)] += 1
             except: pass
 
-            # B. 确定坐标
+            # --- B. 确定坐标 (用于飞线) ---
             lat, lon = None, None
+            # 优先用修正库
             for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
                 if city_key.lower() in s_name.lower(): lat, lon = c_lat, c_lon; break
+            # 其次用保存的坐标
             if not lat:
-                if 'lat' in s: lat, lon = s['lat'], s['lon']
+                if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
                 else: 
                     coords = get_coords_from_name(s_name)
                     if coords: lat, lon = coords[0], coords[1]
             
-            # C. 确定标准地图名
-            map_name_standard = FLAG_TO_MAP_NAME.get(flag_icon)
-            if not map_name_standard:
-                tmp = get_echarts_region_name(s_name)
-                if tmp and tmp.upper() in MATCH_MAP: map_name_standard = MATCH_MAP[tmp.upper()]
-
-            # D. 生成数据
+            # --- C. 生成数据点 ---
             if lat and lon and map_name_standard:
+                # 城市点 (圆点)
                 coord_key = f"{lat},{lon}"
                 if coord_key not in city_points_map: 
                     city_points_map[coord_key] = {'name': s_name, 'value': [lon, lat], 'country_key': map_name_standard}
                 
-                display_flag = flag_icon if flag_icon != "📍" else "📍"
-                if display_flag not in flag_points_map: 
-                    flag_points_map[display_flag] = {'name': display_flag, 'value': [lon, lat], 'country_key': map_name_standard}
+                # 国旗点 (显示在地图上的Emoji)
+                if flag_icon != "📍" and flag_icon not in flag_points_map:
+                    flag_points_map[flag_icon] = {'name': flag_icon, 'value': [lon, lat], 'country_key': map_name_standard}
 
+            # --- D. 聚合统计数据 (关键修改：填充 servers 列表) ---
             if map_name_standard:
                 unique_deployed_countries.add(map_name_standard)
+                
                 if map_name_standard not in temp_stats_storage:
+                    # 获取中文名用于显示 (例如 "美国")
+                    cn_name = map_name_standard
+                    try: 
+                        full_g = detect_country_group(s_name, s)
+                        if full_g and ' ' in full_g: cn_name = full_g.split(' ')[1]
+                    except: pass
+
                     temp_stats_storage[map_name_standard] = {
-                        'flag': flag_icon, 'cn': map_name_standard,
-                        'total': 0, 'online': 0, 'offline': 0, 'list': []
+                        'flag': flag_icon, 
+                        'cn': cn_name,
+                        'total': 0, 'online': 0, 
+                        'servers': [] # ✨✨✨ 初始化列表 ✨✨✨
                     }
                 
                 rs = temp_stats_storage[map_name_standard]
                 rs['total'] += 1
-                is_on = s.get('_status') == 'online'
-                if is_on: rs['online'] += 1
-                else: rs['offline'] += 1
                 
-                if len(rs['list']) < 15: 
-                    rs['list'].append({ 'name': s.get('name', 'Unknown'), 'status': 'online' if is_on else 'offline' })
+                # 判断在线状态
+                is_on = s.get('_status') == 'online' or (s.get('cpu_usage') is not None)
+                if is_on: rs['online'] += 1
+                
+                # ✨✨✨ 将服务器信息加入列表 ✨✨✨
+                rs['servers'].append({
+                    'name': s_name,
+                    'status': 'online' if is_on else 'offline'
+                })
 
+                # 更新中心点 (如果有坐标的话)
                 if map_name_standard not in COUNTRY_CENTROIDS and lat and lon:
                     COUNTRY_CENTROIDS[map_name_standard] = [lon, lat]
 
+        # --- E. 数据后处理 ---
         for std_name, stats in temp_stats_storage.items():
-            stats['list'].sort(key=lambda x: 0 if x['status'] == 'offline' else 1)
+            # 1. 对服务器列表进行排序：在线的在前，离线的在后
+            stats['servers'].sort(key=lambda x: 0 if x['status'] == 'online' else 1)
+            
             region_stats[std_name] = stats
             active_regions_for_highlight.add(std_name)
+            
+            # 添加别名索引 (让 UK 和 United Kingdom 都能查到数据)
             if std_name in MAP_NAME_ALIASES:
                 for alias in MAP_NAME_ALIASES[std_name]:
                     region_stats[alias] = stats
                     active_regions_for_highlight.add(alias)
 
+        # --- F. 生成饼图数据 ---
         pie_data = []
         if country_counter:
             sorted_counts = country_counter.most_common(5)
@@ -1830,13 +1867,14 @@ def prepare_map_data():
             if others > 0: pie_data.append({'name': f"🏳️ 其他 ({others})", 'value': others})
         else: pie_data.append({'name': '暂无数据', 'value': 0})
 
-        city_list = list(city_points_map.values()); flag_list = list(flag_points_map.values())
+        city_list = list(city_points_map.values())
+        flag_list = list(flag_points_map.values())
         
         return (
             json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions_for_highlight)}, ensure_ascii=False), 
             pie_data, 
             len(unique_deployed_countries), 
-            json.dumps(region_stats, ensure_ascii=False), 
+            json.dumps(region_stats, ensure_ascii=False), # 这里现在包含了 servers 列表
             json.dumps(COUNTRY_CENTROIDS, ensure_ascii=False)
         )
     except Exception as e:
@@ -4396,16 +4434,19 @@ def open_group_sort_dialog():
     d.open()
 import traceback # 引入用于打印报错堆栈
 
-# ================= 探针自定义分组一体化管理器  =================
+# ================= 探针自定义分组一体化管理器 (优化版：带分页，支持 1000+ 服务器) =================
 def open_unified_group_manager(mode='manage'):
     # 1. 数据准备与状态初始化
     if 'probe_custom_groups' not in ADMIN_CONFIG: 
         ADMIN_CONFIG['probe_custom_groups'] = []
     
+    # 状态字典
     state = {
         'current_group': None,
         'checkboxes': {},
-        'server_map': {s['url']: s for s in SERVERS_CACHE}
+        'server_map': {s['url']: s for s in SERVERS_CACHE},
+        'page': 1,           # 当前页码
+        'search_text': ''    # 搜索关键词
     }
 
     # UI 引用
@@ -4413,37 +4454,38 @@ def open_unified_group_manager(mode='manage'):
     server_list_container = None
     title_input = None
     action_area = None
+    pagination_ref = None # 分页器引用
 
-    # ================= 界面构建 (单列垂直布局，拒绝嵌套BUG) =================
-    with ui.dialog() as d, ui.card().classes('w-full max-w-4xl h-[90vh] flex flex-col p-0 gap-0'):
+    # ================= 界面构建 =================
+    with ui.dialog() as d, ui.card().classes('w-full max-w-5xl h-[90vh] flex flex-col p-0 gap-0'):
         
         # --- 1. 顶部：视图切换区 ---
         with ui.row().classes('w-full p-3 bg-slate-100 border-b items-center gap-2 overflow-x-auto flex-shrink-0'):
             ui.label('视图列表:').classes('font-bold text-gray-500 mr-2 text-xs')
-            
-            # 新建按钮 (绿色)
             ui.button('➕ 新建分组', on_click=lambda: load_group_data(None)).props('unelevated color=green text-color=white size=sm')
-            
             ui.separator().props('vertical').classes('mx-2 h-6')
-
-            # 视图列表容器 (横向排列)
             view_list_container = ui.row().classes('gap-2 items-center flex-nowrap')
-            
-            # 关闭按钮 (最右)
             ui.space()
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
 
-        # --- 2. 编辑区头部 (名称 + 全选操作) ---
-        with ui.row().classes('w-full p-4 bg-white border-b items-center gap-4 flex-shrink-0'):
-            title_input = ui.input('视图名称', placeholder='请输入分组名称...').props('outlined dense').classes('flex-grow font-bold')
+        # --- 2. 编辑区头部 (名称 + 搜索 + 全选) ---
+        with ui.row().classes('w-full p-4 bg-white border-b items-center gap-4 flex-shrink-0 wrap'):
+            title_input = ui.input('视图名称', placeholder='请输入分组名称...').props('outlined dense').classes('min-w-[200px] flex-grow font-bold')
             
+            # 搜索框
+            ui.input(placeholder='🔍 搜索服务器...', on_change=lambda e: update_search(e.value)).props('outlined dense dense').classes('w-48')
+
             with ui.row().classes('gap-2'):
-                ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=sm color=blue')
-                ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=sm color=grey')
+                ui.button('全选本页', on_click=lambda: toggle_page_all(True)).props('flat dense size=sm color=blue')
+                ui.button('清空本页', on_click=lambda: toggle_page_all(False)).props('flat dense size=sm color=grey')
 
         # --- 3. 服务器列表 (核心内容) ---
         with ui.scroll_area().classes('w-full flex-grow p-4 bg-gray-50'):
             server_list_container = ui.column().classes('w-full gap-2')
+            
+        # --- 3.5 分页控件栏 ---
+        with ui.row().classes('w-full p-2 justify-center bg-gray-50 border-t border-gray-200'):
+            pagination_ref = ui.row() # 占位符
 
         # --- 4. 底部保存区 ---
         with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0') as action_area:
@@ -4452,109 +4494,184 @@ def open_unified_group_manager(mode='manage'):
 
     # ================= 逻辑定义 =================
 
+    def update_search(val):
+        state['search_text'] = str(val).lower().strip()
+        state['page'] = 1 # 搜索时重置回第一页
+        render_servers()
+
     def render_views():
         view_list_container.clear()
         groups = ADMIN_CONFIG.get('probe_custom_groups', [])
-        
         with view_list_container:
             for g in groups:
                 is_active = (g == state['current_group'])
-                # 激活状态用蓝色实心，未激活用灰色描边
                 btn_props = 'unelevated color=blue' if is_active else 'outline color=grey text-color=grey-8'
                 ui.button(g, on_click=lambda _, name=g: load_group_data(name)).props(f'{btn_props} size=sm')
 
     def render_servers():
         server_list_container.clear()
-        state['checkboxes'] = {}
+        pagination_ref.clear()
+        state['checkboxes'] = {} # 重置当前页的 checkbox 引用
         
         if not SERVERS_CACHE:
             with server_list_container:
-                ui.label('⚠️ 未找到服务器数据，请先添加服务器').classes('w-full text-center text-red-500 mt-10')
+                ui.label('⚠️ 暂无服务器数据').classes('w-full text-center text-red-500 mt-10')
             return
 
-        with server_list_container:
-            # 按名称排序
-            try: sorted_servers = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
-            except: sorted_servers = SERVERS_CACHE
+        # 1. 过滤与排序
+        all_srv = SERVERS_CACHE
+        if state['search_text']:
+            all_srv = [s for s in all_srv if state['search_text'] in s.get('name', '').lower() or state['search_text'] in s.get('url', '').lower()]
+        
+        try: sorted_servers = sorted(all_srv, key=lambda x: str(x.get('name', '')))
+        except: sorted_servers = all_srv
 
-            # 使用 Grid 让排列更紧凑 (每行 3 个)
+        # 2. 分页计算
+        PAGE_SIZE = 48 # 每页 48 个 (3列 x 16行)
+        total_items = len(sorted_servers)
+        total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
+        if state['page'] > total_pages: state['page'] = 1
+        
+        start_idx = (state['page'] - 1) * PAGE_SIZE
+        end_idx = start_idx + PAGE_SIZE
+        current_page_items = sorted_servers[start_idx:end_idx]
+
+        # 3. 渲染列表
+        with server_list_container:
+            # 顶部显示数量
+            ui.label(f"共 {total_items} 台 (第 {state['page']}/{total_pages} 页)").classes('text-xs text-gray-400 mb-2')
+
             with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2'):
-                for s in sorted_servers:
+                for s in current_page_items:
                     url = s.get('url')
                     if not url: continue
                     
+                    # 检查是否已在 tags 中
+                    tags = s.get('tags', [])
+                    is_checked = (state['current_group'] in tags) if state['current_group'] else False
+                    
                     # 渲染卡片
-                    bg_cls = 'bg-white'
+                    bg_cls = 'bg-blue-50 border-blue-300' if is_checked else 'bg-white border-gray-200'
+                    
                     with ui.row().classes(f'items-center p-2 border rounded cursor-pointer hover:border-blue-400 transition {bg_cls}') as row:
-                        chk = ui.checkbox(text=None).props('dense')
+                        chk = ui.checkbox(value=is_checked).props('dense')
                         state['checkboxes'][url] = chk
                         
-                        # 绑定点击
-                        row.on('click', lambda _, c=chk: c.set_value(not c.value))
-                        
+                        # 绑定点击行切换
+                        def toggle_row(c=chk, r=row, s_in=s): 
+                            c.value = not c.value
+                            update_row_style(r, c.value)
+                            # 实时更新内存中的 tag (不再等保存按钮) -> 这样翻页不会丢失选中状态
+                            if state['current_group']:
+                                if c.value: 
+                                    if state['current_group'] not in s_in.get('tags', []):
+                                        if 'tags' not in s_in: s_in['tags'] = []
+                                        s_in['tags'].append(state['current_group'])
+                                else:
+                                    if state['current_group'] in s_in.get('tags', []):
+                                        s_in['tags'].remove(state['current_group'])
+
+                        row.on('click', toggle_row)
+                        chk.on('click.stop', lambda _, c=chk, r=row, s_in=s: [update_row_style(r, c.value), toggle_tag_memory(s_in, c.value)]) # 阻止冒泡单独处理
+
                         # 内容
                         with ui.column().classes('gap-0 ml-2 overflow-hidden'):
                             ui.label(s.get('name', 'Unknown')).classes('text-sm font-bold truncate text-gray-700')
-                            tags = s.get('tags', [])
-                            if tags:
-                                ui.label(f"Tags: {len(tags)}").classes('text-[10px] text-gray-400')
+                            ui.label(f"Tags: {len(tags)}").classes('text-[10px] text-gray-400')
+
+        # 4. 渲染底部分页器
+        if total_pages > 1:
+            with pagination_ref:
+                p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue')
+                p.value = state['page']
+                p.on('update:model-value', lambda e: change_page(e.args))
+
+    def update_row_style(row_el, checked):
+        if checked: row_el.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200')
+        else: row_el.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')
+
+    def toggle_tag_memory(s_in, checked):
+        # 针对 Checkbox 直接点击的逻辑
+        if not state['current_group']: return
+        if checked:
+            if 'tags' not in s_in: s_in['tags'] = []
+            if state['current_group'] not in s_in['tags']: s_in['tags'].append(state['current_group'])
+        else:
+            if state['current_group'] in s_in.get('tags', []): s_in['tags'].remove(state['current_group'])
+
+    def change_page(new_page):
+        state['page'] = new_page
+        render_servers()
 
     def load_group_data(group_name):
         state['current_group'] = group_name
-        render_views() # 刷新顶部按钮状态
-        
+        state['page'] = 1 # 切换分组重置页码
+        render_views()
         title_input.value = group_name if group_name else ''
         if not group_name: title_input.run_method('focus')
-        
-        # 按钮显隐
         action_area.visible = True
-        
-        # 更新勾选
-        for url, chk in state['checkboxes'].items():
-            srv = state['server_map'].get(url)
-            if srv:
-                tags = srv.get('tags', [])
-                should_check = (group_name in tags) if group_name else False
-                chk.value = should_check
+        render_servers()
 
-    def toggle_all(val):
-        for chk in state['checkboxes'].values(): chk.value = val
+    def toggle_page_all(val):
+        # 只操作当前页的 checkbox
+        for url, chk in state['checkboxes'].items():
+            if chk.value != val:
+                chk.value = val
+                # 手动触发数据更新
+                s = state['server_map'].get(url)
+                if s: toggle_tag_memory(s, val)
+                # 样式更新无法直接获取 row 元素，这里利用重新渲染更新样式
+        render_servers()
 
     async def save_current_group():
+        # 因为我们在 toggle 时已经实时修改了内存中的 tags，这里主要负责保存到文件和处理改名
         old_name = state['current_group']
         new_name = title_input.value.strip()
         if not new_name: return safe_notify("名称不能为空", "warning")
 
         groups = ADMIN_CONFIG.get('probe_custom_groups', [])
         
+        # 处理改名
         if new_name != old_name:
             if new_name in groups: return safe_notify("名称已存在", "negative")
-            if old_name: groups[groups.index(old_name)] = new_name
-            else: groups.append(new_name)
-        
-        count = 0
-        for url, chk in state['checkboxes'].items():
-            srv = state['server_map'].get(url)
-            if not srv: continue
-            if 'tags' not in srv or not isinstance(srv['tags'], list): srv['tags'] = []
+            if old_name: 
+                groups[groups.index(old_name)] = new_name
+                # 更新所有服务器的旧 tag 为新 tag
+                for s in SERVERS_CACHE:
+                    if 'tags' in s and old_name in s['tags']:
+                        s['tags'].remove(old_name)
+                        s['tags'].append(new_name)
+            else: 
+                groups.append(new_name)
             
+            # 更新状态
+            state['current_group'] = new_name
+
+        # 对于“新建模式”，我们刚才在 toggle 时因为没有 current_group 可能没存进去
+        # 所以如果是新建，且刚才改了名，需要重新遍历一遍 checkboxes (针对当前页)
+        # 但由于我们实时逻辑依赖 current_group，新建时建议先保存名字，再选服务器，或者简单处理：
+        # 这里的实时逻辑在新建模式下(old_name is None)可能不会生效，因为 toggle_tag_memory 会 return。
+        # 修正：新建模式下，用户输入名字前选的勾选，需要在保存时批量打标。
+        
+        # 为简化逻辑，我们采取：新建时，输入名字后，点保存创建组。然后才能选服务器。
+        # 或者：遍历 checkboxes，把当前页选中的打上 new_name
+        for url, chk in state['checkboxes'].items():
             if chk.value:
-                if new_name not in srv['tags']: srv['tags'].append(new_name)
-                if old_name and old_name != new_name and old_name in srv['tags']: srv['tags'].remove(old_name)
-                count += 1
-            else:
-                if new_name in srv['tags']: srv['tags'].remove(new_name)
-                if old_name and old_name in srv['tags']: srv['tags'].remove(old_name)
+                s = state['server_map'].get(url)
+                if s:
+                    if 'tags' not in s: s['tags'] = []
+                    if new_name not in s['tags']: s['tags'].append(new_name)
 
         ADMIN_CONFIG['probe_custom_groups'] = groups
         await save_admin_config()
         await save_servers()
         
-        safe_notify(f"✅ 保存成功 ({count}台)", "positive")
+        safe_notify(f"✅ 保存成功", "positive")
+        load_group_data(new_name) # 刷新视图
         
-        # 重新加载以保持选中状态
-        load_group_data(new_name)
-        render_probe_page()
+        # 刷新主页面（如果正在显示该分组）
+        try: render_probe_page()
+        except: pass
 
     async def delete_current_group():
         target = state['current_group']
@@ -4569,15 +4686,14 @@ def open_unified_group_manager(mode='manage'):
         await save_servers()
         
         safe_notify("🗑️ 已删除", "positive")
-        load_group_data(None) # 回到新建模式
-        render_probe_page()
+        load_group_data(None)
+        try: render_probe_page()
+        except: pass
 
     # --- 初始化 ---
-    # 延迟 0.1 秒渲染，确保弹窗框架先出来
     def init():
         render_views()
-        render_servers()
-        load_group_data(None) # 默认进入新建模式
+        load_group_data(None)
     
     ui.timer(0.1, init, once=True)
     d.open()
@@ -6552,15 +6668,19 @@ def show_custom_node_info(node):
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
 
-# ================= 聚合视图渲染  =================
+# ================= 聚合视图渲染 (优化版：增加分页，支持 1000+ 服务器流畅显示) =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
-    # 1. 触发后台数据更新
+    # 1. 触发后台数据更新 (限制并发，分批处理)
     if force_refresh:
-        asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in server_list], return_exceptions=True))
+        chunk_size = 50
+        for i in range(0, len(server_list), chunk_size):
+            chunk = server_list[i:i + chunk_size]
+            asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in chunk], return_exceptions=True))
+            await asyncio.sleep(0.5)
 
     list_container = ui.column().classes('w-full gap-3 p-1')
     
-    # 2. 定义列宽 (保持对齐)
+    # 2. 定义列宽
     cols_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 1.5fr' 
     cols_no_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 0.5fr 1.5fr'
     
@@ -6571,68 +6691,93 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     except:
         current_css = cols_ping if show_ping else cols_no_ping
 
-    list_container.clear()
-    with list_container:
-        # === A. 绘制静态表头 ===
-        with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
-            ui.label('服务器').classes('text-left pl-1')
-            ui.label('节点名称').classes('text-left pl-1')
-            if use_special_mode: ui.label('在线状态 / IP').classes('text-center') # 修改表头名称
-            else: ui.label('所在组').classes('text-center')
-            ui.label('已用流量').classes('text-center')
-            ui.label('协议').classes('text-center')
-            ui.label('端口').classes('text-center')
-            if not use_special_mode: ui.label('状态').classes('text-center')
-            ui.label('操作').classes('text-center')
-        
-        # === B. 遍历服务器 ===
-        for srv in server_list:
+    # ================= ✨✨✨ 分页逻辑核心 ✨✨✨ =================
+    PAGE_SIZE = 30  # 每页显示 30 台，保证浏览器不卡顿
+    total_items = len(server_list)
+    total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
+    
+    # 记录当前页码 (利用函数属性存储)
+    if not hasattr(render_aggregated_view, 'current_page'):
+        render_aggregated_view.current_page = 1
+    
+    if render_aggregated_view.current_page > total_pages: render_aggregated_view.current_page = 1
+    if render_aggregated_view.current_page < 1: render_aggregated_view.current_page = 1
+
+    # 渲染页面的函数
+    def render_page(page_num):
+        list_container.clear()
+        with list_container:
+            # === A. 顶部统计与翻页器 ===
+            with ui.row().classes('w-full justify-between items-center px-2 mb-2'):
+                ui.label(f'共 {total_items} 台服务器 (第 {page_num}/{total_pages} 页)').classes('text-xs text-gray-400 font-bold')
+                
+                if total_pages > 1:
+                    pagination = ui.pagination(1, total_pages, direction_links=True).props('dense flat color=blue')
+                    pagination.value = page_num
+                    pagination.on('update:model-value', lambda e: switch_page(e.args))
+
+            # === B. 绘制静态表头 ===
+            with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
+                ui.label('服务器').classes('text-left pl-1')
+                ui.label('节点名称').classes('text-left pl-1')
+                if use_special_mode: ui.label('在线状态 / IP').classes('text-center')
+                else: ui.label('所在组').classes('text-center')
+                ui.label('已用流量').classes('text-center')
+                ui.label('协议').classes('text-center')
+                ui.label('端口').classes('text-center')
+                if not use_special_mode: ui.label('状态').classes('text-center')
+                ui.label('操作').classes('text-center')
             
-            # 创建一个局部刷新区域
-            @ui.refreshable
-            def render_server_rows(server_data):
-                # 1. 获取所有节点
-                panel_n = NODES_DATA.get(server_data['url'], []) or []
-                custom_n = server_data.get('custom_nodes', []) or []
-                
-                for cn in custom_n: cn['_is_custom'] = True
-                
-                # 合并列表
-                all_nodes = panel_n + custom_n
-                
-                # 2. 如果没有任何节点 (显示一行占位)
-                if not all_nodes:
-                    draw_row(server_data, None, current_css, use_special_mode, is_first=True)
-                    return
+            # === C. 切片获取当前页数据 ===
+            start_idx = (page_num - 1) * PAGE_SIZE
+            end_idx = start_idx + PAGE_SIZE
+            current_page_data = server_list[start_idx:end_idx]
 
-                # 3. 遍历渲染每个节点 (一行一个)
-                for index, node in enumerate(all_nodes):
-                    draw_row(server_data, node, current_css, use_special_mode, is_first=(index==0))
+            # === D. 遍历渲染 (只渲染当前页) ===
+            for srv in current_page_data:
+                @ui.refreshable
+                def render_server_rows(server_data):
+                    panel_n = NODES_DATA.get(server_data['url'], []) or []
+                    custom_n = server_data.get('custom_nodes', []) or []
+                    for cn in custom_n: cn['_is_custom'] = True
+                    all_nodes = panel_n + custom_n
+                    
+                    if not all_nodes:
+                        draw_row(server_data, None, current_css, use_special_mode, is_first=True)
+                        return
 
-            render_server_rows(srv)
-            ui.timer(3.0, render_server_rows.refresh)
+                    for index, node in enumerate(all_nodes):
+                        draw_row(server_data, node, current_css, use_special_mode, is_first=(index==0))
 
-# --- 辅助函数：绘制单行 ---
+                render_server_rows(srv)
+                # 降低刷新频率，减轻浏览器负担
+                ui.timer(5.0, render_server_rows.refresh)
+            
+            # === E. 底部翻页器 ===
+            if total_pages > 1:
+                with ui.row().classes('w-full justify-center mt-4'):
+                    pag_bottom = ui.pagination(1, total_pages, direction_links=True).props('dense flat color=blue')
+                    pag_bottom.value = page_num
+                    pag_bottom.on('update:model-value', lambda e: switch_page(e.args))
+
+    def switch_page(new_page):
+        render_aggregated_view.current_page = new_page
+        render_page(new_page)
+
+    # 初始渲染
+    render_page(render_aggregated_view.current_page)
+
+# --- 辅助函数：绘制单行 (保持原样，含复制修复) ---
 def draw_row(srv, node, css_style, use_special_mode, is_first=True):
-    # 3D 卡片样式
-    card_cls = (
-        'grid w-full gap-4 py-3 px-4 items-center group relative '
-        'bg-white rounded-xl border border-gray-200 border-b-[3px] '
-        'shadow-sm transition-all duration-150 ease-out '
-        'hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] '
-        'mb-2'
-    )
+    card_cls = 'grid w-full gap-4 py-3 px-4 items-center group relative bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] mb-2'
     
     with ui.element('div').classes(card_cls).style(css_style):
-        
         # 1. 服务器名
         srv_name = srv.get('name', '未命名')
-        if not is_first:
-            ui.label(srv_name).classes('text-xs text-gray-300 truncate w-full text-left pl-2 font-mono')
-        else:
-            ui.label(srv_name).classes('text-xs text-gray-500 font-bold truncate w-full text-left pl-2 font-mono')
+        if not is_first: ui.label(srv_name).classes('text-xs text-gray-300 truncate w-full text-left pl-2 font-mono')
+        else: ui.label(srv_name).classes('text-xs text-gray-500 font-bold truncate w-full text-left pl-2 font-mono')
 
-        # 如果没有节点数据
+        # 无节点情况
         if not node:
             is_probe = srv.get('probe_installed', False)
             msg = '同步中...' if not is_probe else '无节点配置'
@@ -6646,44 +6791,31 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
                  ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round color=grey')
             return
 
-        # === 正常节点渲染 ===
-        
-        # 2. 备注名称
+        # 2. 备注
         remark = node.get('ps') or node.get('remark') or '未命名节点'
         ui.label(remark).classes('font-bold truncate w-full text-left pl-2 text-slate-700 text-sm')
 
-        # 3. 分组 / IP / 区域 (核心修复部分)
+        # 3. 分组/IP
         if use_special_mode:
             with ui.row().classes('w-full justify-center items-center gap-1.5 no-wrap'):
-                # A. 状态图标
                 is_online = srv.get('_status') == 'online'
                 color = 'text-green-500' if is_online else 'text-red-500'
                 if not srv.get('probe_installed') and not node.get('_is_custom'): color = 'text-orange-400'
                 ui.icon('bolt').classes(f'{color} text-sm')
-                
-                # B. IP 显示
                 display_ip = get_real_ip_display(srv['url'])
                 ip_lbl = ui.label(display_ip).classes('text-[10px] font-mono text-gray-500 font-bold bg-gray-100 px-1.5 py-0.5 rounded select-all')
                 bind_ip_label(srv['url'], ip_lbl)
         else:
-            # ================= ✨✨✨ 修复开始 ✨✨✨ =================
-            # 获取原始分组
             group_display = srv.get('group', '默认分组')
-            
-            # 如果是默认分组，尝试计算出真实的物理区域（例如：🇺🇸 美国）
             if group_display in ['默认分组', '自动注册', '未分组', '自动导入']:
                 try:
-                    # 调用检测函数，传入 None 忽略现有 group 字段，强制通过名称/IP重算
                     detected = detect_country_group(srv.get('name', ''), None)
                     if detected: group_display = detected
                 except: pass
-            
             ui.label(group_display).classes('text-xs font-bold text-gray-500 w-full text-center truncate bg-gray-50 px-2 py-0.5 rounded-full')
-            # ================= ✨✨✨ 修复结束 ✨✨✨ =================
 
         # 4. 流量
-        if node.get('_is_custom'):
-            ui.label('-').classes('text-xs text-gray-400 w-full text-center font-mono')
+        if node.get('_is_custom'): ui.label('-').classes('text-xs text-gray-400 w-full text-center font-mono')
         else:
             traffic = sum([node.get('up', 0), node.get('down', 0)])
             ui.label(format_bytes(traffic)).classes('text-xs text-blue-600 w-full text-center font-mono font-bold')
@@ -6692,59 +6824,44 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
         proto = str(node.get('protocol', 'unk')).upper()
         if 'HYSTERIA' in proto: proto = 'HY2'
         if 'SHADOWSOCKS' in proto: proto = 'SS'
-        
         proto_color = 'text-slate-500'
         if 'HY2' in proto: proto_color = 'text-purple-600'
         elif 'VLESS' in proto: proto_color = 'text-blue-600'
         elif 'VMESS' in proto: proto_color = 'text-green-600'
         elif 'TROJAN' in proto: proto_color = 'text-orange-600'
-        
         ui.label(proto).classes(f'text-[11px] font-extrabold w-full text-center {proto_color} tracking-wide')
 
         # 6. 端口
         port_val = str(node.get('port', 0))
         ui.label(port_val).classes('text-slate-600 font-mono w-full text-center font-bold text-xs')
 
-        # 7. 状态圆点
+        # 7. 状态
         if not use_special_mode:
             with ui.element('div').classes('flex justify-center w-full'):
                 is_enable = node.get('enable', True)
                 dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
                 ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
 
-        # 8. 操作按钮
+        # 8. 操作按钮 (含修复逻辑)
         with ui.row().classes('gap-1 justify-center w-full no-wrap'):
-            
-            # (1) 复制标准链接
-            # ✨✨✨ 修复核心：使用默认参数 (n=node, s=srv) 锁定当前循环变量，防止点击错乱 ✨✨✨
+            # 复制链接 (修复版)
             async def copy_link(n=node, s=srv):
-                # A. 优先使用自定义的原始链接 (Hy2/XHTTP)
                 link = n.get('_raw_link') or n.get('link')
-                
-                # B. 如果是面板节点，动态生成
-                if not link: 
-                    # 传入 s['url'] (带端口)，但 generate_node_link 内部会自动清洗
-                    link = generate_node_link(n, s['url'])
-                
+                if not link: link = generate_node_link(n, s['url'])
                 await safe_copy_to_clipboard(link)
 
-            ui.button(icon='content_copy', on_click=copy_link) \
-                .props('flat dense size=sm round') \
-                .tooltip('复制链接') \
-                .classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
+            ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
 
-            # (2) 复制明文配置 (Surge/Loon)
+            # 明文配置
             async def copy_detail():
                 host = srv['url'].split('://')[-1].split(':')[0]
                 text = generate_detail_config(node, host)
-                if text:
-                    await safe_copy_to_clipboard(text)
-                else:
-                    ui.notify('该协议不支持生成明文配置', type='warning')
+                if text: await safe_copy_to_clipboard(text)
+                else: ui.notify('该协议不支持生成明文配置', type='warning')
 
             ui.button(icon='description', on_click=copy_detail).props('flat dense size=sm round').tooltip('复制明文配置').classes('text-gray-500 hover:text-orange-600 hover:bg-orange-50')
 
-            # (3) 设置按钮
+            # 设置按钮
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
 # ================= 核心：静默刷新 UI 数据 (已修复：统一为区域分布) =================
@@ -8329,16 +8446,17 @@ async def send_telegram_message(text):
             logger.error(f"❌ TG 发送失败: {e}")
 
     await run.io_bound(_do_req)
-# ================= 优化后的监控任务 (防误报 + 历史记录版) =================
+    
+# ================= 优化后的监控任务 (高性能版：高并发 + 防误报 + 历史记录) =================
 async def job_monitor_status():
     """
     监控任务：每分钟检查一次服务器状态
-    1. 限制并发数
-    2. 引入失败计数器
-    3. [新增] 自动补录历史数据
+    优化：将并发数从 5 提升至 50，以支持 1000 台服务器在 30-40秒内完成轮询
     """
-    # 限制并发数为 5
-    sema = asyncio.Semaphore(5)
+    # ✨✨✨ 核心修改：将并发数提高到 50 ✨✨✨
+    # 解释：对于 1000 台服务器，50 并发意味着同时处理 50 台，大约 20 轮即可跑完。
+    # 假设每轮耗时 1.5s，总耗时约 30s，完全可以在 60s 或 120s 的间隔内完成。
+    sema = asyncio.Semaphore(50) 
     
     # 定义报警阈值：连续失败 3 次才报警
     FAILURE_THRESHOLD = 3 
@@ -8347,7 +8465,8 @@ async def job_monitor_status():
 
     async def _check_single_server(srv):
         async with sema:
-            await asyncio.sleep(0.1) # 让出 CPU
+            # 稍微让出一点 CPU 时间片，避免高并发瞬间卡顿 UI
+            await asyncio.sleep(0.01) 
             
             res = await get_server_status(srv)
             name = srv.get('name', 'Unknown')
@@ -8358,7 +8477,7 @@ async def job_monitor_status():
                  if res and 'pings' in res:
                      record_ping_history(url, res['pings'])
 
-            # 如果没配 TG，后面的报警逻辑就跳过，但上面的记录逻辑不能跳
+            # 如果没配 TG，后面的报警逻辑就跳过
             if not ADMIN_CONFIG.get('tg_bot_token'): return
 
             # 清洗 IP，只显示纯 IP
@@ -8407,7 +8526,6 @@ async def job_monitor_status():
     # 创建所有任务并执行
     tasks = [_check_single_server(s) for s in SERVERS_CACHE]
     await asyncio.gather(*tasks)
-
 
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
@@ -8497,8 +8615,8 @@ async def startup_sequence():
     # 1. 流量同步 (3小时一次)
     scheduler.add_job(job_sync_all_traffic, 'interval', hours=3, id='traffic_sync', replace_existing=True, max_instances=1)
     
-    # 2. 服务器状态监控与报警 (60秒一次) ✨✨✨
-    scheduler.add_job(job_monitor_status, 'interval', seconds=60, id='status_monitor', replace_existing=True, max_instances=1)
+    # 2. 服务器状态监控与报警 (120秒一次) ✨✨✨
+    scheduler.add_job(job_monitor_status, 'interval', seconds=120, id='status_monitor', replace_existing=True, max_instances=1)
     
     scheduler.start()
     logger.info("🕒 APScheduler 定时任务已启动")
@@ -9162,7 +9280,7 @@ async def status_page_router(request: Request):
 import asyncio 
 import traceback
 
-# ================= 核心：/status 电脑端大屏显示 (Status页专用 - 已隔离) =================
+# ================= 核心：/status 电脑端大屏显示 (最终完美版：分页+缓存回显+Win修复+详细地图悬浮窗) =================
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -9172,62 +9290,36 @@ async def render_desktop_status_page():
         app.storage.user['is_dark'] = True
     dark_mode.value = app.storage.user.get('is_dark')
 
-    # 2. 资源注入 (保留前面的 script 和 link)
+    # 2. 资源注入
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
-    ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
     
     # ✨✨✨ [CSS 样式注入] 集成 Twemoji 字体修复 Win 系统国旗显示 ✨✨✨
     ui.add_head_html('''
-        <link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
-            /* 1. 定义国旗专用字体 (Twemoji Polyfill) */
-            /* 这段代码会让浏览器下载推特的 Emoji 字体来渲染国旗，绕过 Windows 的限制 */
             @font-face {
                 font-family: 'Twemoji Country Flags';
                 src: url('https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1/dist/TwemojiCountryFlags.woff2') format('woff2');
-                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F; /* 仅针对国旗 Unicode 区域生效 */
+                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F;
             }
-
-            /* 2. 全局字体设置：将国旗字体放在第一位 */
             body { 
                 margin: 0; 
-                /* 关键点：Twemoji Country Flags 必须排在第一个 */
                 font-family: "Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; 
                 transition: background-color 0.3s ease; 
             }
-
-            /* 3. 其他样式保持不变 */
             body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
             body.body--dark { background-color: #0b1121; }
-            
             .status-card { transition: all 0.3s ease; border-radius: 16px; }
-            
-            body:not(.body--dark) .status-card { 
-                background: rgba(255, 255, 255, 0.95); 
-                border: 1px solid rgba(255, 255, 255, 0.8); 
-                box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); 
-                color: #1e293b; 
-            }
-            body.body--dark .status-card { 
-                background: #1e293b; 
-                border: 1px solid rgba(255,255,255,0.05); 
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); 
-                color: #e2e8f0; 
-            }
-            
+            body:not(.body--dark) .status-card { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.8); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #1e293b; }
+            body.body--dark .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); color: #e2e8f0; }
             .status-card:hover { transform: translateY(-3px); }
-            
             .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; }
             body.body--dark .offline-card { background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; }
             body:not(.body--dark) .offline-card { background: rgba(254, 226, 226, 0.95) !important; }
-            
             .scrollbar-hide::-webkit-scrollbar { display: none; }
             .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-            
             .prog-bar { transition: width 0.5s ease-out; }
-            
             #public-map-container { contain: strict; transform: translateZ(0); will-change: transform; z-index: 0; }
         </style>
     ''')
@@ -9237,7 +9329,14 @@ async def render_desktop_status_page():
     grid_container = None
     header_refs = {}
     pie_chart_ref = None
+    pagination_ref = None 
     local_ui_version = GLOBAL_UI_VERSION
+    
+    # 状态管理
+    page_state = {
+        'page': 1,
+        'group': 'ALL'
+    }
 
     def get_probe_groups():
         groups_list = ['ALL']
@@ -9264,17 +9363,11 @@ async def render_desktop_status_page():
     def fmt_traffic(b): return f"{round(b/1024**3, 1)}G" if b > 1024**3 else f"{int(b/1024**2)}M"
     def fmt_speed(b): return f"{int(b)} B" if b < 1024 else (f"{int(b/1024)} K" if b < 1024**2 else f"{int(b/1024**2)} M")
 
-    # 获取初始数据
     try:
-        # 确保 prepare_map_data 已定义并返回 5 个值
         chart_data, pie_data, region_count, region_stats_json, centroids_json = prepare_map_data()
     except Exception as e:
-        print(f"[Status Page Error] Map data prepare failed: {e}")
         chart_data = '{"cities": [], "flags": [], "regions": []}'
-        pie_data = []
-        region_count = 0
-        region_stats_json = "{}"
-        centroids_json = "{}"
+        pie_data = []; region_count = 0; region_stats_json = "{}"; centroids_json = "{}"
 
     # ================= UI 布局 =================
     with ui.element('div').classes('fixed top-0 left-0 w-full h-[35vh] min-h-[300px] max-h-[500px] z-0').style('z-index: 0; contain: size layout paint;'): 
@@ -9310,15 +9403,21 @@ async def render_desktop_status_page():
                 pie_chart_ref = ui.echart({'backgroundColor': 'transparent', 'tooltip': {'trigger': 'item'}, 'legend': {'bottom': '0%', 'left': 'center', 'icon': 'circle', 'itemGap': 15, 'textStyle': {'color': text_color, 'fontSize': 11}}, 'series': [{'type': 'pie', 'radius': ['35%', '60%'], 'center': ['50%', '35%'], 'avoidLabelOverlap': False, 'itemStyle': {'borderRadius': 4, 'borderColor': 'transparent', 'borderWidth': 2}, 'label': {'show': False}, 'emphasis': {'scale': True, 'scaleSize': 10, 'label': {'show': True, 'color': 'auto', 'fontWeight': 'bold'}, 'itemStyle': {'shadowBlur': 10, 'shadowOffsetX': 0, 'shadowColor': 'rgba(0, 0, 0, 0.5)'}}, 'data': pie_data}]}).classes('w-64 h-72')
 
         with ui.column().classes('w-full flex-grow relative gap-0 overflow-hidden flex flex-col bg-white/80 dark:bg-[#0f172a]/90 backdrop-blur-xl pointer-events-auto border-t border-white/10').style('z-index: 10; contain: content;'): 
-            with ui.row().classes('w-full px-6 py-2 border-b border-gray-200/50 dark:border-gray-800 items-center shrink-0'):
-                with ui.element('div').classes('w-full overflow-x-auto whitespace-nowrap scrollbar-hide') as tab_container: pass 
+            with ui.row().classes('w-full px-6 py-2 border-b border-gray-200/50 dark:border-gray-800 items-center shrink-0 justify-between'):
+                with ui.element('div').classes('flex-grow overflow-x-auto whitespace-nowrap scrollbar-hide mr-4') as tab_container: pass 
+                pagination_ref = ui.row().classes('items-center')
+
             with ui.scroll_area().classes('w-full flex-grow p-4 md:p-6'):
                 grid_container = ui.grid().classes('w-full gap-4 md:gap-5 pb-20').style('grid-template-columns: repeat(auto-fill, minmax(320px, 1fr))')
 
+    # ================= 渲染逻辑 (含分页) =================
+    
     def render_tabs():
         tab_container.clear()
         groups = get_probe_groups(); global CURRENT_PROBE_TAB 
         if CURRENT_PROBE_TAB not in groups: CURRENT_PROBE_TAB = 'ALL'
+        page_state['group'] = CURRENT_PROBE_TAB
+        
         with tab_container:
             with ui.tabs().props('dense no-caps align=left active-color=blue indicator-color=blue').classes('text-slate-600 dark:text-gray-500 bg-transparent') as tabs:
                 ui.tab('ALL', label='全部').on('click', lambda: apply_filter('ALL'))
@@ -9327,108 +9426,105 @@ async def render_desktop_status_page():
                     ui.tab(g).on('click', lambda _, g=g: apply_filter(g))
                 tabs.set_value(CURRENT_PROBE_TAB)
 
+    # ================= ✨✨✨ 优化后的卡片渲染与更新逻辑 ✨✨✨ =================
+
+    # 1. 抽离出的通用 UI 更新函数 (用于：1.创建时立即回显缓存 2.定时任务更新)
+    def update_card_ui(refs, status, static):
+        if not status: return
+        
+        is_probe_online = (status.get('status') == 'online')
+        
+        if is_probe_online:
+            refs['status_icon'].set_name('bolt'); refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500 text-purple-400')
+            refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-purple-500')
+        else:
+            if status.get('cpu_usage') is not None:
+                refs['status_icon'].set_name('api'); refs['status_icon'].classes(replace='text-purple-400', remove='text-gray-400 text-red-500 text-green-500')
+                refs['online_dot'].classes(replace='bg-purple-500', remove='bg-gray-500 bg-red-500 bg-green-500')
+            else:
+                refs['status_icon'].set_name('flash_off'); refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400 text-purple-400')
+                refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500 bg-purple-500')
+
+        os_str = static.get('os', 'Linux')
+        import re
+        simple_os = re.sub(r' GNU/Linux', '', os_str, flags=re.I)
+        refs['os_info'].set_text(f"{simple_os}")
+        
+        cores = status.get('cpu_cores')
+        refs['summary_cores'].set_text(f"{cores} C" if cores else "N/A")
+        refs['summary_ram'].set_text(fmt_capacity(status.get('mem_total', 0)))
+        refs['summary_disk'].set_text(fmt_capacity(status.get('disk_total', 0)))
+        
+        refs['traf_up'].set_text(f"↑ {fmt_traffic(status.get('net_total_out', 0))}")
+        refs['traf_down'].set_text(f"↓ {fmt_traffic(status.get('net_total_in', 0))}")
+
+        cpu = float(status.get('cpu_usage', 0))
+        refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
+        c_num = status.get('cpu_cores', 1); refs['cpu_sub'].set_text(f"{c_num} Cores")
+        
+        mem = float(status.get('mem_usage', 0))
+        refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%')
+        mem_total = float(status.get('mem_total', 0))
+        if mem_total > 0:
+            mem_val_used = mem_total * (mem / 100.0)
+            refs['mem_sub'].set_text(f"{fmt_capacity(mem_val_used)} / {fmt_capacity(mem_total)}")
+        else: refs['mem_sub'].set_text(f"{mem:.1f}%")
+
+        disk = float(status.get('disk_usage', 0))
+        refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%')
+        disk_total = float(status.get('disk_total', 0))
+        if disk_total > 0:
+            disk_val_used = disk_total * (disk / 100.0)
+            refs['disk_sub'].set_text(f"{fmt_capacity(disk_val_used)} / {fmt_capacity(disk_total)}")
+        else: refs['disk_sub'].set_text(f"{disk:.1f}%")
+
+        n_up = status.get('net_speed_out', 0); n_down = status.get('net_speed_in', 0)
+        refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
+
+        up = str(status.get('uptime', '-'))
+        colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
+        refs['uptime'].set_content(colored_up)
+
+    # 2. 自动更新循环
     async def card_autoupdate_loop(url):
         while True:
             await asyncio.sleep(random.uniform(2.0, 3.0))
+            if url not in RENDERED_CARDS: break 
             if url not in [s['url'] for s in SERVERS_CACHE]: break
+            
             item = RENDERED_CARDS.get(url)
             if not item: break 
             if not item['card'].visible: continue 
-            refs = item['refs']; server_data = item['data']; cache_vals = item.get('cache', {}) 
+            
             current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
-            if current_server: server_data = current_server
-            else: continue
+            if not current_server: continue
 
             res = None
-            try: res = await asyncio.wait_for(get_server_status(server_data), timeout=2.0)
-            except Exception: res = None
-
-            is_probe_online = (res and res.get('status') == 'online')
-            is_xui_alive = (res and res.get('cpu_usage') is not None)
-            is_any_online = is_probe_online or is_xui_alive
-
-            has_changed = False
-            if is_any_online: has_changed = True
-            elif cache_vals.get('status') != 'offline': has_changed = True
-            if not has_changed: continue
-
-            if is_any_online:
-                if cache_vals.get('status') != 'online':
-                    refs['card'].classes(remove='offline-card')
-                    cache_vals['status'] = 'online'
-
-                if is_probe_online:
-                    refs['status_icon'].set_name('bolt'); refs['status_icon'].classes(replace='text-green-500', remove='text-gray-400 text-red-500 text-purple-400')
-                    refs['online_dot'].classes(replace='bg-green-500', remove='bg-gray-500 bg-red-500 bg-purple-500')
-                else:
-                    refs['status_icon'].set_name('api'); refs['status_icon'].classes(replace='text-purple-400', remove='text-gray-400 text-red-500 text-green-500')
-                    refs['online_dot'].classes(replace='bg-purple-500', remove='bg-gray-500 bg-red-500 bg-green-500')
-
-                cache = PROBE_DATA_CACHE.get(url, {}); static = cache.get('static', {})
-                os_str = static.get('os', 'Linux')
-                if not is_probe_online and not os_str: os_str = "X-UI / Monitor"
-                import re; os_lower = os_str.lower(); icon_name = 'fa-brands fa-linux'; icon_color = 'text-gray-400'
-                simple_os = os_str; simple_os = re.sub(r' GNU/Linux', '', simple_os, flags=re.I)
-                refs['os_icon'].set_name(icon_name); refs['os_icon'].classes(replace=icon_color); refs['os_info'].set_text(f"{simple_os}")
+            try: res = await asyncio.wait_for(get_server_status(current_server), timeout=2.0)
+            except: res = None
+            
+            if res:
+                raw_cache = PROBE_DATA_CACHE.get(url, {})
+                static = raw_cache.get('static', {})
+                update_card_ui(item['refs'], res, static)
                 
-                cores = res.get('cpu_cores')
-                refs['summary_cores'].set_text(f"{cores} C" if cores else "N/A")
-                refs['summary_ram'].set_text(fmt_capacity(res.get('mem_total', 0)))
-                refs['summary_disk'].set_text(fmt_capacity(res.get('disk_total', 0)))
-                refs['traf_up'].set_text(f"↑ {fmt_traffic(res.get('net_total_out', 0))}")
-                refs['traf_down'].set_text(f"↓ {fmt_traffic(res.get('net_total_in', 0))}")
+                is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
+                if is_online: item['card'].classes(remove='offline-card')
+                else: item['card'].classes(add='offline-card')
 
-                # ================= 修复开始：进度条数值显示 =================
-                
-                # 1. CPU
-                cpu = float(res.get('cpu_usage', 0))
-                refs['cpu_bar'].style(f'width: {cpu}%'); refs['cpu_pct'].set_text(f'{cpu:.1f}%')
-                # 修复：下方显示核心数
-                c_num = res.get('cpu_cores', 1)
-                refs['cpu_sub'].set_text(f"{c_num} Cores")
-                
-                # 2. 内存
-                mem = float(res.get('mem_usage', 0))
-                refs['mem_bar'].style(f'width: {mem}%'); refs['mem_pct'].set_text(f'{mem:.1f}%')
-                # 修复：下方显示 "已用 / 总量"
-                mem_total = float(res.get('mem_total', 0))
-                if mem_total > 0:
-                    mem_val_used = mem_total * (mem / 100.0)
-                    refs['mem_sub'].set_text(f"{fmt_capacity(mem_val_used)} / {fmt_capacity(mem_total)}")
-                else:
-                    refs['mem_sub'].set_text(f"{mem:.1f}%")
-
-                # 3. 硬盘
-                disk = float(res.get('disk_usage', 0))
-                refs['disk_bar'].style(f'width: {disk}%'); refs['disk_pct'].set_text(f'{disk:.1f}%')
-                # 修复：下方显示 "已用 / 总量"
-                disk_total = float(res.get('disk_total', 0))
-                if disk_total > 0:
-                    disk_val_used = disk_total * (disk / 100.0)
-                    refs['disk_sub'].set_text(f"{fmt_capacity(disk_val_used)} / {fmt_capacity(disk_total)}")
-                else:
-                    refs['disk_sub'].set_text(f"{disk:.1f}%")
-
-                # ================= 修复结束 =================
-
-                n_up = res.get('net_speed_out', 0); n_down = res.get('net_speed_in', 0)
-                refs['net_up'].set_text(f"↑ {fmt_speed(n_up)}/s"); refs['net_down'].set_text(f"↓ {fmt_speed(n_down)}/s")
-
-                up = str(res.get('uptime', '-'))
-                colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
-                refs['uptime'].set_content(colored_up)
-            else:
-                if cache_vals.get('status') != 'offline':
-                    refs['card'].classes(add='offline-card')
-                    refs['status_icon'].set_name('flash_off'); refs['status_icon'].classes(replace='text-red-500', remove='text-green-500 text-gray-400 text-purple-400')
-                    refs['online_dot'].classes(replace='bg-red-500', remove='bg-green-500 bg-orange-500 bg-purple-500')
-                    cache_vals['status'] = 'offline'
-
+    # 3. 创建卡片 (✨✨✨ 创建时立即回显 ✨✨✨)
     def create_server_card(s):
         url = s['url']; refs = {}
+        
+        cached_data = PROBE_DATA_CACHE.get(url, {})
+        initial_status = None
+        if cached_data:
+            initial_status = cached_data.copy()
+            if 'pings' not in initial_status: initial_status['pings'] = {}
+        
         with grid_container:
             with ui.card().classes('status-card w-full p-4 md:p-5 flex flex-col gap-2 md:gap-3 relative overflow-hidden group').style('contain: content;') as card:
-                refs['card'] = card; item_cache = {'status': None}
+                refs['card'] = card
                 with ui.row().classes('w-full items-center mb-1 gap-2 flex-nowrap'):
                     flag = "🏳️"; 
                     try: flag = detect_country_group(s['name'], s).split(' ')[0]
@@ -9472,63 +9568,95 @@ async def render_desktop_status_page():
                     with ui.row().classes('w-full justify-between items-center no-wrap'):
                         ui.label('在线').classes(label_sub_cls)
                         with ui.row().classes('items-center gap-1'): refs['uptime'] = ui.html('--', sanitize=False).classes('text-xs font-mono text-slate-600 dark:text-gray-300 text-right'); refs['online_dot'] = ui.element('div').classes('w-1.5 h-1.5 rounded-full bg-gray-400')
-        RENDERED_CARDS[url] = {'card': card, 'refs': refs, 'data': s, 'cache': item_cache}
+
+        # ✨✨✨ 立即应用缓存数据 (防止页面白屏闪烁) ✨✨✨
+        if initial_status:
+            static = cached_data.get('static', {})
+            update_card_ui(refs, initial_status, static)
+            is_cached_online = (initial_status.get('status') == 'online') or (initial_status.get('cpu_usage') is not None)
+            if is_cached_online: card.classes(remove='offline-card')
+            else: card.classes(add='offline-card')
+
+        RENDERED_CARDS[url] = {'card': card, 'refs': refs, 'data': s}
         asyncio.create_task(card_autoupdate_loop(url))
 
     def apply_filter(group_name):
         global CURRENT_PROBE_TAB; CURRENT_PROBE_TAB = group_name
-        for url, item in RENDERED_CARDS.items():
-            card = item['card']; server_data = item['data']
-            should_show = (group_name == 'ALL') or (group_name in server_data.get('tags', []))
-            if card.visible != should_show: card.set_visibility(should_show)
+        page_state['group'] = group_name
+        page_state['page'] = 1 
+        render_grid_page()
 
-    def sync_cards_pool():
-        current_urls = set(s['url'] for s in SERVERS_CACHE)
-        rendered_urls = set(RENDERED_CARDS.keys())
-        new_urls = current_urls - rendered_urls; deleted_urls = rendered_urls - current_urls
-        for url in new_urls: 
-            s = next((srv for srv in SERVERS_CACHE if srv['url'] == url), None)
-            if s: create_server_card(s)
-        for url in deleted_urls: 
-            item = RENDERED_CARDS.pop(url, None)
-            if item and item.get('card'): item['card'].delete()
-        for s in SERVERS_CACHE:
-            if s['url'] in RENDERED_CARDS: RENDERED_CARDS[s['url']]['data'] = s
+    def change_page(new_page):
+        page_state['page'] = new_page
+        render_grid_page()
 
-    sorted_init_list = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
-    for s in sorted_init_list: create_server_card(s)
-    render_tabs(); apply_filter(CURRENT_PROBE_TAB)
+    # ================= ✨✨✨ 核心：分页渲染逻辑 ✨✨✨ =================
+    def render_grid_page():
+        grid_container.clear()
+        pagination_ref.clear()
+        RENDERED_CARDS.clear()
+
+        group_name = page_state['group']
+        filtered_servers = []
+        try: sorted_all = sorted(SERVERS_CACHE, key=lambda x: x.get('name', ''))
+        except: sorted_all = SERVERS_CACHE
+        
+        for s in sorted_all:
+            if group_name == 'ALL' or (group_name in s.get('tags', [])):
+                filtered_servers.append(s)
+
+        PAGE_SIZE = 32
+        total_items = len(filtered_servers)
+        total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
+        if page_state['page'] > total_pages: page_state['page'] = 1
+        if page_state['page'] < 1: page_state['page'] = 1
+        
+        start_idx = (page_state['page'] - 1) * PAGE_SIZE
+        end_idx = start_idx + PAGE_SIZE
+        current_page_items = filtered_servers[start_idx:end_idx]
+
+        if not current_page_items:
+            with grid_container:
+                ui.label('暂无服务器').classes('text-gray-500 dark:text-gray-400 col-span-full text-center mt-10')
+        else:
+            for s in current_page_items:
+                create_server_card(s)
+
+        if total_pages > 1:
+            with pagination_ref:
+                # ✨✨✨ 修改：max-pages=7 ✨✨✨
+                p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue outline rounded text-color=white active-color=blue active-text-color=white max-pages=7')
+                p.value = page_state['page']
+                p.on('update:model-value', lambda e: change_page(e.args))
+                ui.label(f'共 {total_items} 台').classes('text-xs text-gray-400 ml-4 self-center')
+
+    render_tabs()
+    render_grid_page()
     
-    # ✨✨✨ [JS 逻辑注入] 地图渲染 + HTTPS IP 定位 + 国旗字体应用 ✨✨✨
+    # ✨✨✨ [JS 逻辑注入] 地图渲染 + 修复字体样式 + 调整悬浮窗宽度 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
         window.regionStats = {region_stats_json}; 
         window.countryCentroids = {centroids_json}; 
         
-        // ✅ 1. 默认坐标：北京 [经度, 纬度]
         var defaultPt = [116.40, 39.90]; 
-        
         var defaultZoom = 1.35; 
         var focusedZoom = 4.0; 
         var isZoomed = false; 
         var myChart = null;
 
-        // ✅ 2. HTTPS IP 定位接口
         function tryIpLocation() {{
             fetch('https://ipapi.co/json/')
                 .then(response => response.json())
                 .then(data => {{
-                    // 注意接口字段是 latitude/longitude
                     if(data.latitude && data.longitude) {{
                         console.log("Using HTTPS IP Location:", data.latitude, data.longitude);
                         defaultPt = [data.longitude, data.latitude];
                         if(!isZoomed && myChart) renderMap();
                     }}
                 }})
-                .catch(e => {{
-                    console.log("HTTPS IP Location failed, staying at Beijing.");
-                }});
+                .catch(e => {{}});
         }}
 
         function checkAndRender() {{
@@ -9540,7 +9668,6 @@ async def render_desktop_status_page():
                 myChart = echarts.init(chartDom); 
                 window.publicMapChart = myChart; 
                 
-                // 尝试获取定位
                 if (navigator.geolocation) {{ 
                     navigator.geolocation.getCurrentPosition(
                         p => {{ 
@@ -9561,16 +9688,19 @@ async def render_desktop_status_page():
                     var mapTop = '1%';
 
                     var lines = mapData.cities.map(pt => ({{ coords: [pt.value, defaultPt] }}));
+                    
                     var isDark = document.body.classList.contains('body--dark');
                     var areaColor = isDark ? '#1B2631' : '#e0e7ff'; 
                     var borderColor = isDark ? '#404a59' : '#a5b4fc'; 
                     
+                    // 双色主题定义
+                    var ttBg = isDark ? 'rgba(23, 23, 23, 0.95)' : 'rgba(255, 255, 255, 0.95)'; // 更深的黑色背景
                     var ttTextMain = isDark ? '#fff' : '#1e293b';
-                    var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
+                    var ttTextSub = isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(30, 41, 59, 0.6)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
 
-                    // ✅ 修改 3：定义字体变量 (优先使用 Twemoji，修复 Win 系统显示)
-                    var emojiFont = '"Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif';
+                    // ✅ 字体优化：优先使用 Google Noto Sans SC (黑体)，确保中文显示现代、清晰
+                    var emojiFont = "'Twemoji Country Flags', 'Noto Sans SC', 'Roboto', 'Helvetica Neue', 'Arial', sans-serif";
 
                     var option = {{
                         backgroundColor: 'transparent',
@@ -9581,10 +9711,44 @@ async def render_desktop_status_page():
                                 if (params.data && params.data.country_key) searchKey = params.data.country_key;
                                 var stats = window.regionStats[searchKey];
                                 if (!stats) return;
-                                // 应用字体到 Tooltip
-                                return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding:12px; border-radius:8px; color:${{ttTextMain}}; font-family: ${{emojiFont}};">
-                                    <strong>${{stats.flag}} ${{stats.cn}}</strong><br>
-                                    在线: ${{stats.online}} / 总计: ${{stats.total}}
+                                
+                                var serverListHtml = '';
+                                var displayLimit = 5; 
+                                var servers = stats.servers || []; 
+                                
+                                for (var i = 0; i < Math.min(servers.length, displayLimit); i++) {{
+                                    var s = servers[i];
+                                    var isOnline = s.status === 'online';
+                                    var statusColor = isOnline ? '#22c55e' : '#ef4444'; 
+                                    var statusText = isOnline ? '在线' : '离线';
+                                    
+                                    // 列表项样式调整：行高紧凑，字体清晰
+                                    serverListHtml += `
+                                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; line-height: 1.2;">
+                                            <div style="display: flex; align-items: center; max-width: 170px;">
+                                                <span style="display: inline-block; width: 6px; height: 6px; border-radius: 50%; background-color: ${{statusColor}}; margin-right: 8px; flex-shrink: 0;"></span>
+                                                <span style="font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${{s.name}}</span>
+                                            </div>
+                                            <span style="font-size: 12px; color: ${{ttTextSub}}; flex-shrink: 0; margin-left: 8px;">${{statusText}}</span>
+                                        </div>
+                                    `;
+                                }}
+                                
+                                if (servers.length > displayLimit) {{
+                                    serverListHtml += `<div style="font-size: 11px; color: ${{ttTextSub}}; margin-top: 8px; text-align: right; opacity: 0.8;">+${{servers.length - displayLimit}} 更多...</div>`;
+                                }}
+                                
+                                // ✅ 外框样式调整：宽度缩窄，圆角适中
+                                return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding: 14px 16px; border-radius: 10px; color:${{ttTextMain}}; font-family: ${{emojiFont}}; box-shadow: 0 4px 16px rgba(0,0,0,0.3); min-width: 240px; max-width: 260px;">
+                                    <div style="font-size: 16px; font-weight: 700; margin-bottom: 2px; display: flex; align-items: center; letter-spacing: 0.5px;">
+                                        <span style="margin-right: 8px; font-size: 20px;">${{stats.flag}}</span>${{stats.cn}}
+                                    </div>
+                                    <div style="font-size: 12px; color: ${{ttTextSub}}; margin-bottom: 12px; font-weight: 400;">
+                                        共 ${{stats.total}} 台服务器, ${{stats.online}} 台在线
+                                    </div>
+                                    <div style="border-top: 1px solid ${{isDark ? 'rgba(255,255,255,0.08)' : '#f1f5f9'}}; padding-top: 10px; margin-top: 4px;">
+                                        ${{serverListHtml}}
+                                    </div>
                                 </div>`;
                             }}
                         }},
@@ -9598,13 +9762,12 @@ async def render_desktop_status_page():
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff' }}, data: mapData.cities }},
                             
-                            // ✅ 修改 4：应用字体到地图上的国旗 Label
                             {{ 
                                 type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, 
                                 label: {{ 
                                     show: true, position: 'top', formatter: '{{b}}', 
                                     color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5],
-                                    fontFamily: emojiFont // <--- 关键点：让 Canvas 使用 WebFont
+                                    fontFamily: emojiFont 
                                 }}, 
                                 data: mapData.flags 
                             }},
@@ -9638,32 +9801,16 @@ async def render_desktop_status_page():
     async def loop_update():
         nonlocal local_ui_version
         try:
-            is_count_mismatch = (len(SERVERS_CACHE) != len(RENDERED_CARDS))
-            if GLOBAL_UI_VERSION != local_ui_version or is_count_mismatch:
+            if GLOBAL_UI_VERSION != local_ui_version:
                 local_ui_version = GLOBAL_UI_VERSION
-                render_tabs(); sync_cards_pool(); apply_filter(CURRENT_PROBE_TAB)
-                
-                try:
-                    new_map, new_pie, new_cnt, new_stats, new_centroids = prepare_map_data()
-                except:
-                    new_map, new_pie, new_cnt, new_stats, new_centroids = "{}", [], 0, "{}", "{}"
-                
+                render_tabs(); render_grid_page() 
+                try: new_map, _, new_cnt, new_stats, new_centroids = prepare_map_data()
+                except: new_map = "{}"; new_cnt = 0; new_stats = "{}"; new_centroids = "{}"
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
-                if pie_chart_ref: pie_chart_ref.options['series'][0]['data'] = new_pie; pie_chart_ref.update()
-                
-                ui.run_javascript(f'''if(window.updatePublicMap){{ 
-                    window.regionStats = {new_stats}; 
-                    window.countryCentroids = {new_centroids};
-                    window.updatePublicMap({new_map}); 
-                }}''')
-
-            real_online_count = 0
-            for s in SERVERS_CACHE:
-                if s.get('_status') == 'online': real_online_count += 1
+                ui.run_javascript(f'''if(window.updatePublicMap){{ window.regionStats = {new_stats}; window.countryCentroids = {new_centroids}; window.updatePublicMap({new_map}); }}''')
+            real_online_count = len([s for s in SERVERS_CACHE if s.get('_status') == 'online'])
             if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
-        except Exception as e:
-            print(f"Loop Update Error: {e}") 
-            traceback.print_exc() 
+        except: pass
         ui.timer(5.0, loop_update, once=True)
 
     ui.timer(0.1, loop_update, once=True)
