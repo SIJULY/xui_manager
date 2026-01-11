@@ -9348,7 +9348,7 @@ async def render_desktop_status_page():
                     var viewCenter = center || defaultPt;
                     var viewZoom = zoomLevel || defaultZoom;
                     var viewRoam = roamState !== undefined ? roamState : false;
-                    var mapLeft = isZoomed ? 'center' : '50%'; 
+                    var mapLeft = isZoomed ? 'center' : '55%'; 
                     var mapTop = '1%';
 
                     var lines = mapData.cities.map(pt => ({{ coords: [pt.value, defaultPt] }}));
