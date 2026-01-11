@@ -1483,7 +1483,7 @@ GLOBE_STRUCTURE = r"""
 </div>
 """
 
-# ================= 2D 平面地图：JS 逻辑 (仪表盘专用 - 已添加自动定位) =================
+# ================= 2D 平面地图：JS 逻辑 (仪表盘专用 - 已修复 Win 国旗显示) =================
 GLOBE_JS_LOGIC = r"""
 (function() {
     // 1. 获取仪表盘专用容器
@@ -1496,6 +1496,9 @@ GLOBE_JS_LOGIC = r"""
     // 3. 定义默认坐标 (北京)，如果定位成功会被覆盖
     var myLat = 39.9;
     var myLon = 116.4;
+
+    // ✨✨✨ 修复核心：定义国旗字体 ✨✨✨
+    var emojiFont = '"Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif';
 
     // 更新统计数字
     var nodeCountEl = document.getElementById('node-count');
@@ -1512,12 +1515,11 @@ GLOBE_JS_LOGIC = r"""
     if (existing) existing.dispose();
     var myChart = echarts.init(container);
 
-    // 4. 获取浏览器定位 (核心修复：像探针页面一样获取真实位置)
+    // 4. 获取浏览器定位
     if (navigator.geolocation) {
         navigator.geolocation.getCurrentPosition(function(position) {
             myLat = position.coords.latitude;
             myLon = position.coords.longitude;
-            // 定位成功后立即刷新一次地图，修正飞线起点
             var option = buildOption(window.cachedWorldJson, serverData, myLat, myLon);
             myChart.setOption(option);
         });
@@ -1526,10 +1528,8 @@ GLOBE_JS_LOGIC = r"""
     // 5. 定义仪表盘专用的更新函数
     window.updateDashboardMap = function(newData) {
         if (!window.cachedWorldJson || !myChart) return;
-        // 更新内存数据，防止定位延迟回调覆盖
         serverData = newData;
         updateStats(newData);
-        // 使用当前最新的坐标 (myLat, myLon)
         var option = buildOption(window.cachedWorldJson, newData, myLat, myLon);
         myChart.setOption(option);
     };
@@ -1567,7 +1567,6 @@ GLOBE_JS_LOGIC = r"""
             name: s.name, value: [s.lon, s.lat], itemStyle: { color: '#00ffff' }
         }));
         
-        // 使用传入的 userLat, userLon 作为起点
         scatterData.push({
             name: "ME", value: [userLon, userLat], itemStyle: { color: '#FFD700' },
             symbolSize: 15, label: { show: true, position: 'top', formatter: 'My PC', color: '#FFD700' }
@@ -1578,7 +1577,7 @@ GLOBE_JS_LOGIC = r"""
         }));
 
         return {
-            backgroundColor: '#100C2A', // 仪表盘固定深色背景
+            backgroundColor: '#100C2A', 
             geo: {
                 map: 'world', roam: false, zoom: 1.2, center: [15, 10],
                 label: { show: false },
@@ -1596,7 +1595,18 @@ GLOBE_JS_LOGIC = r"""
                 {
                     type: 'scatter', coordinateSystem: 'geo', zlevel: 3, symbol: 'circle', symbolSize: 12,
                     itemStyle: { color: '#00ffff', shadowBlur: 10, shadowColor: '#333' },
-                    label: { show: true, position: 'right', formatter: '{b}', color: '#fff', fontSize: 16, fontWeight: 'bold' },
+                    
+                    // ✨✨✨ 重点：在这里应用了字体 ✨✨✨
+                    label: { 
+                        show: true, 
+                        position: 'right', 
+                        formatter: '{b}', 
+                        color: '#fff', 
+                        fontSize: 16, 
+                        fontWeight: 'bold',
+                        fontFamily: emojiFont  // <--- 修复这一行
+                    },
+                    
                     data: scatterData
                 }
             ]
@@ -1608,8 +1618,6 @@ GLOBE_JS_LOGIC = r"""
         .then(worldJson => {
             echarts.registerMap('world', worldJson);
             window.cachedWorldJson = worldJson;
-            
-            // 初始渲染
             var option = buildOption(worldJson, serverData, myLat, myLon);
             myChart.setOption(option);
             
@@ -2976,31 +2984,67 @@ def generate_converted_link(raw_link, target, domain_prefix):
     
     return f"{converter_base}?{params}"
 
+# ================= 生成节点链接 (已修复：自动清洗 IP 和 端口) =================
 def generate_node_link(node, server_host):
     try:
+        # ✨✨✨ 核心修复：清洗 server_host，只保留纯 IP/域名 ✨✨✨
+        clean_host = server_host
+        # 1. 去掉协议头 (http:// 或 https://)
+        if '://' in clean_host:
+            clean_host = clean_host.split('://')[-1]
+        # 2. 去掉端口 (例如 :54321)
+        # 注意：排除 IPv6 ([...]) 的情况，这里简单处理 IPv4 和域名
+        if ':' in clean_host and not clean_host.startswith('['):
+            clean_host = clean_host.split(':')[0]
+
         p = node['protocol']; remark = node['remark']; port = node['port']
-        add = node.get('listen') or server_host
+        # 使用清洗后的 clean_host 作为默认地址
+        add = node.get('listen') or clean_host
+        
         s = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
         st = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
         net = st.get('network', 'tcp'); tls = st.get('security', 'none'); path = ""; host = ""
+        
         if net == 'ws': 
             path = st.get('wsSettings',{}).get('path','/')
             host = st.get('wsSettings',{}).get('headers',{}).get('Host','')
-        elif net == 'grpc': path = st.get('grpcSettings',{}).get('serviceName','')
+        elif net == 'grpc': 
+            path = st.get('grpcSettings',{}).get('serviceName','')
         
         if p == 'vmess':
-            v = {"v":"2","ps":remark,"add":add,"port":port,"id":s['clients'][0]['id'],"aid":"0","scy":"auto","net":net,"type":"none","host":host,"path":path,"tls":tls}
+            # 构建标准的 v2 VMess json
+            v = {
+                "v": "2",
+                "ps": remark,
+                "add": add,      # 这里现在是纯 IP 了
+                "port": port,    # 这里的端口才是节点端口 (如 14789)
+                "id": s['clients'][0]['id'],
+                "aid": "0",
+                "scy": "auto",
+                "net": net,
+                "type": "none",
+                "host": host,
+                "path": path,
+                "tls": tls
+            }
             return "vmess://" + safe_base64(json.dumps(v))
+            
         elif p == 'vless':
             params = f"type={net}&security={tls}"
             if path: params += f"&path={path}" if net != 'grpc' else f"&serviceName={path}"
             if host: params += f"&host={host}"
             return f"vless://{s['clients'][0]['id']}@{add}:{port}?{params}#{remark}"
-        elif p == 'trojan': return f"trojan://{s['clients'][0]['password']}@{add}:{port}?type={net}&security={tls}#{remark}"
+            
+        elif p == 'trojan': 
+            return f"trojan://{s['clients'][0]['password']}@{add}:{port}?type={net}&security={tls}#{remark}"
+            
         elif p == 'shadowsocks': 
             cred = f"{s['method']}:{s['password']}"
             return f"ss://{safe_base64(cred)}@{add}:{port}#{remark}"
-    except: return ""
+            
+    except Exception as e: 
+        # print(f"Generate Link Error: {e}")
+        return ""
     return ""
 
 # ================= 生成 Surge/Loon 格式明文配置 =================
@@ -6672,12 +6716,22 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
         with ui.row().classes('gap-1 justify-center w-full no-wrap'):
             
             # (1) 复制标准链接
-            async def copy_link():
-                link = node.get('_raw_link') or node.get('link')
-                if not link: link = generate_node_link(node, srv['url'])
+            # ✨✨✨ 修复核心：使用默认参数 (n=node, s=srv) 锁定当前循环变量，防止点击错乱 ✨✨✨
+            async def copy_link(n=node, s=srv):
+                # A. 优先使用自定义的原始链接 (Hy2/XHTTP)
+                link = n.get('_raw_link') or n.get('link')
+                
+                # B. 如果是面板节点，动态生成
+                if not link: 
+                    # 传入 s['url'] (带端口)，但 generate_node_link 内部会自动清洗
+                    link = generate_node_link(n, s['url'])
+                
                 await safe_copy_to_clipboard(link)
 
-            ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
+            ui.button(icon='content_copy', on_click=copy_link) \
+                .props('flat dense size=sm round') \
+                .tooltip('复制链接') \
+                .classes('text-gray-500 hover:text-blue-600 hover:bg-blue-50')
 
             # (2) 复制明文配置 (Surge/Loon)
             async def copy_detail():
