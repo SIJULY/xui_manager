@@ -5195,41 +5195,33 @@ class SubscriptionProcessEditor:
 def open_process_editor(sub_data):
     with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
 
-# ================= 通用服务器保存函数 (集成极速修正 + 自动探针) =================
+# ================= 通用服务器保存函数 (修复版：静默更新，不乱跳视图) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     """
     统一处理服务器的保存逻辑（新增或编辑）
-    1. 查重
-    2. 写入缓存
-    3. 触发后台极速修正 (GeoIP)
-    4. 触发后台探针安装
+    修复：保存后不再强制跳转视图，根据当前所在页面智能刷新
     """
     # 1. 基础校验
     if not server_data.get('name') or not server_data.get('url'):
         safe_notify("名称和地址不能为空", "negative")
         return False
 
-    # 2. 逻辑处理
+    # 2. 逻辑处理 (查重与更新内存)
     if is_add:
         # --- 新增模式 ---
-        # 查重
         for s in SERVERS_CACHE:
             if s['url'] == server_data['url']:
                 safe_notify(f"服务器地址 {server_data['url']} 已存在！", "warning")
                 return False
         
-        # 初始处理：如果没有国旗，先给白旗占位
-        # (check 1: 名字里没国旗; check 2: 名字里也没白旗)
+        # 补全默认国旗
         has_flag = False
         for v in AUTO_COUNTRY_MAP.values():
             if v.split(' ')[0] in server_data['name']:
-                has_flag = True
-                break
-        
+                has_flag = True; break
         if not has_flag and '🏳️' not in server_data['name']:
              server_data['name'] = f"🏳️ {server_data['name']}"
 
-        # 写入列表
         SERVERS_CACHE.append(server_data)
         safe_notify(f"已添加服务器: {server_data['name']}", "positive")
 
@@ -5237,7 +5229,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
         # --- 编辑模式 ---
         if idx is not None and 0 <= idx < len(SERVERS_CACHE):
             SERVERS_CACHE[idx].update(server_data)
-            safe_notify(f"已更新服务器: {server_data['name']}", "positive")
+            safe_notify(f"已更新: {server_data['name']}", "positive")
         else:
             safe_notify("编辑目标不存在", "negative")
             return False
@@ -5245,28 +5237,44 @@ async def save_server_config(server_data, is_add=True, idx=None):
     # 3. 保存到硬盘
     await save_servers()
 
-    # 4. 刷新左侧列表
-    render_sidebar_content.refresh()
-    
-    # 5. 如果当前正在看这台服务器，刷新右侧详情
-    try:
-        # 这里的 refresh_content 使用 force_refresh=True 会顺便同步一下节点
-        if is_add:
-            # 新增的显示最后一个
-            await refresh_content('SINGLE', SERVERS_CACHE[-1], force_refresh=True)
-        else:
-            # 编辑的显示当前这个
-            await refresh_content('SINGLE', SERVERS_CACHE[idx], force_refresh=True)
+    # 4. 刷新左侧列表 (侧边栏必须刷新以显示新名字)
+    try: render_sidebar_content.refresh()
     except: pass
+    
+    # ================= ✨✨✨ 核心修复：智能静默刷新 ✨✨✨ =================
+    # 只有当用户 [当前正好在看] 这台服务器的详情，或者 [当前在看全部列表] 时，才刷新主视图
+    # 否则（比如在看仪表盘），保持不动，只在后台更新数据
+    
+    current_scope = CURRENT_VIEW_STATE.get('scope')
+    current_data = CURRENT_VIEW_STATE.get('data')
+    
+    # 情况 A: 当前正在看这台服务器的详情页 -> 刷新详情以显示最新修改
+    if current_scope == 'SINGLE' and (current_data == server_data or (is_add and server_data == SERVERS_CACHE[-1])):
+        try: await refresh_content('SINGLE', server_data, force_refresh=True)
+        except: pass
+        
+    # 情况 B: 当前在看“所有服务器”列表 -> 刷新列表显示最新信息
+    elif current_scope == 'ALL':
+        try: await refresh_content('ALL', force_refresh=False) # False=只重绘UI，不强拉API
+        except: pass
+        
+    # 情况 C: 当前在看仪表盘 -> 刷新仪表盘数据 (静默)
+    elif current_scope == 'DASHBOARD':
+        try: await refresh_dashboard_ui()
+        except: pass
 
-    # ================= ✨ 核心：触发后台自动化任务 ✨ =================
+    # ================= ✨ 触发后台自动化任务 ✨ =================
     
     # 任务 1: 极速 GeoIP 修正 (2秒后自动变国旗、自动归类分组)
     asyncio.create_task(fast_resolve_single_server(server_data))
     
-    # 任务 2: 自动安装探针 (如果配置了SSH)
+    # 任务 2: 自动安装探针 (如果配置了SSH且开启了探针)
     if ADMIN_CONFIG.get('probe_enabled', False) and server_data.get('probe_installed', False):
-        asyncio.create_task(install_probe_on_server(server_data))
+        # 稍微延迟一下，避免保存瞬间卡顿
+        async def delayed_install():
+            await asyncio.sleep(1)
+            await install_probe_on_server(server_data)
+        asyncio.create_task(delayed_install())
         
     return True
 
@@ -5308,7 +5316,7 @@ async def open_server_dialog(idx=None):
                 t_ssh = ui.tab('SSH / 探针', icon='terminal')
                 t_xui = ui.tab('X-UI面板', icon='settings')
 
-        # ================= ✨✨✨ 独立的基础信息保存逻辑 ✨✨✨ =================
+        # ================= ✨✨✨ 独立的基础信息保存逻辑 (修复版) ✨✨✨ =================
         async def save_basic_info_only():
             if not is_edit: 
                 safe_notify("新增服务器请使用下方的保存按钮", "warning")
@@ -5325,17 +5333,21 @@ async def open_server_dialog(idx=None):
             SERVERS_CACHE[idx]['name'] = new_name
             SERVERS_CACHE[idx]['group'] = new_group
             
-            # 仅保存文件，不触发探针安装
+            # 仅保存文件
             await save_servers()
+            
+            # 刷新侧边栏
             render_sidebar_content.refresh()
             
-            # 刷新单机视图（如果开着的话）
-            try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
-            except: pass
+            # ✨✨✨ 修复：智能判断是否需要刷新主视图 ✨✨✨
+            # 只有当用户正好在看这台机器详情时，才刷新右侧区域
+            if CURRENT_VIEW_STATE.get('scope') == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
+                try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
+                except: pass
             
-            safe_notify("✅ 基础信息已更新 (未触发生效脚本)", "positive")
+            safe_notify("✅ 基础信息已更新", "positive")
             d.close()
-
+            
         # --- 通用字段区域 ---
         with ui.column().classes('w-full gap-2'):
             name_input = ui.input(value=data.get('name',''), label='备注名称 (留空自动获取)').classes('w-full').props('outlined dense')
@@ -7714,7 +7726,7 @@ def open_create_group_dialog():
     d.open()
 
 
-# ================= 侧边栏渲染 (终极修正：纯净模式 + 拖拽排序) =================
+# ================= 侧边栏渲染 (终极修正：纯净模式 + 拖拽排序 + 滚动记忆) =================
 _current_dragged_group = None 
 
 @ui.refreshable
@@ -7746,8 +7758,9 @@ def render_sidebar_content():
             ui.button('探针设置', icon='tune', on_click=render_probe_page).props('flat align=left').classes(btn_top_style)
             ui.button('订阅管理', icon='rss_feed', on_click=load_subs_view).props('flat align=left').classes(btn_top_style)
             
-    # --- 2. 列表区域 ---
-    with ui.column().classes('w-full flex-grow overflow-y-auto p-2 gap-2 bg-slate-50'):
+    # --- 2. 列表区域 (✨✨✨ 关键修改：添加 ID 用于 JS 控制滚动) ---
+    # 给这个 scroll area 一个固定 ID: sidebar-scroll-box
+    with ui.column().props('id=sidebar-scroll-box').classes('w-full flex-grow overflow-y-auto p-2 gap-2 bg-slate-50'):
         
         # 功能按钮
         with ui.row().classes('w-full gap-2 px-1 mb-2'):
@@ -7779,10 +7792,7 @@ def render_sidebar_content():
                 ui.label('所有服务器').classes('font-bold text-gray-700')
             ui.badge(str(len(SERVERS_CACHE)), color='blue').props('rounded outline')
 
-        # ==============================================================================
-        # 纯灰 3D 键帽样式定义
-        # ==============================================================================
-        
+        # 3D 键帽样式定义
         btn_keycap_base = (
             'bg-white '                                     
             'border-t border-x border-gray-200 border-b-[3px] border-b-gray-300 ' 
@@ -7790,85 +7800,56 @@ def render_sidebar_content():
             'transition-all duration-100 '                  
             'active:border-b-0 active:border-t-[3px] active:translate-y-[3px] ' 
         )
-
         btn_name_cls = (
             f'{btn_keycap_base} flex-grow text-xs font-bold text-gray-700 truncate px-3 py-2.5 '
             'hover:bg-gray-50 hover:text-black hover:border-gray-400'
         )
-        
         btn_settings_cls = (
             f'{btn_keycap_base} w-10 py-2.5 px-0 flex items-center justify-center text-gray-400 '
             'hover:text-gray-700 hover:bg-gray-50 hover:border-gray-400'
         )
 
-        # ✨✨✨ 拖拽通用函数 ✨✨✨
         def on_drag_start(e, name):
             global _current_dragged_group
             _current_dragged_group = name
 
-        # --- B. 自定义分组 (终极修正：只读取，绝不扫描) ---
-        
-        # 1. 直接读取配置。如果这里面有脏数据，显示出来后请手动删除，代码本身不会再自动添加了。
+        # --- B. 自定义分组 ---
         final_tags = ADMIN_CONFIG.get('custom_groups', [])
         
-        # 2. 拖拽放置逻辑
         async def on_tag_drop(e, target_name):
             global _current_dragged_group
             if not _current_dragged_group or _current_dragged_group == target_name: return
             try:
-                # 复制当前列表
                 current_list = list(final_tags)
                 if _current_dragged_group in current_list and target_name in current_list:
                     old_idx = current_list.index(_current_dragged_group)
                     item = current_list.pop(old_idx)
                     new_idx = current_list.index(target_name)
                     current_list.insert(new_idx, item)
-                    
-                    # 保存顺序
                     ADMIN_CONFIG['custom_groups'] = current_list
                     await save_admin_config()
-                    
                     _current_dragged_group = None
                     render_sidebar_content.refresh()
             except: pass
 
         if final_tags:
             ui.label('自定义分组').classes('text-xs font-bold text-gray-400 mt-4 mb-2 px-2 uppercase tracking-wider')
-            
             for tag_group in final_tags:
-                tag_servers = [
-                    s for s in SERVERS_CACHE 
-                    if isinstance(s, dict) and (tag_group in s.get('tags', []) or s.get('group') == tag_group)
-                ]
+                tag_servers = [s for s in SERVERS_CACHE if isinstance(s, dict) and (tag_group in s.get('tags', []) or s.get('group') == tag_group)]
                 try: tag_servers.sort(key=smart_sort_key)
                 except: tag_servers.sort(key=lambda x: x.get('name', ''))
-
                 is_open = tag_group in EXPANDED_GROUPS
                 
-                # 拖拽容器
-                with ui.element('div').classes('w-full') \
-                    .on('dragover.prevent', lambda _: None) \
-                    .on('drop', lambda e, n=tag_group: on_tag_drop(e, n)):
-
-                    group_card_cls = (
-                        'w-full border border-gray-200 rounded-xl mb-2 bg-white shadow-sm transition-all duration-300 '
-                        'hover:border-gray-300 hover:shadow-md'
-                    )
-                    
+                with ui.element('div').classes('w-full').on('dragover.prevent', lambda _: None).on('drop', lambda e, n=tag_group: on_tag_drop(e, n)):
+                    group_card_cls = 'w-full border border-gray-200 rounded-xl mb-2 bg-white shadow-sm transition-all duration-300 hover:border-gray-300 hover:shadow-md'
                     with ui.expansion('', icon=None, value=is_open).classes(group_card_cls).props('expand-icon-toggle').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                         with exp.add_slot('header'):
-                            header_cls = (
-                                'w-full h-full items-center justify-between no-wrap cursor-pointer py-1 '
-                                'group/header transition-all duration-200 active:bg-gray-100 active:scale-[0.98]'
-                            )
+                            header_cls = 'w-full h-full items-center justify-between no-wrap cursor-pointer py-1 group/header transition-all duration-200 active:bg-gray-100 active:scale-[0.98]'
                             with ui.row().classes(header_cls).on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
                                 with ui.row().classes('items-center gap-3 flex-grow overflow-hidden'):
-                                    # 拖拽手柄
                                     ui.icon('drag_indicator').props('draggable="true"').classes('cursor-move text-gray-300 hover:text-gray-500 p-1 rounded transition-colors group-hover/header:text-gray-400').on('dragstart', lambda e, n=tag_group: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
-                                    
                                     ui.icon('folder', color='primary').classes('opacity-70')
                                     ui.label(tag_group).classes('flex-grow font-bold text-gray-700 truncate')
-                                
                                 with ui.row().classes('items-center gap-2 pr-2').on('mousedown.stop').on('click.stop'):
                                     ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-4').classes('hover:text-gray-700').tooltip('管理分组')
                                     ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey').props('rounded outline')
@@ -7879,7 +7860,7 @@ def render_sidebar_content():
                                     ui.button(s['name'], on_click=lambda _, s=s: refresh_content('SINGLE', s)).props('no-caps align=left flat text-color=grey-8').classes(btn_name_cls)
                                     ui.button(icon='settings', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat square size=sm text-color=grey-5').classes(btn_settings_cls).tooltip('配置 / 删除')
 
-        # --- C. 区域分组 (保持不变) ---
+        # --- C. 区域分组 ---
         ui.label('区域分组').classes('text-xs font-bold text-gray-400 mt-4 mb-2 px-2 uppercase tracking-wider')
         
         country_buckets = {}
@@ -7918,21 +7899,11 @@ def render_sidebar_content():
                 except: c_servers.sort(key=lambda x: x.get('name', ''))
                 is_open = c_name in EXPANDED_GROUPS
 
-                with ui.element('div').classes('w-full') \
-                    .on('dragover.prevent', lambda _: None) \
-                    .on('drop', lambda e, n=c_name: on_region_drop(e, n)):
-
-                    group_card_cls = (
-                        'w-full border border-gray-200 rounded-xl bg-white shadow-sm transition-all duration-300 '
-                        'hover:border-gray-300 hover:shadow-md'
-                    )
-                    
+                with ui.element('div').classes('w-full').on('dragover.prevent', lambda _: None).on('drop', lambda e, n=c_name: on_region_drop(e, n)):
+                    group_card_cls = 'w-full border border-gray-200 rounded-xl bg-white shadow-sm transition-all duration-300 hover:border-gray-300 hover:shadow-md'
                     with ui.expansion('', icon=None, value=is_open).classes(group_card_cls).props('expand-icon-toggle').on_value_change(lambda e, g=c_name: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                         with exp.add_slot('header'):
-                            header_cls = (
-                                'w-full h-full items-center justify-between no-wrap py-2 cursor-pointer '
-                                'group/header transition-all duration-200 active:bg-gray-50 active:scale-[0.98]'
-                            )
+                            header_cls = 'w-full h-full items-center justify-between no-wrap py-2 cursor-pointer group/header transition-all duration-200 active:bg-gray-50 active:scale-[0.98]'
                             with ui.row().classes(header_cls).on('click', lambda _, g=c_name: refresh_content('COUNTRY', g)):
                                 with ui.row().classes('items-center gap-3 flex-grow overflow-hidden'):
                                     ui.icon('drag_indicator').props('draggable="true"').classes('cursor-move text-gray-300 hover:text-gray-500 p-1 rounded transition-colors group-hover/header:text-gray-400').on('dragstart', lambda e, n=c_name: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
@@ -7941,7 +7912,6 @@ def render_sidebar_content():
                                         ui.label(flag).classes('text-lg filter drop-shadow-sm')
                                         display_name = c_name.split(' ')[1] if ' ' in c_name else c_name
                                         ui.label(display_name).classes('font-bold text-gray-700 truncate')
-                                
                                 with ui.row().classes('items-center gap-2 pr-2').on('mousedown.stop').on('click.stop'):
                                     ui.button(icon='edit_note', on_click=lambda _, s=c_servers, t=c_name: open_bulk_edit_dialog(s, f"区域: {t}")).props('flat dense round size=xs color=grey-4').classes('hover:text-gray-600').tooltip('批量管理')
                                     ui.badge(str(len(c_servers)), color='green').props('rounded outline').classes('font-mono font-bold')
@@ -7952,26 +7922,35 @@ def render_sidebar_content():
                                     ui.button(s['name'], on_click=lambda _, s=s: refresh_content('SINGLE', s)).props('no-caps align=left flat text-color=grey-8').classes(btn_name_cls)
                                     ui.button(icon='settings', on_click=lambda _, idx=SERVERS_CACHE.index(s): open_server_dialog(idx)).props('flat square size=sm text-color=grey-5').classes(btn_settings_cls).tooltip('配置 / 删除')
 
+    # ✨✨✨ [核心功能] JS 记忆与恢复滚动位置 ✨✨✨
+    # 逻辑：每次刷新后，尝试从 window.sidebarScroll 恢复位置；同时绑定滚动事件，将位置实时写入 window.sidebarScroll
+    ui.run_javascript('''
+        (function() {
+            var el = document.getElementById("sidebar-scroll-box");
+            if (el) {
+                // 1. 如果有记忆，立即恢复
+                if (window.sidebarScroll) {
+                    el.scrollTop = window.sidebarScroll;
+                }
+                // 2. 绑定事件，实时记录
+                el.addEventListener("scroll", function() {
+                    window.sidebarScroll = el.scrollTop;
+                });
+            }
+        })();
+    ''')
+
     # --- 3. 底部功能区  ---
     with ui.column().classes('w-full p-2 border-t mt-auto mb-4 gap-2 bg-white z-10 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]'):
-        # 统一的 3D 按钮样式
         bottom_btn_3d = (
             'w-full text-gray-600 text-xs font-bold bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 '
             'transition-all duration-200 hover:bg-white hover:shadow-md hover:border-slate-300 hover:text-slate-900 '
             'active:translate-y-[1px] active:bg-slate-100 active:shadow-none'
         )
-
-        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog) \
-            .props('flat align=left').classes(bottom_btn_3d)
-        
-        ui.button('Cloudflare 设置', icon='cloud', on_click=open_cloudflare_settings_dialog) \
-            .props('flat align=left').classes(bottom_btn_3d)
-        
-        ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog) \
-            .props('flat align=left').classes(bottom_btn_3d)
-        
-        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog) \
-            .props('flat align=left').classes(bottom_btn_3d)
+        ui.button('批量 SSH 执行', icon='playlist_play', on_click=batch_ssh_manager.open_dialog).props('flat align=left').classes(bottom_btn_3d)
+        ui.button('Cloudflare 设置', icon='cloud', on_click=open_cloudflare_settings_dialog).props('flat align=left').classes(bottom_btn_3d)
+        ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes(bottom_btn_3d)
+        ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes(bottom_btn_3d)
         
 # ================== 登录与 MFA 逻辑 (修正版) ==================
 @ui.page('/login')
