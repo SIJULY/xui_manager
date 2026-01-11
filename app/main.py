@@ -8072,22 +8072,31 @@ def check_auth(request: Request):
 # ================= [本地化版] 主页入口 (含 IP 检测与强制下线) =================
 @ui.page('/')
 def main_page(request: Request):
-    # ================= 1. 注入全局资源与样式 =================
+    # ================= 1. 注入全局资源与样式 (修复国旗显示) =================
     ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
+    
+    # ✨✨✨ 核心修复：引入 Twemoji 字体 polyfill ✨✨✨
     ui.add_head_html('''
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
+            /* 1. 定义国旗专用字体 */
+            @font-face {
+                font-family: 'Twemoji Country Flags';
+                src: url('https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1/dist/TwemojiCountryFlags.woff2') format('woff2');
+                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F;
+            }
+            
+            /* 2. 全局应用字体 */
             body { 
-                font-family: 'Noto Sans SC', "Roboto", "Helvetica", "Arial", sans-serif, "Noto Color Emoji"; 
+                font-family: 'Twemoji Country Flags', 'Noto Sans SC', "Roboto", "Helvetica", "Arial", sans-serif, "Noto Color Emoji"; 
                 background-color: #f8fafc; 
             }
             .nicegui-connection-lost { display: none !important; }
         </style>
     ''')
-
     # ================= 2. 认证检查 =================
     if not check_auth(request): 
         return RedirectResponse('/login')
@@ -9114,40 +9123,61 @@ async def render_desktop_status_page():
     ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
     
-    # ✨✨✨ [修复版] CSS 样式注入：集成了 Twemoji 字体 ✨✨✨
+    # ✨✨✨ [CSS 样式注入] 集成 Twemoji 字体修复 Win 系统国旗显示 ✨✨✨
     ui.add_head_html('''
+        <link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
-            /* 1. 定义国旗字体 (修复 Windows 不显示国旗的问题) */
+            /* 1. 定义国旗专用字体 (Twemoji Polyfill) */
+            /* 这段代码会让浏览器下载推特的 Emoji 字体来渲染国旗，绕过 Windows 的限制 */
             @font-face {
                 font-family: 'Twemoji Country Flags';
                 src: url('https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1/dist/TwemojiCountryFlags.woff2') format('woff2');
-                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F; /* 仅对国旗区域生效 */
+                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F; /* 仅针对国旗 Unicode 区域生效 */
             }
 
-            /* 2. 全局字体设置：优先使用 Twemoji */
+            /* 2. 全局字体设置：将国旗字体放在第一位 */
             body { 
                 margin: 0; 
+                /* 关键点：Twemoji Country Flags 必须排在第一个 */
                 font-family: "Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; 
                 transition: background-color 0.3s ease; 
             }
 
-            /* 3. 这里的其余样式保持原样 */
+            /* 3. 其他样式保持不变 */
             body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
             body.body--dark { background-color: #0b1121; }
+            
             .status-card { transition: all 0.3s ease; border-radius: 16px; }
-            body:not(.body--dark) .status-card { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.8); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #1e293b; }
-            body.body--dark .status-card { background: #1e293b; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); color: #e2e8f0; }
+            
+            body:not(.body--dark) .status-card { 
+                background: rgba(255, 255, 255, 0.95); 
+                border: 1px solid rgba(255, 255, 255, 0.8); 
+                box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); 
+                color: #1e293b; 
+            }
+            body.body--dark .status-card { 
+                background: #1e293b; 
+                border: 1px solid rgba(255,255,255,0.05); 
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3); 
+                color: #e2e8f0; 
+            }
+            
             .status-card:hover { transform: translateY(-3px); }
+            
             .offline-card { border-color: rgba(239, 68, 68, 0.6) !important; }
             body.body--dark .offline-card { background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.05) 0px, rgba(239, 68, 68, 0.05) 10px, transparent 10px, transparent 20px) !important; }
             body:not(.body--dark) .offline-card { background: rgba(254, 226, 226, 0.95) !important; }
+            
             .scrollbar-hide::-webkit-scrollbar { display: none; }
             .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+            
             .prog-bar { transition: width 0.5s ease-out; }
+            
             #public-map-container { contain: strict; transform: translateZ(0); will-change: transform; z-index: 0; }
         </style>
     ''')
-
+    
     RENDERED_CARDS = {} 
     tab_container = None
     grid_container = None
@@ -9415,14 +9445,14 @@ async def render_desktop_status_page():
     for s in sorted_init_list: create_server_card(s)
     render_tabs(); apply_filter(CURRENT_PROBE_TAB)
     
-    # ✨✨✨ [终极修复版] 包含了：国旗字体 + 北京坐标 + HTTPS 接口 ✨✨✨
+    # ✨✨✨ [JS 逻辑注入] 地图渲染 + HTTPS IP 定位 + 国旗字体应用 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
         window.regionStats = {region_stats_json}; 
         window.countryCentroids = {centroids_json}; 
         
-        // ✅ 修改 1：默认坐标改成北京 [经度, 纬度]
+        // ✅ 1. 默认坐标：北京 [经度, 纬度]
         var defaultPt = [116.40, 39.90]; 
         
         var defaultZoom = 1.35; 
@@ -9430,7 +9460,7 @@ async def render_desktop_status_page():
         var isZoomed = false; 
         var myChart = null;
 
-        // ✅ 修改 2：使用支持 HTTPS 的 IP 接口
+        // ✅ 2. HTTPS IP 定位接口
         function tryIpLocation() {{
             fetch('https://ipapi.co/json/')
                 .then(response => response.json())
@@ -9456,6 +9486,7 @@ async def render_desktop_status_page():
                 myChart = echarts.init(chartDom); 
                 window.publicMapChart = myChart; 
                 
+                // 尝试获取定位
                 if (navigator.geolocation) {{ 
                     navigator.geolocation.getCurrentPosition(
                         p => {{ 
@@ -9484,7 +9515,7 @@ async def render_desktop_status_page():
                     var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
 
-                    // ✅ 修改 3：定义字体变量 (优先使用 Twemoji)
+                    // ✅ 修改 3：定义字体变量 (优先使用 Twemoji，修复 Win 系统显示)
                     var emojiFont = '"Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif';
 
                     var option = {{
@@ -9513,13 +9544,13 @@ async def render_desktop_status_page():
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
                             {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff' }}, data: mapData.cities }},
                             
-                            // ✅ 修改 4：应用字体到国旗 Label
+                            // ✅ 修改 4：应用字体到地图上的国旗 Label
                             {{ 
                                 type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, 
                                 label: {{ 
                                     show: true, position: 'top', formatter: '{{b}}', 
                                     color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5],
-                                    fontFamily: emojiFont // <--- 关键点
+                                    fontFamily: emojiFont // <--- 关键点：让 Canvas 使用 WebFont
                                 }}, 
                                 data: mapData.flags 
                             }},
