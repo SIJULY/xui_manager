@@ -2585,8 +2585,8 @@ async def run_in_bg_executor(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(BG_EXECUTOR, func, *args)
 
-# 2. 单个服务器同步逻辑 
-async def fetch_inbounds_safe(server_conf, force_refresh=False):
+# 2. 单个服务器同步逻辑 (修改版：增加 sync_name 开关)
+async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False):
     url = server_conf['url']
     name = server_conf.get('name', '未命名')
     
@@ -2594,7 +2594,6 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False):
     if not force_refresh and url in NODES_DATA: return NODES_DATA[url]
     
     async with SYNC_SEMAPHORE:
-        logger.info(f"🔄 同步: [{name}] ...")
         try:
             mgr = get_manager(server_conf)
             inbounds = await run_in_bg_executor(mgr.get_inbounds)
@@ -2606,22 +2605,47 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False):
             if inbounds is not None:
                 # ✅ 成功：更新内存缓存
                 NODES_DATA[url] = inbounds
-                # 标记为在线
                 server_conf['_status'] = 'online' 
                 
-                # ✨✨✨ [核心修改]：移除这里的 asyncio.create_task(save_nodes_cache()) ✨✨✨
-                # 不要每同步一个就写一次硬盘，这会堵死主线程锁！改为在批量任务结束后统一保存。
+                # ================= ✨✨✨ [逻辑修改]：仅当 sync_name=True 时才同步名称 ✨✨✨ =================
+                if sync_name: 
+                    try:
+                        if len(inbounds) > 0:
+                            remote_name = inbounds[0].get('remark', '').strip()
+                            if remote_name:
+                                current_full_name = server_conf.get('name', '')
+                                
+                                # 分离国旗
+                                if ' ' in current_full_name:
+                                    parts = current_full_name.split(' ', 1)
+                                    current_flag = parts[0]
+                                    current_text = parts[1].strip()
+                                else:
+                                    current_flag = ""
+                                    current_text = current_full_name
+                                
+                                # 比对并更新
+                                if current_text != remote_name:
+                                    logger.info(f"🔄 [名称同步] (主动触发) 发现变更: {current_text} -> {remote_name}")
+                                    if current_flag:
+                                        new_name = f"{current_flag} {remote_name}"
+                                    else:
+                                        new_name = await auto_prepend_flag(remote_name, url)
+                                    
+                                    server_conf['name'] = new_name
+                                    asyncio.create_task(save_servers())
+                    except Exception as e:
+                        logger.warning(f"⚠️ [名称同步] 异常: {e}")
+                # =========================================================================================
                 
                 return inbounds
             
             # ❌ 失败
-            logger.error(f"❌ [{name}] 连接失败 (清除缓存)")
             NODES_DATA[url] = [] 
             server_conf['_status'] = 'offline'
             return []
             
         except Exception as e: 
-            logger.error(f"❌ [{name}] 异常: {e}")
             NODES_DATA[url] = [] 
             server_conf['_status'] = 'error'
             return []
@@ -5910,26 +5934,20 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2.5fr 1.5fr 1.5fr 1fr 0.8fr 0.8
 SINGLE_COLS_NO_PING = 'grid-template-columns: 3fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr; align-items: center;'
 
 
-# ================= 刷新逻辑 =================
+# ================= 刷新逻辑 (修改版：同步完成后刷新侧边栏) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False):
     try: client = ui.context.client
     except: return 
 
     global CURRENT_VIEW_STATE
     
-    # ==============================================================================
-    # ✨✨✨ [修复核心]：防抖判断 (防止重复点击同一服务器导致视图重置) ✨✨✨
-    # ==============================================================================
-    # 逻辑：如果请求的视图类型(scope)和数据对象(data)与当前完全一致，且不是强制刷新
-    # 则直接跳过，什么都不做。这样 SSH 窗口就不会被清空销毁。
+    # 防抖判断
     if not force_refresh and CURRENT_VIEW_STATE.get('scope') == scope and CURRENT_VIEW_STATE.get('data') == data:
         return 
-    # ==============================================================================
 
     import time
     current_token = time.time()
     
-    # 更新当前视图状态
     if not force_refresh:
         CURRENT_VIEW_STATE['scope'] = scope
         CURRENT_VIEW_STATE['data'] = data
@@ -5950,25 +5968,20 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
              if data in SERVERS_CACHE: targets = [data]
     except: pass
 
-    # 2. 定义 UI 绘制逻辑 (清空容器并重绘)
+    # 2. UI 绘制逻辑
     async def _render_ui():
         if CURRENT_VIEW_STATE.get('render_token') != current_token: return
-        
         with client:
             if not content_container: return
             content_container.clear()
             content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
             
             with content_container:
-                # ✨✨✨ 核心修复：如果是单服务器视图，直接渲染并退出，防止双标题 ✨✨✨
                 if scope == 'SINGLE': 
-                    if targets:
-                        await render_single_server_view(targets[0])
-                    else:
-                        ui.label('服务器未找到').classes('text-gray-400')
+                    if targets: await render_single_server_view(targets[0])
+                    else: ui.label('服务器未找到').classes('text-gray-400')
                     return 
                 
-                # ================= 以下是聚合视图 (ALL/TAG/COUNTRY) 的通用标题栏 =================
                 title = ""
                 is_group_view = False
                 show_ping = False
@@ -5982,51 +5995,50 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                     is_group_view = True
                     show_ping = True 
 
-                # --- 聚合视图标题栏 ---
                 with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
                     with ui.row().classes('items-center gap-4'):
                         ui.label(title).classes('text-2xl font-bold')
 
-                    # --- 右侧按钮区 ---
                     with ui.row().classes('items-center gap-2'):
-                        # 分组操作按钮
                         if is_group_view and targets:
                             with ui.row().classes('gap-1'):
                                 ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
                                 ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
                                 ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
-                        # 同步按钮 (触发 force_refresh=True)
                         if targets:
+                             # 点击这里的按钮是“主动操作”，所以 force_refresh=True
                              ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
 
-                # --- 渲染列表内容 ---
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
                         ui.icon('inbox', size='4rem'); ui.label('列表为空').classes('text-lg')
                 else: 
-                    # 列表排序
                     try: targets.sort(key=smart_sort_key)
                     except: pass
-                    # 调用聚合渲染函数
                     await render_aggregated_view(targets, show_ping=show_ping, token=current_token)
 
-    # 3. 执行绘制
     if not force_refresh:
         await _render_ui()
 
     # 4. 后台数据同步逻辑
     panel_only_servers = [s for s in targets if not s.get('probe_installed', False)]
-    if force_refresh: panel_only_servers = targets # 强刷时，所有机器都拉一遍
+    if force_refresh: panel_only_servers = targets
 
     if panel_only_servers:
         async def _background_fetch():
             if not panel_only_servers: return
             if scope != 'SINGLE': safe_notify(f"正在后台更新 {len(panel_only_servers)} 台面板数据...", "ongoing", timeout=2000)
             
-            # 发起网络请求更新数据 (结果会存入 NODES_DATA)
-            tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in panel_only_servers]
+            # 执行同步 (含改名逻辑)
+            tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=force_refresh) for s in panel_only_servers]
             await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # ✨✨✨ [核心修改点]：数据更新完了，强制刷新左侧侧边栏！ ✨✨✨
+            try:
+                render_sidebar_content.refresh()
+            except: 
+                pass # 防止极端情况下 UI 上下文丢失
             
             if scope != 'SINGLE': safe_notify("数据已同步", "positive")
         
@@ -8281,23 +8293,19 @@ async def job_monitor_status():
 
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
-# ================= 优雅的后台任务调度 (APScheduler) =================
 
-# 1. 定义流量同步任务 (优化版：统一保存)
+# ================= 定义流量同步任务 =================
 async def job_sync_all_traffic():
     logger.info("🕒 [定时任务] 开始全量同步流量...")
-    tasks = [fetch_inbounds_safe(s, force_refresh=True) for s in SERVERS_CACHE]
+    # ✨✨✨ [修改点]：显式传入 sync_name=False，确保定时任务只拉流量，不改名字 ✨✨✨
+    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=False) for s in SERVERS_CACHE]
+    
     if tasks:
-        # 等待所有服务器同步完成
         await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # ✨✨✨ [核心修改]：所有数据拉取完后，统一保存一次到硬盘 ✨✨✨
         await save_nodes_cache()
-        
-        # 刷新界面
         await refresh_dashboard_ui()
         
-    logger.info("✅ [定时任务] 流量同步完成 (已落盘)")
+    logger.info("✅ [定时任务] 流量同步完成 (已落盘，跳过名称同步)")
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
