@@ -5595,7 +5595,7 @@ async def open_server_dialog(idx=None):
                 ui.button('删除 / 卸载配置', icon='delete', on_click=open_delete_confirm).props('flat').classes(btn_keycap_delete)
     d.open()
     
-# =================  数据备份/恢复  =================
+# =================  数据备份/恢复 (已修复记忆功能)  =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         
@@ -5670,34 +5670,51 @@ async def open_data_mgmt_dialog():
                         url_area = ui.textarea(placeholder='192.168.1.10\n192.168.1.11:2202\nhttp://example.com:54321').classes('w-full h-32 font-mono text-sm bg-gray-50').props('outlined')
                         ui.separator()
                         
-                        # --- 默认设置区域 (SSH 认证升级版) ---
+                        # --- 默认设置区域 (记忆功能已修复) ---
                         with ui.grid().classes('w-full gap-2 grid-cols-2'):
-                            def_ssh_user = ui.input('默认 SSH 用户', value='root').props('dense outlined')
-                            def_ssh_port = ui.input('默认 SSH 端口', value='22').props('dense outlined')
+                            # 从配置读取上次的值，如果没有则使用默认
+                            last_ssh_user = ADMIN_CONFIG.get('pref_ssh_user', 'root')
+                            last_ssh_port = ADMIN_CONFIG.get('pref_ssh_port', '22')
                             
-                            # ✨✨✨ [新增] 认证方式选择 ✨✨✨
+                            def_ssh_user = ui.input('默认 SSH 用户', value=last_ssh_user).props('dense outlined')
+                            def_ssh_port = ui.input('默认 SSH 端口', value=last_ssh_port).props('dense outlined')
+                            
+                            # SSH 认证方式 & 密码 & 私钥
                             def_auth_type = ui.select(['全局密钥', '独立密码', '独立密钥'], value='全局密钥', label='默认 SSH 认证').classes('col-span-2').props('dense outlined options-dense')
                             
-                            # ✨✨✨ [新增] 动态显隐：密码框 ✨✨✨
                             def_ssh_pwd = ui.input('默认 SSH 密码').props('dense outlined').classes('col-span-2')
                             def_ssh_pwd.bind_visibility_from(def_auth_type, 'value', value='独立密码')
                             
-                            # ✨✨✨ [新增] 动态显隐：私钥框 ✨✨✨
                             def_ssh_key = ui.textarea('默认 SSH 私钥').props('dense outlined rows=2 input-class=text-xs font-mono').classes('col-span-2')
                             def_ssh_key.bind_visibility_from(def_auth_type, 'value', value='独立密钥')
 
-                            def_xui_port = ui.input('默认 X-UI 端口', value='54321').props('dense outlined')
-                            def_xui_user = ui.input('默认 X-UI 账号', value='admin').props('dense outlined')
-                            def_xui_pass = ui.input('默认 X-UI 密码', value='admin').props('dense outlined')
+                            # X-UI 默认值记忆
+                            last_xui_port = ADMIN_CONFIG.get('pref_xui_port', '54321')
+                            last_xui_user = ADMIN_CONFIG.get('pref_xui_user', 'admin')
+                            last_xui_pass = ADMIN_CONFIG.get('pref_xui_pass', 'admin')
+
+                            def_xui_port = ui.input('默认 X-UI 端口', value=last_xui_port).props('dense outlined')
+                            def_xui_user = ui.input('默认 X-UI 账号', value=last_xui_user).props('dense outlined')
+                            def_xui_pass = ui.input('默认 X-UI 密码', value=last_xui_pass).props('dense outlined')
                         
                         ui.separator()
 
-                        # ✨✨✨ 双独立开关 (Double Switch) ✨✨✨
+                        # 双独立开关
                         with ui.row().classes('w-full justify-between items-center bg-gray-50 p-2 rounded border border-gray-200'):
                             chk_xui = ui.checkbox('添加 X-UI 面板', value=True).classes('font-bold text-blue-700')
                             chk_probe = ui.checkbox('启用 Root 探针 (自动安装)', value=False).classes('font-bold text-slate-700')
 
+                        # ✨✨✨ 主处理函数 (合并了保存逻辑) ✨✨✨
                         async def run_batch_import():
+                            # 1. 先保存用户的偏好设置到 ADMIN_CONFIG
+                            ADMIN_CONFIG['pref_ssh_user'] = def_ssh_user.value
+                            ADMIN_CONFIG['pref_ssh_port'] = def_ssh_port.value
+                            ADMIN_CONFIG['pref_xui_port'] = def_xui_port.value
+                            ADMIN_CONFIG['pref_xui_user'] = def_xui_user.value
+                            ADMIN_CONFIG['pref_xui_pass'] = def_xui_pass.value
+                            await save_admin_config() # 立即写入磁盘
+                            
+                            # 2. 开始处理添加逻辑
                             raw_text = url_area.value.strip()
                             if not raw_text: safe_notify("请输入内容", "warning"); return
                             
@@ -5706,7 +5723,6 @@ async def open_data_mgmt_dialog():
                             existing_urls = {s['url'] for s in SERVERS_CACHE}
                             post_tasks = []
                             
-                            # 获取开关状态
                             should_add_xui = chk_xui.value
                             should_add_probe = chk_probe.value
 
@@ -5734,7 +5750,7 @@ async def open_data_mgmt_dialog():
 
                                 if final_url in existing_urls: continue
                                 
-                                # ✨ 根据开关决定是否填入账号密码
+                                # 根据开关决定是否填入账号密码
                                 final_xui_user = def_xui_user.value if should_add_xui else ""
                                 final_xui_pass = def_xui_pass.value if should_add_xui else ""
 
@@ -5747,10 +5763,10 @@ async def open_data_mgmt_dialog():
                                     'prefix': '',
                                     'ssh_user': def_ssh_user.value, 
                                     'ssh_port': target_ssh_port,
-                                    'ssh_auth_type': def_auth_type.value, # 使用选择的认证方式
+                                    'ssh_auth_type': def_auth_type.value,
                                     'ssh_password': def_ssh_pwd.value, 
                                     'ssh_key': def_ssh_key.value,
-                                    'probe_installed': should_add_probe # 使用开关状态
+                                    'probe_installed': should_add_probe
                                 }
 
                                 SERVERS_CACHE.append(new_server)
@@ -5778,7 +5794,6 @@ async def open_data_mgmt_dialog():
 
                         ui.button('确认批量添加', icon='add_box', on_click=run_batch_import).classes('w-full bg-blue-600 text-white h-10')
     d.open()
-    
 # ================= 渲染逻辑 =================
 
 # 辅助函数：格式化流量
