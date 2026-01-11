@@ -7424,38 +7424,57 @@ class BatchSSH:
 batch_ssh_manager = BatchSSH()
 
 
-# =================  全能分组管理 (修复版：标签管理 + 区域回退) =================
+# =================  全能分组管理 (升级版：带搜索与智能全选) =================
 def open_combined_group_management(group_name):
-    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-[600px] h-[80vh] flex flex-col p-0 gap-0 overflow-hidden'):
+    # ✨ 1. 准备数据结构：用于存储每一行的 UI 引用，以便控制显隐
+    ui_rows = {}
+    
+    with ui.dialog() as d, ui.card().classes('w-[95vw] max-w-[600px] h-[85vh] flex flex-col p-0 gap-0 overflow-hidden'):
         
-        # 1. 标题栏
+        # --- 标题栏 ---
         with ui.row().classes('w-full justify-between items-center p-4 bg-gray-50 border-b flex-shrink-0'):
             with ui.row().classes('items-center gap-2'):
                 ui.icon('settings', color='primary').classes('text-xl')
                 ui.label(f'管理分组: {group_name}').classes('text-lg font-bold')
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
 
-        # 2. 内容区域
+        # --- 内容区域 ---
         with ui.column().classes('w-full flex-grow overflow-hidden p-0'):
-            # --- A. 分组名称设置 ---
-            with ui.column().classes('w-full p-4 border-b bg-white gap-2 flex-shrink-0'):
-                ui.label('分组名称').classes('text-xs font-bold text-gray-500')
+            
+            # --- A. 顶部设置区 (名称 + 搜索) ---
+            with ui.column().classes('w-full p-4 border-b bg-white gap-3 flex-shrink-0'):
+                # 分组名称修改
+                ui.label('分组名称').classes('text-xs font-bold text-gray-500 mb-[-5px]')
                 name_input = ui.input(value=group_name).props('outlined dense').classes('w-full')
+                
+                # ✨✨✨ 新增：搜索框 ✨✨✨
+                ui.label('搜索筛选').classes('text-xs font-bold text-gray-500 mb-[-5px]')
+                search_input = ui.input(placeholder='🔍 搜名称 / IP...').props('outlined dense clearable').classes('w-full')
+                
+                # 搜索逻辑
+                def on_search(e):
+                    keyword = str(e.value).lower().strip()
+                    for url, item in ui_rows.items():
+                        # 控制行的可见性
+                        is_match = keyword in item['search_text']
+                        item['row'].set_visibility(is_match)
+                
+                search_input.on_value_change(on_search)
 
             # --- B. 成员选择区域 ---
             with ui.column().classes('w-full flex-grow overflow-hidden relative'):
                 # 工具栏
                 with ui.row().classes('w-full p-2 bg-gray-100 justify-between items-center border-b flex-shrink-0'):
-                    ui.label('选择属于该组的服务器:').classes('text-xs font-bold text-gray-500 ml-2')
+                    ui.label('成员选择:').classes('text-xs font-bold text-gray-500 ml-2')
                     with ui.row().classes('gap-1'):
-                        ui.button('全选', on_click=lambda: toggle_all(True)).props('flat dense size=xs color=primary')
-                        ui.button('清空', on_click=lambda: toggle_all(False)).props('flat dense size=xs color=grey')
+                        # ✨ 绑定新的全选逻辑
+                        ui.button('全选 (当前)', on_click=lambda: toggle_visible(True)).props('flat dense size=xs color=primary')
+                        ui.button('清空', on_click=lambda: toggle_visible(False)).props('flat dense size=xs color=grey')
 
                 with ui.scroll_area().classes('w-full flex-grow p-2'):
                     with ui.column().classes('w-full gap-1'):
                         
                         selection_map = {} 
-                        checkbox_refs = {} 
                         
                         try: sorted_servers = sorted(SERVERS_CACHE, key=lambda x: str(x.get('name', '')))
                         except: sorted_servers = SERVERS_CACHE 
@@ -7474,28 +7493,48 @@ def open_combined_group_management(group_name):
                             
                             selection_map[s['url']] = is_in_group
                             
-                            with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition'):
+                            # 准备搜索文本
+                            ip_addr = s['url'].split('//')[-1].split(':')[0]
+                            search_key = f"{s['name']} {ip_addr}".lower()
+
+                            # 渲染行
+                            with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition') as row:
                                 chk = ui.checkbox(value=is_in_group).props('dense')
-                                checkbox_refs[s['url']] = chk
+                                
+                                # 点击行也可以勾选
+                                ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
                                 chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                                 
                                 # 信息展示
                                 with ui.column().classes('gap-0 ml-2 flex-grow overflow-hidden'):
                                     with ui.row().classes('items-center gap-2'):
-                                        ui.label(s['name']).classes('text-sm font-bold truncate')
+                                        ui.label(s['name']).classes('text-sm font-bold truncate text-gray-700')
                                         
-                                # 真实区域展示 (帮助用户确认它原来属于哪里)
+                                # 真实区域展示
                                 try:
-                                    real_region = detect_country_group(s['name'], None) # 传入 None 强制不读 group 字段
+                                    real_region = detect_country_group(s['name'], None)
                                     ui.label(real_region).classes('text-xs font-mono text-gray-400')
                                 except: pass
+                            
+                            # ✨ 存入 UI 字典供搜索使用
+                            ui_rows[s['url']] = {
+                                'row': row,
+                                'chk': chk,
+                                'search_text': search_key
+                            }
 
-                def toggle_all(state):
-                    for url, chk in checkbox_refs.items():
-                        chk.value = state
-                        selection_map[url] = state
+                # ✨✨✨ 智能全选/清空函数 ✨✨✨
+                def toggle_visible(state):
+                    count = 0
+                    for item in ui_rows.values():
+                        # 只操作当前可见的行
+                        if item['row'].visible:
+                            item['chk'].value = state
+                            count += 1
+                    if state and count > 0:
+                        safe_notify(f"已选中当前显示的 {count} 个服务器", "positive")
 
-        # 3. 底部按钮栏
+        # 3. 底部按钮栏 (保持原有逻辑不变)
         with ui.row().classes('w-full p-4 border-t bg-gray-50 justify-between items-center flex-shrink-0'):
             
             # === 删除分组 ===
@@ -7506,17 +7545,11 @@ def open_combined_group_management(group_name):
                     with ui.row().classes('w-full justify-end mt-4 gap-2'):
                         ui.button('取消', on_click=confirm_d.close).props('flat dense')
                         async def do_del():
-                            # 1. 从列表删除
                             if 'custom_groups' in ADMIN_CONFIG and group_name in ADMIN_CONFIG['custom_groups']:
                                 ADMIN_CONFIG['custom_groups'].remove(group_name)
                             
-                            # 2. 清理服务器数据
                             for s in SERVERS_CACHE:
-                                # 移除 tag
-                                if 'tags' in s and group_name in s['tags']:
-                                    s['tags'].remove(group_name)
-                                
-                                # ✨✨✨ 关键修复：如果 group 字段等于该组名，重置为自动检测 ✨✨✨
+                                if 'tags' in s and group_name in s['tags']: s['tags'].remove(group_name)
                                 if s.get('group') == group_name:
                                     try: s['group'] = detect_country_group(s['name'], None)
                                     except: s['group'] = '默认分组'
@@ -7555,23 +7588,15 @@ def open_combined_group_management(group_name):
                     should_have_tag = selection_map.get(s['url'], False)
                     
                     if should_have_tag:
-                        # 添加新标签
                         if new_name not in s['tags']: s['tags'].append(new_name)
-                        # 移除旧标签 (如果改名了)
-                        if new_name != group_name and group_name in s['tags']:
-                            s['tags'].remove(group_name)
-                            
-                        # ✨✨✨ 自动修复：如果 group 被占用了，释放它 ✨✨✨
+                        if new_name != group_name and group_name in s['tags']: s['tags'].remove(group_name)
+                        
                         if s.get('group') == group_name or s.get('group') == new_name:
                              try: s['group'] = detect_country_group(s['name'], None)
                              except: s['group'] = '默认分组'
-
                     else:
-                        # 未选中，移除标签
                         if new_name in s['tags']: s['tags'].remove(new_name)
                         if group_name in s['tags']: s['tags'].remove(group_name)
-                        
-                        # 同时也修复 group 字段
                         if s.get('group') == group_name:
                              try: s['group'] = detect_country_group(s['name'], None)
                              except: s['group'] = '默认分组'
@@ -7579,9 +7604,8 @@ def open_combined_group_management(group_name):
                 await save_servers()
                 d.close()
                 render_sidebar_content.refresh()
-                # 尝试刷新内容区（如果当前正好在该分组视图）
                 await refresh_content('TAG', new_name)
-                safe_notify('分组设置已保存，区域显示已恢复', 'positive')
+                safe_notify('分组设置已保存', 'positive')
 
             ui.button('保存修改', icon='save', on_click=save_changes).classes('bg-slate-900 text-white shadow-lg')
 
