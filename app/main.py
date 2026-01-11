@@ -8970,14 +8970,29 @@ async def render_desktop_status_page():
         app.storage.user['is_dark'] = True
     dark_mode.value = app.storage.user.get('is_dark')
 
-    # 2. 资源注入
+    # 2. 资源注入 (保留前面的 script 和 link)
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
     ui.add_head_html('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">')
     
+    # ✨✨✨ [修复版] CSS 样式注入：集成了 Twemoji 字体 ✨✨✨
     ui.add_head_html('''
         <style>
-            body { margin: 0; font-family: "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; transition: background-color 0.3s ease; }
+            /* 1. 定义国旗字体 (修复 Windows 不显示国旗的问题) */
+            @font-face {
+                font-family: 'Twemoji Country Flags';
+                src: url('https://cdn.jsdelivr.net/npm/country-flag-emoji-polyfill@0.1/dist/TwemojiCountryFlags.woff2') format('woff2');
+                unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0062-E007F; /* 仅对国旗区域生效 */
+            }
+
+            /* 2. 全局字体设置：优先使用 Twemoji */
+            body { 
+                margin: 0; 
+                font-family: "Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Noto Sans SC", sans-serif; 
+                transition: background-color 0.3s ease; 
+            }
+
+            /* 3. 这里的其余样式保持原样 */
             body:not(.body--dark) { background: linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%); }
             body.body--dark { background-color: #0b1121; }
             .status-card { transition: all 0.3s ease; border-radius: 16px; }
@@ -9271,6 +9286,20 @@ async def render_desktop_status_page():
         var defaultZoom = 1.35; 
         var focusedZoom = 4.0; 
         var isZoomed = false; 
+        var myChart = null;
+
+        function tryIpLocation() {{
+            fetch('http://ip-api.com/json/?fields=lat,lon')
+                .then(response => response.json())
+                .then(data => {{
+                    if(data.lat && data.lon) {{
+                        console.log("Using IP Location:", data.lat, data.lon);
+                        defaultPt = [data.lon, data.lat];
+                        if(!isZoomed && myChart) renderMap();
+                    }}
+                }})
+                .catch(e => console.log("IP Location failed"));
+        }}
 
         function checkAndRender() {{
             var chartDom = document.getElementById('public-map-container');
@@ -9278,138 +9307,102 @@ async def render_desktop_status_page():
             
             fetch('/static/world.json').then(r => r.json()).then(w => {{
                 echarts.registerMap('world', w); 
-                var myChart = echarts.init(chartDom); 
+                myChart = echarts.init(chartDom); 
                 window.publicMapChart = myChart; 
                 
                 if (navigator.geolocation) {{ 
                     navigator.geolocation.getCurrentPosition(
-                        p => {{ defaultPt = [p.coords.longitude, p.coords.latitude]; if(!isZoomed) renderMap(); }},
-                        e => {{ if(!isZoomed) renderMap(); }}
+                        p => {{ 
+                            defaultPt = [p.coords.longitude, p.coords.latitude]; 
+                            if(!isZoomed) renderMap(); 
+                        }},
+                        e => {{ tryIpLocation(); }}
                     ); 
-                }} else {{ if(!isZoomed) renderMap(); }}
+                }} else {{ tryIpLocation(); }}
+                
+                renderMap();
                 
                 function renderMap(center, zoomLevel, roamState) {{
                     var viewCenter = center || defaultPt;
                     var viewZoom = zoomLevel || defaultZoom;
                     var viewRoam = roamState !== undefined ? roamState : false;
-                    
                     var mapLeft = isZoomed ? 'center' : '50%'; 
                     var mapTop = '1%';
 
                     var lines = mapData.cities.map(pt => ({{ coords: [pt.value, defaultPt] }}));
                     var isDark = document.body.classList.contains('body--dark');
-                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; var borderColor = isDark ? '#404a59' : '#a5b4fc'; var bgColor = 'transparent'; 
+                    var areaColor = isDark ? '#1B2631' : '#e0e7ff'; 
+                    var borderColor = isDark ? '#404a59' : '#a5b4fc'; 
                     
+                    var ttTextMain = isDark ? '#fff' : '#1e293b';
                     var ttBg = isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
-                    var ttTextMain = isDark ? '#fff' : '#1e293b';
-                    var ttTextSub = isDark ? '#94a3b8' : '#64748b';
-                    var ttSeparator = isDark ? 'rgba(255,255,255,0.1)' : '#e2e8f0';
-                    var ttItemText = isDark ? '#e2e8f0' : '#334155';
+
+                    // ✨✨✨ 关键修改：字体栈首选 Twemoji Country Flags ✨✨✨
+                    var emojiFont = '"Twemoji Country Flags", "Noto Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif';
 
                     var option = {{
-                        backgroundColor: bgColor,
+                        backgroundColor: 'transparent',
                         tooltip: {{
-                            show: true,
-                            trigger: 'item',
-                            enterable: true,
-                            backgroundColor: 'transparent',
-                            borderColor: 'transparent',
-                            borderWidth: 0,
-                            padding: 0,
-                            textStyle: {{ color: ttTextMain }},
-                            extraCssText: 'box-shadow: none;', 
-                            
+                            show: true, trigger: 'item', padding: 0, backgroundColor: 'transparent', borderColor: 'transparent',
                             formatter: function(params) {{
                                 var searchKey = params.name;
-                                if (params.componentType === 'series' && params.data && params.data.country_key) {{
-                                    searchKey = params.data.country_key;
-                                }}
-
+                                if (params.data && params.data.country_key) searchKey = params.data.country_key;
                                 var stats = window.regionStats[searchKey];
-                                if (!stats) return; 
-                                
-                                var serverListHtml = '';
-                                var displayLimit = 5;
-                                for (var i = 0; i < Math.min(stats.list.length, displayLimit); i++) {{
-                                    var srv = stats.list[i];
-                                    var statusColor = srv.status === 'online' ? '#22c55e' : '#ef4444'; 
-                                    var statusText = srv.status === 'online' ? '在线' : '离线';
-                                    serverListHtml += `
-                                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; font-size:13px; color:${{ttItemText}};">
-                                            <div style="display:flex; align-items:center; gap:8px;">
-                                                <span style="width:8px; height:8px; border-radius:50%; background-color:${{statusColor}};"></span>
-                                                <span style="max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${{srv.name}}</span>
-                                            </div>
-                                            <span style="color:${{statusColor}}; font-size:12px;">${{statusText}}</span>
-                                        </div>`;
-                                }}
-                                if (stats.list.length > displayLimit) {{
-                                    serverListHtml += `<div style="font-size:12px; color:${{ttTextSub}}; margin-top:4px;">+${{stats.list.length - displayLimit}} 更多...</div>`;
-                                }}
-
-                                return `
-                                    <div style="background-color: ${{ttBg}}; border: ${{ttBorder}}; border-radius: 12px; padding: 16px; min-width: 260px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); backdrop-filter: blur(8px);">
-                                        <div style="font-size: 18px; font-weight: 800; color: ${{ttTextMain}}; margin-bottom: 8px; display:flex; align-items:center; gap:8px;">
-                                            <span>${{stats.flag}}</span>
-                                            <span>${{stats.cn}}</span> 
-                                        </div>
-                                        <div style="font-size: 13px; color: ${{ttTextSub}}; margin-bottom: 12px; border-bottom: 1px solid ${{ttSeparator}}; padding-bottom: 8px;">
-                                            共 ${{stats.total}} 个服务器，<span style="color:#22c55e">${{stats.online}} 个在线</span>，<span style="color:#ef4444">${{stats.offline}} 个离线</span>
-                                        </div>
-                                        <div>${{serverListHtml}}</div>
-                                    </div>`;
+                                if (!stats) return;
+                                return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding:12px; border-radius:8px; color:${{ttTextMain}}; font-family: ${{emojiFont}};">
+                                    <strong>${{stats.flag}} ${{stats.cn}}</strong><br>
+                                    在线: ${{stats.online}} / 总计: ${{stats.total}}
+                                </div>`;
                             }}
                         }},
                         geo: {{
-                            map: 'world', left: mapLeft, top: mapTop, roam: viewRoam, zoom: viewZoom, center: viewCenter, aspectScale: 0.85, label: {{ show: false }},
+                            map: 'world', left: mapLeft, top: mapTop, roam: viewRoam, zoom: viewZoom, center: viewCenter,
+                            aspectScale: 0.85, label: {{ show: false }},
                             itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }},
-                            emphasis: {{ 
-                                label: {{ show: false }}, 
-                                itemStyle: {{ areaColor: isDark ? '#1e3a8a' : '#bfdbfe', borderWidth: 2, borderColor: '#60a5fa' }} 
-                            }},
-                            regions: mapData.regions.map(n => ({{ name: n, itemStyle: {{ areaColor: isDark ? '#1e40af' : '#93c5fd' }} }}))
+                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#1e3a8a' : '#bfdbfe' }} }}
                         }},
                         series: [
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff', shadowBlur: 10, shadowColor: '#00ffff' }}, data: mapData.cities }},
-                            {{ type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, label: {{ show: true, position: 'top', formatter: '{{b}}', color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5] }}, data: mapData.flags }},
-                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: defaultPt }}], tooltip: {{ show: false }} }}
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 3, rippleEffect: {{ brushType: 'stroke', scale: 2.5 }}, itemStyle: {{ color: '#00ffff' }}, data: mapData.cities }},
+                            
+                            // ✨✨✨ 在国旗 Label 中应用字体 ✨✨✨
+                            {{ 
+                                type: 'scatter', coordinateSystem: 'geo', zlevel: 6, symbolSize: 0, 
+                                label: {{ 
+                                    show: true, position: 'top', formatter: '{{b}}', 
+                                    color: isDark?'#fff':'#1e293b', fontSize: 16, offset: [0, -5],
+                                    fontFamily: emojiFont // <--- 这里应用了新字体
+                                }}, 
+                                data: mapData.flags 
+                            }},
+                            
+                            {{ type: 'effectScatter', coordinateSystem: 'geo', zlevel: 5, itemStyle: {{ color: '#f59e0b' }}, label: {{ show: true, position: 'bottom', formatter: 'My PC', color: '#f59e0b', fontWeight: 'bold' }}, data: [{{ value: defaultPt }}] }}
                         ]
                     }};
                     myChart.setOption(option, true);
                 }}
                 
                 window.updatePublicMap = function(newData) {{ 
-                    if (!newData) return;
-                    mapData = newData; 
+                    if (!newData) return; mapData = newData; 
                     renderMap(isZoomed ? myChart.getOption().geo[0].center : defaultPt, isZoomed ? myChart.getOption().geo[0].zoom : defaultZoom, isZoomed ? 'move' : false); 
-                }}; 
-
+                }};
+                
                 myChart.on('click', function(params) {{
                     var searchKey = params.name;
-                    if (params.componentType === 'series' && params.data && params.data.country_key) {{
-                        searchKey = params.data.country_key;
-                    }}
-
-                    var stats = window.regionStats[searchKey];
-                    if (stats) {{
-                        var targetCoord = window.countryCentroids[searchKey];
-                        if (!targetCoord) return;
-                        isZoomed = true; 
-                        renderMap(targetCoord, focusedZoom, 'move'); 
-                    }}
+                    if (params.data && params.data.country_key) searchKey = params.data.country_key;
+                    var targetCoord = window.countryCentroids[searchKey];
+                    if (targetCoord) {{ isZoomed = true; renderMap(targetCoord, focusedZoom, 'move'); }}
                 }});
-
-                myChart.getZr().on('mousewheel', function() {{ if (isZoomed) {{ isZoomed = false; renderMap(defaultPt, defaultZoom, false); }} }});
-                window.changeTheme = function(isDark) {{ renderMap(isZoomed ? undefined : defaultPt, isZoomed ? focusedZoom : defaultZoom, isZoomed ? 'move' : false); }}; 
+                
+                myChart.getZr().on('mousewheel', function() {{ if(isZoomed) {{ isZoomed = false; renderMap(defaultPt, defaultZoom, false); }} }});
+                window.changeTheme = function(isDark) {{ renderMap(undefined, undefined, undefined); }}; 
                 window.addEventListener('resize', () => myChart.resize());
             }});
         }}
         checkAndRender();
     }})();
     ''')
-
     async def loop_update():
         nonlocal local_ui_version
         try:
