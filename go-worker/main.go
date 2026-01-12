@@ -31,30 +31,27 @@ var (
 	rdb             *redis.Client
 	ctx             = context.Background()
 	lastApiCheckMap sync.Map
-	
-	// ✨✨✨ 安全阀配置 ✨✨✨
-	// 最大并发数：建议设置为 20-50。
-	// 20 是非常保守且安全的数字，意味着同一秒最多只会有 20 个对外 HTTP 连接。
-	maxConcurrentReqs = 20 
+
+	// ✨✨✨ 安全配置：最大并发数 20 ✨✨✨
+	maxConcurrentReqs = 20
 )
 
 func main() {
-	// 初始化随机种子
 	rand.Seed(time.Now().UnixNano())
 
 	redisHost := os.Getenv("REDIS_HOST")
 	if redisHost == "" {
 		redisHost = "127.0.0.1"
 	}
-	log.Printf("🚀 Go Pro 安全采集器启动 (并发限制: %d)", maxConcurrentReqs)
+	log.Printf("🚀 Go Pro 最终完美版启动 (并发: %d, 智能HTTPS)", maxConcurrentReqs)
 
 	rdb = redis.NewClient(&redis.Options{Addr: fmt.Sprintf("%s:6379", redisHost)})
 
-	// ✨✨✨ 创建信号量 (红绿灯) ✨✨✨
-	// 这是一个缓冲通道，容量就是最大并发数
+	// 信号量通道
 	sem := make(chan struct{}, maxConcurrentReqs)
 
 	for {
+		// 1. 读取配置
 		val, err := rdb.Get(ctx, "config:servers").Result()
 		if err != nil {
 			time.Sleep(3 * time.Second)
@@ -66,42 +63,41 @@ func main() {
 
 		var wg sync.WaitGroup
 
+		// 2. 并发处理
 		for _, s := range servers {
 			wg.Add(1)
-			
+
 			go func(srv Server) {
 				defer wg.Done()
 
-				// ✨✨✨ 随机抖动 (Jitter) ✨✨✨
-				// 在去抢信号量之前，先随机睡 0-2000 毫秒
-				// 这样能避免 20 个请求在同一微秒内同时发起，进一步模拟真人行为
+				// 随机抖动 (0-2秒)，错峰出行
 				time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
 
-				// ✨✨✨ 申请通行证 ✨✨✨
-				// 如果通道满了(已有20人在跑)，这里会阻塞等待，直到有人做完
+				// 申请信号量
 				sem <- struct{}{} 
 				
-				// 核心任务处理
+				// 干活
 				processServer(srv)
 				
-				// ✨✨✨ 归还通行证 ✨✨✨
+				// 释放信号量
 				<-sem 
 			}(s)
 		}
 		wg.Wait()
 
-		// 全部跑完一轮后，休息 2 秒
+		// ✨✨✨ 心跳日志：确认活着 ✨✨✨
+		log.Printf("✅ 本轮检测完成 (Redis Keys: %d, 休眠 2秒)", len(servers))
+
 		time.Sleep(2 * time.Second)
 	}
 }
 
 func processServer(s Server) {
-	// 1. TCP Ping (永远执行)
+	// 1. TCP Ping (智能版)
 	status, latency := doTcpPing(s.URL)
 
-	// 2. X-UI 数据采集 (每 60 秒一次)
+	// 2. API 采集 (每60秒)
 	var xuiStats map[string]interface{}
-	
 	lastCheck, loaded := lastApiCheckMap.Load(s.URL)
 	shouldFetch := false
 	if !loaded {
@@ -111,7 +107,6 @@ func processServer(s Server) {
 	}
 
 	if status == "online" && shouldFetch && !s.ProbeInstalled && s.User != "" {
-		// log.Printf("🔍 [API] 采集: %s", s.Name) // 关掉日志防止刷屏
 		stats, err := fetchXuiStats(s)
 		if err == nil {
 			xuiStats = stats
@@ -119,7 +114,7 @@ func processServer(s Server) {
 		}
 	}
 
-	// 3. 数据合并与存储
+	// 3. 写入 Redis
 	key := fmt.Sprintf("status:%s", s.URL)
 	data := map[string]interface{}{
 		"status":       status,
@@ -156,14 +151,25 @@ func processServer(s Server) {
 	rdb.Set(ctx, key, jsonBytes, 120*time.Second)
 }
 
-// --- 以下函数保持不变，复制过来即可 ---
+// ---------------- 核心功能函数 ----------------
+
+// 1. TCP Ping (已修复：支持 HTTPS 走 443)
 func doTcpPing(rawUrl string) (string, int64) {
+	// 默认端口逻辑
+	defaultPort := ":80"
+	if strings.HasPrefix(rawUrl, "https://") || strings.HasPrefix(rawUrl, "wss://") {
+		defaultPort = ":443"
+	}
+
 	target := strings.TrimPrefix(rawUrl, "http://")
 	target = strings.TrimPrefix(target, "https://")
-	if !strings.Contains(target, ":") { target += ":80" }
+	
+	if !strings.Contains(target, ":") { 
+		target += defaultPort 
+	}
 
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", target, 2*time.Second)
+	conn, err := net.DialTimeout("tcp", target, 3*time.Second)
 	if err != nil {
 		return "offline", 0
 	}
@@ -171,6 +177,7 @@ func doTcpPing(rawUrl string) (string, int64) {
 	return "online", time.Since(start).Milliseconds()
 }
 
+// 2. X-UI API 采集 (保持不变)
 func fetchXuiStats(s Server) (map[string]interface{}, error) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 10 * time.Second, Jar: jar}
