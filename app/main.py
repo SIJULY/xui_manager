@@ -3345,11 +3345,24 @@ async def group_sub_handler(group_b64: str, request: Request):
         
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
-# ================= 短链接接口：分组 =================
+# ================= 短链接接口：分组 (智能跟随版) =================
 @app.get('/get/group/{target}/{group_b64}')
-async def short_group_handler(target: str, group_b64: str):
+async def short_group_handler(target: str, group_b64: str, request: Request): # ✨ 1. 注入 request
     try:
-        internal_api = f"http://xui-manager:8080/sub/group/{group_b64}"
+        # ✨ 2. 智能获取当前访问的 协议://域名:端口
+        # 优先读取用户在"探针设置"里填写的地址，如果没有填，则自动识别当前浏览器地址
+        custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
+        
+        if custom_base:
+            base_url = custom_base
+        else:
+            # 自动识别：获取当前请求的 Host 头 (例如 example.com 或 1.2.3.4:8080)
+            host = request.headers.get('host')
+            scheme = request.url.scheme # http 或 https
+            base_url = f"{scheme}://{host}"
+
+        # 拼接出让 SubConverter 抓取的地址
+        internal_api = f"{base_url}/sub/group/{group_b64}"
 
         params = {
             "target": target,
@@ -3361,6 +3374,8 @@ async def short_group_handler(target: str, group_b64: str):
             "scv": "true"
         }
         
+        # 注意：如果 SubConverter 也是容器，且和面板不在一个网络，这里用 127.0.0.1 可能会失败
+        # 建议保持 subconverter:25500 (容器名) 或改为你的真实 IP:25500
         converter_api = "http://subconverter:25500/sub"
 
         def _fetch_sync():
@@ -3371,20 +3386,32 @@ async def short_group_handler(target: str, group_b64: str):
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            code = response.status_code if response else 'Timeout'
-            return Response(f"Backend Error: {code} (Check Docker Network)", status_code=502)
+            # 增加错误提示，方便排查
+            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
+            return Response(err_msg, status_code=502)
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-
-# ================= 短链接接口：单个订阅  =================
+    
+# ================= 短链接接口：单个订阅 (智能跟随版) =================
 @app.get('/get/sub/{target}/{token}')
-async def short_sub_handler(target: str, token: str):
+async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1. 注入 request
     try:
         sub_obj = next((s for s in SUBS_CACHE if s['token'] == token), None)
         if not sub_obj: return Response("Subscription Not Found", 404)
         
-        opt = sub_obj.get('options', {})
-        internal_api = f"http://xui-manager:8080/sub/{token}"
+        # ✨ 2. 智能获取当前访问的 协议://域名:端口
+        custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
         
+        if custom_base:
+            base_url = custom_base
+        else:
+            # 自动识别
+            host = request.headers.get('host')
+            scheme = request.url.scheme
+            base_url = f"{scheme}://{host}"
+            
+        internal_api = f"{base_url}/sub/{token}"
+        
+        opt = sub_obj.get('options', {})
         params = {
             "target": target,
             "url": internal_api,
@@ -3418,8 +3445,6 @@ async def short_sub_handler(target: str, token: str):
         ren_rep = opt.get('rename_replacement', '')
         
         if ren_pat:
-            # SubConverter 的 rename 参数格式: pattern@replacement
-            # 注意：SubConverter 默认支持正则，$1 需要写成 $1
             params['rename'] = f"{ren_pat}@{ren_rep}"
 
         converter_api = "http://subconverter:25500/sub"
@@ -3432,9 +3457,9 @@ async def short_sub_handler(target: str, token: str):
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            return Response(f"Backend Error: {response.status_code if response else 'Timeout'}", status_code=502)
+            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
+            return Response(err_msg, status_code=502)
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-
 
 
 # ================= 探针主动注册接口=================
@@ -5100,7 +5125,7 @@ async def render_probe_page():
                             ui.label(str(probe)).classes('font-bold text-xl text-purple-600')
                            
     
-# ================= 订阅管理视图 (极简模式：只显在线 - 已移除配置策略按钮) =================
+# ================= 订阅管理视图 (极简模式：只显在线) =================
 async def load_subs_view():
     # 标记当前视图
     global CURRENT_VIEW_STATE
@@ -5146,7 +5171,7 @@ async def load_subs_view():
                         ui.label(f"⚡ 在线节点: {valid_count}").classes(f'text-xs font-bold {color_cls}')
                     
                     with ui.row().classes('gap-2'):
-                        # ✨ 已移除配置策略按钮
+                        # ✨ 修改点：这里删除了 'tune' (配置处理策略) 按钮
                         ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue').tooltip('编辑订阅内容')
                         async def dl(i=idx): 
                             del SUBS_CACHE[i]
@@ -5170,193 +5195,7 @@ async def load_subs_view():
                         ui.button(icon='bolt', on_click=lambda u=surge_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
-                        
-# ================= 订阅策略编辑器  =================
-class SubscriptionProcessEditor:
-    def __init__(self, sub_data):
-        self.sub_data = sub_data
-        if 'options' not in self.sub_data:
-            self.sub_data['options'] = {
-                'emoji': True, 'udp': True, 'sort': False, 'tfo': False,
-                'skip_cert': True, 'include_regex': '', 'exclude_regex': '',
-                'rename_pattern': '', 'rename_replacement': '', 'regions': []
-            }
-        self.opt = self.sub_data['options']
-        
-        self.raw_nodes = []
-        self.preview_nodes = []
-        self.collect_raw_nodes()
-        self.update_preview()
 
-    def collect_raw_nodes(self):
-        self.raw_nodes = []
-        sub_nodes_set = set(self.sub_data.get('nodes', []))
-        for srv in SERVERS_CACHE:
-            nodes = NODES_DATA.get(srv['url'], [])
-            for n in nodes:
-                key = f"{srv['url']}|{n['id']}"
-                if key in sub_nodes_set:
-                    self.raw_nodes.append({'name': n['remark'], 'original_name': n['remark'], 'server_name': srv['name']})
-
-    def update_preview(self):
-        import re
-        result = []
-        selected_regions = set(self.opt.get('regions', []))
-        
-        for node in self.raw_nodes:
-            current_node = node.copy()
-            name = current_node['name']
-            
-            node_region = detect_country_group(name)
-            if selected_regions and node_region not in selected_regions: continue
-            
-            inc_reg = self.opt.get('include_regex', '').strip()
-            if inc_reg:
-                try: 
-                    if not re.search(inc_reg, name, re.IGNORECASE): continue
-                except: pass
-            
-            exc_reg = self.opt.get('exclude_regex', '').strip()
-            if exc_reg:
-                try:
-                    if re.search(exc_reg, name, re.IGNORECASE): continue
-                except: pass
-
-            ren_pat = self.opt.get('rename_pattern', '').strip()
-            ren_rep = self.opt.get('rename_replacement', '').strip()
-            if ren_pat:
-                try:
-                    py_rep = ren_rep.replace('$', '\\')
-                    name = re.sub(ren_pat, py_rep, name)
-                    current_node['name'] = name
-                except: pass
-
-            if self.opt.get('emoji', True):
-                flag = node_region.split(' ')[0] 
-                if flag and flag not in name: current_node['name'] = f"{flag} {name}"
-            
-            result.append(current_node)
-        
-        if self.opt.get('sort', False): result.sort(key=lambda x: x['name'])
-        self.preview_nodes = result
-        if hasattr(self, 'preview_container'): self.render_preview_ui()
-
-    def ui(self, dlg):
-        with ui.card().classes('w-full max-w-6xl h-[90vh] flex flex-col p-0 overflow-hidden bg-white'):
-            with ui.row().classes('w-full justify-between items-center p-4 bg-white border-b shadow-sm z-20'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.icon('tune', color='primary').classes('text-xl')
-                    ui.label(f"订阅策略: {self.sub_data.get('name', '未命名')}").classes('text-lg font-bold text-slate-800')
-                with ui.row().classes('gap-2'):
-                    ui.button('取消', on_click=dlg.close).props('flat color=grey')
-                    ui.button('保存配置', icon='save', on_click=lambda: [self.save(), dlg.close(), safe_notify('策略已更新', 'positive')]).classes('bg-slate-900 text-white shadow-lg')
-
-            with ui.row().classes('w-full flex-grow overflow-hidden gap-0'):
-                with ui.column().classes('w-[350px] flex-shrink-0 h-full border-r bg-gray-50 flex flex-col'):
-                    with ui.row().classes('w-full p-3 bg-white border-b justify-between items-center'):
-                        ui.label('效果预览').classes('text-xs font-bold text-gray-500')
-                        self.count_label = ui.badge(f'{len(self.preview_nodes)}', color='blue')
-                    with ui.scroll_area().classes('w-full flex-grow p-2'):
-                        self.preview_container = ui.column().classes('w-full gap-1')
-                        self.render_preview_ui()
-
-                with ui.column().classes('flex-grow h-full overflow-y-auto bg-white'):
-                    with ui.column().classes('w-full max-w-3xl mx-auto p-8 gap-6'):
-                        ui.label('基础处理').classes('text-sm font-bold text-gray-900')
-                        with ui.grid().classes('w-full grid-cols-1 sm:grid-cols-2 gap-4'):
-                            self._render_switch('自动添加国旗 (Emoji)', 'emoji', 'flag')
-                            self._render_switch('节点自动排序 (A-Z)', 'sort', 'sort_by_alpha')
-                            self._render_switch('强制开启 UDP 转发', 'udp', 'rocket_launch')
-                            self._render_switch('跳过证书验证', 'skip_cert', 'lock_open')
-                            self._render_switch('TCP Fast Open', 'tfo', 'speed')
-                        ui.separator()
-
-                        ui.label('正则重命名 (Rename)').classes('text-sm font-bold text-gray-900')
-                        with ui.card().classes('w-full p-4 border border-gray-200 shadow-none bg-blue-50'):
-                            with ui.row().classes('w-full items-center gap-2 mb-2'):
-                                ui.icon('edit_note').classes('text-blue-500')
-                                ui.label('支持正则匹配与替换 (可以使用 $1, $2 引用分组)').classes('text-xs text-blue-600')
-                            
-                            with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 gap-4'):
-                                with ui.input('匹配正则 (Pattern)', placeholder='例如: Oracle\|(.*)', value=self.opt.get('rename_pattern', '')) \
-                                    .props('outlined dense clearable bg-white').classes('w-full') as i_pat:
-                                    i_pat.on_value_change(lambda e: [self.opt.update({'rename_pattern': e.value}), self.update_preview()])
-                                
-                                with ui.input('替换为 (Replacement)', placeholder='例如: $1', value=self.opt.get('rename_replacement', '')) \
-                                    .props('outlined dense clearable bg-white').classes('w-full') as i_rep:
-                                    i_rep.on_value_change(lambda e: [self.opt.update({'rename_replacement': e.value}), self.update_preview()])
-                        ui.separator()
-
-                        ui.label('正则过滤').classes('text-sm font-bold text-gray-900')
-                        with ui.column().classes('w-full gap-3'):
-                            with ui.input('保留匹配 (Include)', placeholder='例如: 香港|SG', value=self.opt.get('include_regex', '')) \
-                                .props('outlined dense clearable').classes('w-full') as i1:
-                                i1.on_value_change(lambda e: [self.opt.update({'include_regex': e.value}), self.update_preview()])
-                            with ui.input('排除匹配 (Exclude)', placeholder='例如: 过期|剩余', value=self.opt.get('exclude_regex', '')) \
-                                .props('outlined dense clearable').classes('w-full') as i2:
-                                i2.on_value_change(lambda e: [self.opt.update({'exclude_regex': e.value}), self.update_preview()])
-                        ui.separator()
-
-                        with ui.row().classes('w-full justify-between items-end'):
-                            ui.label('区域过滤').classes('text-sm font-bold text-gray-900')
-                            with ui.row().classes('gap-1'):
-                                ui.button('全选', on_click=lambda: self.toggle_regions(True)).props('flat dense size=xs color=primary')
-                                ui.button('清空', on_click=lambda: self.toggle_regions(False)).props('flat dense size=xs color=grey')
-                        
-                        with ui.card().classes('w-full p-4 border border-gray-200 shadow-none bg-gray-50'):
-                            with ui.grid().classes('w-full grid-cols-2 md:grid-cols-3 gap-2'):
-                                all_regions = set()
-                                for node in self.raw_nodes: all_regions.add(detect_country_group(node['original_name']))
-                                self.region_checks = {}
-                                current_selected = set(self.opt.get('regions', []))
-                                for reg in sorted(list(all_regions)):
-                                    chk = ui.checkbox(reg, value=(reg in current_selected)).classes('text-xs')
-                                    chk.on_value_change(lambda e: [self.sync_regions_opt(), self.update_preview()])
-                                    self.region_checks[reg] = chk
-                        
-                        ui.element('div').classes('h-20')
-
-    def render_preview_ui(self):
-        self.preview_container.clear()
-        self.count_label.text = f'{len(self.preview_nodes)}'
-        with self.preview_container:
-            if not self.preview_nodes:
-                ui.label('无匹配节点').classes('text-xs text-center text-gray-400 mt-4')
-                return
-            for i, node in enumerate(self.preview_nodes):
-                if i > 100:
-                    ui.label(f'... 还有 {len(self.preview_nodes)-100} 个').classes('text-xs text-center text-gray-400')
-                    break
-                with ui.row().classes('w-full p-2 bg-white border border-gray-100 rounded items-center gap-2 hover:border-blue-300 transition'):
-                    ui.label(str(i+1)).classes('text-[10px] text-gray-300 w-4')
-                    ui.label(node['name']).classes('text-xs font-bold text-gray-700 truncate flex-grow')
-
-    def _render_switch(self, label, key, icon):
-        val = self.opt.get(key, False)
-        # ✨✨✨ 修复核心：正确捕获卡片对象并绑定点击事件 ✨✨✨
-        card = ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer')
-        with card:
-            with ui.row().classes('items-center gap-3'):
-                ui.icon(icon).classes('text-lg text-blue-500')
-                ui.label(label).classes('text-sm font-medium text-gray-700 select-none')
-            sw = ui.switch(value=val).props('dense color=primary')
-            sw.on_value_change(lambda e: [self.opt.update({key: e.value}), self.update_preview()])
-            
-        # 点击卡片反转开关
-        card.on('click', lambda: sw.set_value(not sw.value))
-
-    def sync_regions_opt(self):
-        self.opt['regions'] = [r for r, chk in self.region_checks.items() if chk.value]
-
-    def toggle_regions(self, state):
-        for chk in self.region_checks.values(): chk.value = state
-        self.sync_regions_opt(); self.update_preview()
-
-    def save(self): asyncio.create_task(save_subs())
-
-# 打开策略编辑器的入口函数
-def open_process_editor(sub_data):
-    with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
 
 # ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁 + 列表同步) =================
 async def save_server_config(server_data, is_add=True, idx=None):
