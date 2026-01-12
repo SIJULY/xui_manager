@@ -4293,11 +4293,14 @@ def open_quick_group_create_dialog(callback=None):
                         with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition cursor-pointer') as row:
                             chk = ui.checkbox(value=False).props('dense')
                             
-                            # 绑定勾选事件
+                            # ✨ [新增] 阻止复选框自身的点击事件冒泡给 row，防止双重触发
+                            chk.on('click.stop', lambda: None)
+
+                            # 绑定勾选事件 (保持数据同步)
                             chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                             
-                            # 点击行也能勾选
-                            ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
+                            # ✨ [修改] 点击整行也能勾选 (已修复 .c 错误，并将监听绑定在 row 上)
+                            row.on('click', lambda: chk.set_value(not chk.value))
 
                             # 显示名称
                             ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
