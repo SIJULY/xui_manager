@@ -4519,27 +4519,26 @@ def open_group_sort_dialog():
     d.open()
 import traceback # 引入用于打印报错堆栈
 
-# ================= 探针自定义分组一体化管理器 (优化版：带分页，支持 1000+ 服务器) =================
+# ================= 探针自定义分组一体化管理器 (修复版：全选/新建逻辑重构) =================
 def open_unified_group_manager(mode='manage'):
-    # 1. 数据准备与状态初始化
+    # 1. 数据准备
     if 'probe_custom_groups' not in ADMIN_CONFIG: 
         ADMIN_CONFIG['probe_custom_groups'] = []
     
     # 状态字典
     state = {
         'current_group': None,
-        'checkboxes': {},
-        'server_map': {s['url']: s for s in SERVERS_CACHE},
-        'page': 1,           # 当前页码
-        'search_text': ''    # 搜索关键词
+        'selected_urls': set(), # ✨ 核心：使用一个集合统一管理当前选中的服务器URL
+        'checkboxes': {},       # 存储当前页 checkbox 引用
+        'page': 1,
+        'search_text': ''
     }
 
     # UI 引用
     view_list_container = None
     server_list_container = None
     title_input = None
-    action_area = None
-    pagination_ref = None # 分页器引用
+    pagination_ref = None 
 
     # ================= 界面构建 =================
     with ui.dialog() as d, ui.card().classes('w-full max-w-5xl h-[90vh] flex flex-col p-0 gap-0'):
@@ -4553,7 +4552,7 @@ def open_unified_group_manager(mode='manage'):
             ui.space()
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
 
-        # --- 2. 编辑区头部 (名称 + 搜索 + 全选) ---
+        # --- 2. 编辑区头部 ---
         with ui.row().classes('w-full p-4 bg-white border-b items-center gap-4 flex-shrink-0 wrap'):
             title_input = ui.input('视图名称', placeholder='请输入分组名称...').props('outlined dense').classes('min-w-[200px] flex-grow font-bold')
             
@@ -4564,16 +4563,16 @@ def open_unified_group_manager(mode='manage'):
                 ui.button('全选本页', on_click=lambda: toggle_page_all(True)).props('flat dense size=sm color=blue')
                 ui.button('清空本页', on_click=lambda: toggle_page_all(False)).props('flat dense size=sm color=grey')
 
-        # --- 3. 服务器列表 (核心内容) ---
+        # --- 3. 服务器列表 ---
         with ui.scroll_area().classes('w-full flex-grow p-4 bg-gray-50'):
             server_list_container = ui.column().classes('w-full gap-2')
             
-        # --- 3.5 分页控件栏 ---
+        # --- 3.5 分页 ---
         with ui.row().classes('w-full p-2 justify-center bg-gray-50 border-t border-gray-200'):
-            pagination_ref = ui.row() # 占位符
+            pagination_ref = ui.row() 
 
-        # --- 4. 底部保存区 ---
-        with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0') as action_area:
+        # --- 4. 底部保存 ---
+        with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0'):
             ui.button('删除此视图', icon='delete', color='red', on_click=lambda: delete_current_group()).props('flat')
             ui.button('保存当前配置', icon='save', on_click=lambda: save_current_group()).classes('bg-slate-900 text-white shadow-lg')
 
@@ -4581,7 +4580,7 @@ def open_unified_group_manager(mode='manage'):
 
     def update_search(val):
         state['search_text'] = str(val).lower().strip()
-        state['page'] = 1 # 搜索时重置回第一页
+        state['page'] = 1 
         render_servers()
 
     def render_views():
@@ -4593,17 +4592,33 @@ def open_unified_group_manager(mode='manage'):
                 btn_props = 'unelevated color=blue' if is_active else 'outline color=grey text-color=grey-8'
                 ui.button(g, on_click=lambda _, name=g: load_group_data(name)).props(f'{btn_props} size=sm')
 
+    def load_group_data(group_name):
+        state['current_group'] = group_name
+        state['page'] = 1
+        state['selected_urls'] = set() # 清空选中状态
+        
+        # 如果是编辑模式，预加载已有的服务器到集合中
+        if group_name:
+            for s in SERVERS_CACHE:
+                # 兼容 tags 和 old group 字段
+                if (group_name in s.get('tags', [])) or (s.get('group') == group_name):
+                    state['selected_urls'].add(s['url'])
+                    
+        render_views()
+        title_input.value = group_name if group_name else ''
+        if not group_name: title_input.run_method('focus')
+        render_servers()
+
     def render_servers():
         server_list_container.clear()
         pagination_ref.clear()
-        state['checkboxes'] = {} # 重置当前页的 checkbox 引用
+        state['checkboxes'] = {} 
         
         if not SERVERS_CACHE:
-            with server_list_container:
-                ui.label('⚠️ 暂无服务器数据').classes('w-full text-center text-red-500 mt-10')
+            with server_list_container: ui.label('暂无服务器').classes('text-center text-gray-400 mt-10 w-full')
             return
 
-        # 1. 过滤与排序
+        # 1. 过滤
         all_srv = SERVERS_CACHE
         if state['search_text']:
             all_srv = [s for s in all_srv if state['search_text'] in s.get('name', '').lower() or state['search_text'] in s.get('url', '').lower()]
@@ -4611,19 +4626,19 @@ def open_unified_group_manager(mode='manage'):
         try: sorted_servers = sorted(all_srv, key=lambda x: str(x.get('name', '')))
         except: sorted_servers = all_srv
 
-        # 2. 分页计算
-        PAGE_SIZE = 48 # 每页 48 个 (3列 x 16行)
+        # 2. 分页
+        PAGE_SIZE = 48 
         total_items = len(sorted_servers)
         total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
         if state['page'] > total_pages: state['page'] = 1
+        if state['page'] < 1: state['page'] = 1
         
         start_idx = (state['page'] - 1) * PAGE_SIZE
         end_idx = start_idx + PAGE_SIZE
         current_page_items = sorted_servers[start_idx:end_idx]
 
-        # 3. 渲染列表
+        # 3. 渲染
         with server_list_container:
-            # 顶部显示数量
             ui.label(f"共 {total_items} 台 (第 {state['page']}/{total_pages} 页)").classes('text-xs text-gray-400 mb-2')
 
             with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2'):
@@ -4631,131 +4646,95 @@ def open_unified_group_manager(mode='manage'):
                     url = s.get('url')
                     if not url: continue
                     
-                    # 检查是否已在 tags 中
-                    tags = s.get('tags', [])
-                    is_checked = (state['current_group'] in tags) if state['current_group'] else False
+                    # ✨ 核心：状态只看 state['selected_urls'] 集合
+                    is_checked = url in state['selected_urls']
                     
-                    # 渲染卡片
                     bg_cls = 'bg-blue-50 border-blue-300' if is_checked else 'bg-white border-gray-200'
                     
                     with ui.row().classes(f'items-center p-2 border rounded cursor-pointer hover:border-blue-400 transition {bg_cls}') as row:
                         chk = ui.checkbox(value=is_checked).props('dense')
                         state['checkboxes'][url] = chk
                         
-                        # 绑定点击行切换
-                        def toggle_row(c=chk, r=row, s_in=s): 
+                        # 单行点击逻辑
+                        def toggle_row(c=chk, r=row, u=url): 
                             c.value = not c.value
-                            update_row_style(r, c.value)
-                            # 实时更新内存中的 tag (不再等保存按钮) -> 这样翻页不会丢失选中状态
-                            if state['current_group']:
-                                if c.value: 
-                                    if state['current_group'] not in s_in.get('tags', []):
-                                        if 'tags' not in s_in: s_in['tags'] = []
-                                        s_in['tags'].append(state['current_group'])
-                                else:
-                                    if state['current_group'] in s_in.get('tags', []):
-                                        s_in['tags'].remove(state['current_group'])
+                            update_selection(u, c.value)
+                            # 样式手动更新，避免重绘整个列表
+                            if c.value: r.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200')
+                            else: r.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')
 
                         row.on('click', toggle_row)
-                        chk.on('click.stop', lambda _, c=chk, r=row, s_in=s: [update_row_style(r, c.value), toggle_tag_memory(s_in, c.value)]) # 阻止冒泡单独处理
+                        chk.on('click.stop', lambda _, c=chk, r=row, u=url: [update_selection(u, c.value), 
+                            r.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200') if c.value else r.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')])
 
-                        # 内容
                         with ui.column().classes('gap-0 ml-2 overflow-hidden'):
                             ui.label(s.get('name', 'Unknown')).classes('text-sm font-bold truncate text-gray-700')
-                            ui.label(f"Tags: {len(tags)}").classes('text-[10px] text-gray-400')
+                            # 仅提示当前状态，不做逻辑判断
+                            if is_checked: ui.label('已选中').classes('text-[10px] text-blue-500 font-bold')
+                            else: ui.label(s.get('group','')).classes('text-[10px] text-gray-300')
 
-        # 4. 渲染底部分页器
+        # 4. 分页器
         if total_pages > 1:
             with pagination_ref:
                 p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue')
                 p.value = state['page']
-                p.on('update:model-value', lambda e: change_page(e.args))
+                p.on('update:model-value', lambda e: [state.update({'page': e.args}), render_servers()])
 
-    def update_row_style(row_el, checked):
-        if checked: row_el.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200')
-        else: row_el.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')
+    def update_selection(url, checked):
+        if checked: state['selected_urls'].add(url)
+        else: state['selected_urls'].discard(url)
 
-    def toggle_tag_memory(s_in, checked):
-        # 针对 Checkbox 直接点击的逻辑
-        if not state['current_group']: return
-        if checked:
-            if 'tags' not in s_in: s_in['tags'] = []
-            if state['current_group'] not in s_in['tags']: s_in['tags'].append(state['current_group'])
-        else:
-            if state['current_group'] in s_in.get('tags', []): s_in['tags'].remove(state['current_group'])
-
-    def change_page(new_page):
-        state['page'] = new_page
-        render_servers()
-
-    def load_group_data(group_name):
-        state['current_group'] = group_name
-        state['page'] = 1 # 切换分组重置页码
-        render_views()
-        title_input.value = group_name if group_name else ''
-        if not group_name: title_input.run_method('focus')
-        action_area.visible = True
-        render_servers()
-
+    # ✨ 修复后的全选逻辑：遍历当前页 checkbox，更新集合 + 刷新 UI
     def toggle_page_all(val):
-        # 只操作当前页的 checkbox
-        for url, chk in state['checkboxes'].items():
-            if chk.value != val:
-                chk.value = val
-                # 手动触发数据更新
-                s = state['server_map'].get(url)
-                if s: toggle_tag_memory(s, val)
-                # 样式更新无法直接获取 row 元素，这里利用重新渲染更新样式
-        render_servers()
+        for url in state['checkboxes'].keys():
+            if val: state['selected_urls'].add(url)
+            else: state['selected_urls'].discard(url)
+        render_servers() # 重新渲染以更新 checkbox 状态和样式
 
     async def save_current_group():
-        # 因为我们在 toggle 时已经实时修改了内存中的 tags，这里主要负责保存到文件和处理改名
         old_name = state['current_group']
         new_name = title_input.value.strip()
         if not new_name: return safe_notify("名称不能为空", "warning")
 
         groups = ADMIN_CONFIG.get('probe_custom_groups', [])
         
-        # 处理改名
-        if new_name != old_name:
+        # 1. 维护分组名列表
+        if not old_name: # 新建
             if new_name in groups: return safe_notify("名称已存在", "negative")
-            if old_name: 
-                groups[groups.index(old_name)] = new_name
-                # 更新所有服务器的旧 tag 为新 tag
-                for s in SERVERS_CACHE:
-                    if 'tags' in s and old_name in s['tags']:
-                        s['tags'].remove(old_name)
-                        s['tags'].append(new_name)
-            else: 
-                groups.append(new_name)
+            groups.append(new_name)
+        elif new_name != old_name: # 改名
+            if new_name in groups: return safe_notify("名称已存在", "negative")
+            idx = groups.index(old_name)
+            groups[idx] = new_name
             
-            # 更新状态
-            state['current_group'] = new_name
+            # 顺便把所有机器上的旧 tag 换成新 tag
+            for s in SERVERS_CACHE:
+                if 'tags' in s and old_name in s['tags']:
+                    s['tags'].remove(old_name)
+                    s['tags'].append(new_name)
 
-        # 对于“新建模式”，我们刚才在 toggle 时因为没有 current_group 可能没存进去
-        # 所以如果是新建，且刚才改了名，需要重新遍历一遍 checkboxes (针对当前页)
-        # 但由于我们实时逻辑依赖 current_group，新建时建议先保存名字，再选服务器，或者简单处理：
-        # 这里的实时逻辑在新建模式下(old_name is None)可能不会生效，因为 toggle_tag_memory 会 return。
-        # 修正：新建模式下，用户输入名字前选的勾选，需要在保存时批量打标。
-        
-        # 为简化逻辑，我们采取：新建时，输入名字后，点保存创建组。然后才能选服务器。
-        # 或者：遍历 checkboxes，把当前页选中的打上 new_name
-        for url, chk in state['checkboxes'].items():
-            if chk.value:
-                s = state['server_map'].get(url)
-                if s:
-                    if 'tags' not in s: s['tags'] = []
-                    if new_name not in s['tags']: s['tags'].append(new_name)
+        # 2. 应用选中状态到 tags
+        # 遍历所有服务器，如果在 selected_urls 里 -> 加 tag，不在 -> 删 tag
+        for s in SERVERS_CACHE:
+            if 'tags' not in s: s['tags'] = []
+            
+            if s['url'] in state['selected_urls']:
+                if new_name not in s['tags']: s['tags'].append(new_name)
+            else:
+                # 只有当这是编辑现有分组，或者改名后的分组时，才需要移除
+                # 如果是新建分组，原本就没有这个 tag，这里 remove 会抛错吗？不会，list.remove 需要 try
+                if new_name in s['tags']: s['tags'].remove(new_name)
+                # 如果改名了，旧名字上面已经处理过了
 
         ADMIN_CONFIG['probe_custom_groups'] = groups
         await save_admin_config()
         await save_servers()
         
         safe_notify(f"✅ 保存成功", "positive")
-        load_group_data(new_name) # 刷新视图
+        load_group_data(new_name)
         
-        # 刷新主页面（如果正在显示该分组）
-        try: render_probe_page()
+        # ✨ 修复报错：加上 await
+        try: await render_probe_page()
         except: pass
 
     async def delete_current_group():
@@ -4772,7 +4751,9 @@ def open_unified_group_manager(mode='manage'):
         
         safe_notify("🗑️ 已删除", "positive")
         load_group_data(None)
-        try: render_probe_page()
+        
+        # ✨ 修复报错：加上 await
+        try: await render_probe_page()
         except: pass
 
     # --- 初始化 ---
@@ -4782,7 +4763,6 @@ def open_unified_group_manager(mode='manage'):
     
     ui.timer(0.1, init, once=True)
     d.open()
-
 # ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
 def open_server_detail_dialog(server_conf):
     """
@@ -6022,9 +6002,9 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
 
     global CURRENT_VIEW_STATE
     
-    # 防抖判断
+    # 防抖判断 -> 修改为：如果是重复点击，自动转为“强制刷新”模式
     if not force_refresh and CURRENT_VIEW_STATE.get('scope') == scope and CURRENT_VIEW_STATE.get('data') == data:
-        return 
+        force_refresh = True # <--- 关键修改：不再 return，而是标记为强制刷新
 
     import time
     current_token = time.time()
@@ -6119,7 +6099,12 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
             try:
                 render_sidebar_content.refresh()
             except: 
-                pass # 防止极端情况下 UI 上下文丢失
+                pass 
+            
+            # 👇👇👇 [新增] 如果是强制刷新，且当前不是单机详情页，则静默重绘主列表 👇👇👇
+            if force_refresh and scope != 'SINGLE':
+                await _render_ui()
+            # 👆👆👆 [新增结束]
             
             if scope != 'SINGLE': safe_notify("数据已同步", "positive")
         
