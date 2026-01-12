@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-Fusion Panel 一键安装/管理脚本 (智能双模版)
+# X-Fusion Panel 一键安装/管理脚本 (Python + Go 混合架构版)
 # GitHub: https://github.com/SIJULY/x-fusion-panel
 # ==============================================================================
 
@@ -10,7 +10,7 @@ PROJECT_NAME="x-fusion-panel"
 INSTALL_DIR="/root/${PROJECT_NAME}"
 OLD_INSTALL_DIR="/root/xui_manager" 
 
-# 仓库地址 (保持您原本的设置)
+# 仓库地址
 REPO_URL="https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main"
 
 # Caddy 配置标记
@@ -110,13 +110,38 @@ deploy_base() {
     mkdir -p ${INSTALL_DIR}/app
     mkdir -p ${INSTALL_DIR}/data
     mkdir -p ${INSTALL_DIR}/static
+    # ✨ 新增：创建 Go Worker 目录
+    mkdir -p ${INSTALL_DIR}/go-worker
+    mkdir -p ${INSTALL_DIR}/redis_data
     
     cd ${INSTALL_DIR}
 
-    print_info "正在拉取最新代码 (X-Fusion)..."
+    print_info "正在拉取最新代码 (X-Fusion Hybrid)..."
     curl -sS -O ${REPO_URL}/Dockerfile
     curl -sS -O ${REPO_URL}/requirements.txt
     curl -sS -o app/main.py ${REPO_URL}/app/main.py
+
+    # ✨ 新增：拉取 Go 代码 (请确保 GitHub 上有这个文件)
+    print_info "正在拉取 Go Worker 代码..."
+    curl -sS -o go-worker/main.go ${REPO_URL}/go-worker/main.go
+
+    # ✨ 新增：自动写入 Go Worker 的 Dockerfile (无需从 GitHub 拉取，直接生成)
+    cat > go-worker/Dockerfile << EOF
+FROM golang:alpine AS builder
+WORKDIR /app
+# 初始化模块并安装依赖
+RUN go mod init x-fusion-worker || true
+RUN go get github.com/redis/go-redis/v9
+# 复制源码
+COPY . .
+# 编译
+RUN go build -o worker main.go
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=builder /app/worker .
+CMD ["./worker"]
+EOF
 
     # 静态资源
     print_info "正在更新资源文件..."
@@ -127,26 +152,28 @@ deploy_base() {
     curl -sS -o static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
 
     if [ ! -f "app/main.py" ]; then
-        print_error "主程序下载失败！请检查 GitHub 仓库地址是否正确。"
+        print_error "Python 主程序下载失败！"
+    fi
+    if [ ! -f "go-worker/main.go" ]; then
+        print_error "Go Worker 主程序下载失败！请检查 GitHub 仓库是否已包含 go-worker/main.go"
     fi
 
-    # 初始化空文件 (防止挂载报错)
+    # 初始化空文件
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
     if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
     if [ ! -f "Caddyfile" ]; then touch Caddyfile; fi
 }
 
-# --- ✨ 核心修改：动态生成 Docker Compose ---
+# --- ✨ 核心修改：生成包含 Go 和 Redis 的 Compose ---
 generate_compose() {
     local BIND_IP=$1
     local PORT=$2
     local USER=$3
     local PASS=$4
     local SECRET=$5 
-    local ENABLE_CADDY=$6  # 新增参数：是否启用 Caddy
+    local ENABLE_CADDY=$6 
 
-    # 1. 生成基础服务配置 (Panel + Subconverter)
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
 services:
@@ -157,29 +184,50 @@ services:
     ports:
       - "${BIND_IP}:${PORT}:8080"
     volumes:
-      # ✨ 修复：使用文件夹映射，彻底解决数据丢失问题
       - ./data:/app/data
       - ./app/main.py:/app/main.py
       - ./static:/app/static
+    depends_on:
+      - redis
     environment:
       - TZ=Asia/Shanghai
       - XUI_USERNAME=${USER}
       - XUI_PASSWORD=${PASS}
       - XUI_SECRET_KEY=${SECRET}
+      - REDIS_HOST=redis
+
+  # ✨✨✨ 新增：Go 采集器 ✨✨✨
+  go-worker:
+    build: ./go-worker
+    container_name: x-fusion-worker
+    restart: always
+    depends_on:
+      - redis
+    environment:
+      - TZ=Asia/Shanghai
+      - REDIS_HOST=redis
+
+  # ✨✨✨ 新增：Redis 数据库 ✨✨✨
+  redis:
+    image: redis:alpine
+    container_name: x-fusion-redis
+    restart: always
+    volumes:
+      - ./redis_data:/data
+    environment:
+      - TZ=Asia/Shanghai
 
   subconverter:
     image: tindy2013/subconverter:latest
     container_name: subconverter
     restart: always
-    # ✨ 修复：显式暴露到宿主机的 127.0.0.1
-    # 这样无论是 Docker 内部的 Caddy 还是宿主机的 Nginx 都能访问它
     ports:
       - "127.0.0.1:25500:25500"
     environment:
       - TZ=Asia/Shanghai
 EOF
 
-    # 2. 如果启用 Caddy，追加 Caddy 服务块
+    # 追加 Caddy 配置
     if [ "$ENABLE_CADDY" == "true" ]; then
         cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
 
@@ -208,7 +256,6 @@ configure_caddy_docker() {
     sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$DOCKER_CADDY_FILE"
     if [ -s "$DOCKER_CADDY_FILE" ] && [ "$(tail -c 1 "$DOCKER_CADDY_FILE")" != "" ]; then echo "" >> "$DOCKER_CADDY_FILE"; fi
 
-    # 使用容器名通信
     cat >> "$DOCKER_CADDY_FILE" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
@@ -271,7 +318,6 @@ install_panel() {
     elif [ "$net_choice" == "3" ]; then
         read -p "请输入内部运行端口 [8081]: " port
         port=${port:-8081}
-        # 共存模式：生成不带 Caddy 的 compose
         generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "false"
         
         print_info "正在启动容器..."
@@ -287,12 +333,9 @@ install_panel() {
     else
         read -p "请输入您的域名: " domain
         if [ -z "$domain" ]; then print_error "域名不能为空"; fi
-        port=8081 # 域名模式内部端口固定即可
+        port=8081 
         
-        # 写入 Caddy 配置文件 (在启动前写入，防止 Caddy 启动报错)
         configure_caddy_docker "$domain"
-        
-        # 全新模式：生成带 Caddy 的 compose
         generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "true"
         
         print_info "正在启动容器..."
@@ -310,7 +353,6 @@ update_panel() {
 
     if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录，请先执行安装。"; fi
     
-    # 备份当前配置
     cd ${INSTALL_DIR}
     if [ -f "docker-compose.yml" ]; then
         cp docker-compose.yml docker-compose.yml.bak
@@ -319,7 +361,7 @@ update_panel() {
     if [ ! -f "docker-compose.yml.bak" ]; then print_error "配置文件丢失，无法更新。"; fi
 
     echo -e "${BLUE}=================================================${PLAIN}"
-    print_info "正在执行智能更新 (保留原有网络模式)..."
+    print_info "正在执行智能更新 (升级到混合架构)..."
 
     CONFIG_FILE="docker-compose.yml.bak"
 
@@ -333,14 +375,12 @@ update_panel() {
     if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
         BIND_IP="127.0.0.1"
         OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*127.0.0.1:([0-9]+):8080.*/\1/' | tr -d ' "-')
-        # 如果包含 Caddy 服务，则是全自动模式；否则是共存模式
         if grep -q "container_name: caddy" $CONFIG_FILE; then
             ENABLE_CADDY="true"
         else
             ENABLE_CADDY="false"
         fi
     else
-        # IP 模式
         BIND_IP="0.0.0.0"
         OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*:([0-9]+):8080.*/\1/' | tr -d ' "-')
         if [[ $OLD_PORT == *"0.0.0.0"* ]]; then OLD_PORT=$(echo "$OLD_PORT" | cut -d: -f2); fi
@@ -349,26 +389,26 @@ update_panel() {
 
     # 3. 停止并清理
     docker compose down
+    # 清理旧版可能存在的残留容器
     if docker ps -a | grep -q "xui_manager"; then docker rm -f xui_manager 2>/dev/null; fi
 
-    # 4. 更新代码
+    # 4. 更新代码 (下载 Python + Go)
     deploy_base
 
-    # 5. 重新生成配置 (使用提取出的参数)
+    # 5. 重新生成配置 (增加 Redis 和 Go Worker)
     generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY"
 
-    # 如果是全自动模式，恢复 Caddy 配置
     if [ "$ENABLE_CADDY" == "true" ] && [ -f "Caddyfile" ]; then
-         EXISTING_DOMAIN=$(grep " {" Caddyfile | head -n 1 | awk '{print $1}')
-         if [ -n "$EXISTING_DOMAIN" ]; then
-             configure_caddy_docker "${EXISTING_DOMAIN}"
-         fi
+          EXISTING_DOMAIN=$(grep " {" Caddyfile | head -n 1 | awk '{print $1}')
+          if [ -n "$EXISTING_DOMAIN" ]; then
+              configure_caddy_docker "${EXISTING_DOMAIN}"
+          fi
     fi
 
     # 6. 启动
-    print_info "启动新容器..."
+    print_info "启动新容器 (Python + Go Worker + Redis)..."
     docker compose up -d --build
-    print_success "更新完成！"
+    print_success "更新完成！架构已升级。"
 }
 
 uninstall_panel() {
@@ -387,7 +427,7 @@ uninstall_panel() {
 # --- 主菜单 ---
 check_root
 clear
-echo -e "${GREEN} X-Fusion Panel 一键管理脚本 ${PLAIN}"
+echo -e "${GREEN} X-Fusion Panel 一键管理脚本 (混合架构版) ${PLAIN}"
 echo -e "  1. 安装面板"
 echo -e "  2. 更新面板"
 echo -e "  3. 卸载面板"
