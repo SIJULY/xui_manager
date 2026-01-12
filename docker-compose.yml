@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 1. 主面板服务
+  # 1. 主面板服务 (Python)
   x-fusion-panel:
     build: .
     container_name: x-fusion-panel
@@ -12,15 +12,40 @@ services:
     volumes:
       - ./data:/app/data
       - ./app/main.py:/app/main.py
-      # ✨ 关键：挂载静态资源目录 (包含 world.json 和 x-install.sh)
+      # ✨ 关键：挂载静态资源目录
       - ./static:/app/static
+    depends_on:
+      - redis  # ✨ 关键：等待 Redis 先启动
     environment:
       - TZ=Asia/Shanghai
       - XUI_USERNAME=${XUI_USERNAME:-admin}
       - XUI_PASSWORD=${XUI_PASSWORD:-admin}
       - XUI_SECRET_KEY=${XUI_SECRET_KEY:-sijuly_secret_key}
+      - REDIS_HOST=redis # ✨ 关键：告诉 Python 连接哪个 Redis
 
-  # 2. 订阅转换服务
+  # 2. Go 采集器服务 (✨新增✨)
+  go-worker:
+    build: ./go-worker
+    container_name: x-fusion-worker
+    restart: always
+    depends_on:
+      - redis # ✨ 关键：等待 Redis 先启动
+    environment:
+      - TZ=Asia/Shanghai
+      - REDIS_HOST=redis
+
+  # 3. Redis 数据库 (✨新增✨)
+  redis:
+    image: redis:alpine
+    container_name: x-fusion-redis
+    restart: always
+    volumes:
+      # ✨ 关键：数据持久化，防止重启 Docker 后 "失忆"
+      - ./redis_data:/data
+    environment:
+      - TZ=Asia/Shanghai
+
+  # 4. 订阅转换服务
   subconverter:
     image: tindy2013/subconverter:latest
     container_name: subconverter
@@ -31,7 +56,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
 
-  # 3. 反向代理服务
+  # 5. 反向代理服务
   caddy:
     image: caddy:latest
     container_name: caddy
