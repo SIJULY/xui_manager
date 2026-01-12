@@ -5097,7 +5097,7 @@ async def render_probe_page():
                             ui.label(str(probe)).classes('font-bold text-xl text-purple-600')
                            
     
-# ================= 订阅管理视图 (极简模式：只显在线) =================
+# ================= 订阅管理视图 (极简模式：只显在线 - 已移除配置策略按钮) =================
 async def load_subs_view():
     # 标记当前视图
     global CURRENT_VIEW_STATE
@@ -5143,7 +5143,7 @@ async def load_subs_view():
                         ui.label(f"⚡ 在线节点: {valid_count}").classes(f'text-xs font-bold {color_cls}')
                     
                     with ui.row().classes('gap-2'):
-                        ui.button(icon='tune', on_click=lambda s=sub: open_process_editor(s)).props('flat dense color=purple').tooltip('配置处理策略')
+                        # ✨ 已移除配置策略按钮
                         ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue').tooltip('编辑订阅内容')
                         async def dl(i=idx): 
                             del SUBS_CACHE[i]
@@ -5355,7 +5355,7 @@ class SubscriptionProcessEditor:
 def open_process_editor(sub_data):
     with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
 
-# ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁) =================
+# ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁 + 列表同步) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     # 1. 基础校验
     if not server_data.get('name') or not server_data.get('url'):
@@ -5392,7 +5392,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
     # ================= ✨✨✨ UI 零闪烁操作区 ✨✨✨ =================
     # 获取新分组名称
     new_group = server_data.get('group', '默认分组')
-    # 计算新分组对应的区域（如果是默认分组，可能被归类到区域里）
+    # 计算新分组对应的区域
     if new_group in ['默认分组', '自动注册', '未分组', '自动导入']:
         try: new_group = detect_country_group(server_data.get('name', ''), server_data)
         except: pass
@@ -5404,13 +5404,10 @@ async def save_server_config(server_data, is_add=True, idx=None):
         if is_add:
             # === 新增 ===
             if new_group in SIDEBAR_UI_REFS['groups']:
-                # 目标分组已在屏幕上，直接追加进去
                 with SIDEBAR_UI_REFS['groups'][new_group]:
                     render_single_sidebar_row(server_data)
-                # 自动展开该组
                 EXPANDED_GROUPS.add(new_group)
             else:
-                # 目标分组是全新的，屏幕上没有，必须刷新
                 need_full_refresh = True
                 
         elif old_group != new_group:
@@ -5419,15 +5416,10 @@ async def save_server_config(server_data, is_add=True, idx=None):
             target_col = SIDEBAR_UI_REFS['groups'].get(new_group)
             
             if row_el and target_col:
-                # 目标存在，直接移动！0闪烁！
                 row_el.move(target_col)
                 EXPANDED_GROUPS.add(new_group)
             else:
-                # 目标分组UI不存在，或者找不到行UI，兜底刷新
                 need_full_refresh = True
-        
-        # === 修改信息 (分组没变) ===
-        # 不需要做任何事！bind_text_from 会自动更新名字
         
     except Exception as e:
         logger.error(f"UI Move Error: {e}")
@@ -5437,15 +5429,23 @@ async def save_server_config(server_data, is_add=True, idx=None):
         try: render_sidebar_content.refresh()
         except: pass
 
-    # 5. 右侧主视图逻辑
+    # ================= ✨✨✨ 右侧主视图同步逻辑 (修正版) ✨✨✨ =================
     current_scope = CURRENT_VIEW_STATE.get('scope')
     current_data = CURRENT_VIEW_STATE.get('data')
+    
+    # 情况1: 如果当前正在查看这台服务器的详情页
     if current_scope == 'SINGLE' and (current_data == server_data or (is_add and server_data == SERVERS_CACHE[-1])):
         try: await refresh_content('SINGLE', server_data, force_refresh=True)
         except: pass
-    elif current_scope == 'ALL':
-        try: await refresh_content('ALL', force_refresh=False)
+        
+    # 情况2: 如果当前在列表视图 (全部/分组/区域)，立即静默重绘列表
+    elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
+        # ⚠️ 关键修改：强制置空 scope 以绕过 refresh_content 内部的防抖判断
+        # 这样可以触发 UI 重绘 (增/删行)，但 force_refresh=False 不会触发 API 重新请求
+        CURRENT_VIEW_STATE['scope'] = None 
+        try: await refresh_content(current_scope, current_data, force_refresh=False)
         except: pass
+        
     elif current_scope == 'DASHBOARD':
         try: await refresh_dashboard_ui()
         except: pass
@@ -5462,7 +5462,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (修复版：分离基础信息保存) =================
+# ================= 小巧卡片式弹窗 (修复版：删除同步优化) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -5498,7 +5498,7 @@ async def open_server_dialog(idx=None):
                 t_ssh = ui.tab('SSH / 探针', icon='terminal')
                 t_xui = ui.tab('X-UI面板', icon='settings')
 
-        # ================= ✨✨✨ 独立的基础信息保存逻辑 (修复版) ✨✨✨ =================
+        # ================= 独立的基础信息保存逻辑 =================
         async def save_basic_info_only():
             if not is_edit: 
                 safe_notify("新增服务器请使用下方的保存按钮", "warning")
@@ -5507,24 +5507,23 @@ async def open_server_dialog(idx=None):
             new_name = name_input.value.strip()
             new_group = group_input.value
             
-            # 如果名称为空，尝试自动生成
-            if not new_name:
-                new_name = await generate_smart_name(data)
+            if not new_name: new_name = await generate_smart_name(data)
             
-            # 更新内存数据
             SERVERS_CACHE[idx]['name'] = new_name
             SERVERS_CACHE[idx]['group'] = new_group
             
-            # 仅保存文件
             await save_servers()
-            
-            # 刷新侧边栏
             render_sidebar_content.refresh()
             
-            # ✨✨✨ 修复：智能判断是否需要刷新主视图 ✨✨✨
-            # 只有当用户正好在看这台机器详情时，才刷新右侧区域
-            if CURRENT_VIEW_STATE.get('scope') == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
+            # ✨ 基础信息修改同步刷新右侧
+            current_scope = CURRENT_VIEW_STATE.get('scope')
+            if current_scope == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
                 try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
+                except: pass
+            elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
+                # ⚠️ 关键修改：强制重绘
+                CURRENT_VIEW_STATE['scope'] = None
+                try: await refresh_content(current_scope, CURRENT_VIEW_STATE.get('data'), force_refresh=False)
                 except: pass
             
             safe_notify("✅ 基础信息已更新", "positive")
@@ -5537,17 +5536,12 @@ async def open_server_dialog(idx=None):
             with ui.row().classes('w-full items-center gap-2 no-wrap'):
                 group_input = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('flex-grow').props('outlined dense')
                 
-                # ✨ 只有在编辑模式下，才显示这个独立的保存按钮
                 if is_edit:
                     ui.button(icon='save', on_click=save_basic_info_only) \
                         .props('flat dense round color=primary') \
                         .tooltip('仅保存名称和分组 (不重新部署)')
 
-        # ======================================================================
-        
         inputs = {}
-
-        # ==================== 样式定义 ====================
         btn_keycap_blue = 'bg-white rounded-lg font-bold tracking-wide border-t border-x border-gray-100 border-b-4 border-blue-100 text-blue-600 px-4 py-1 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-blue-50'
         btn_keycap_delete = 'bg-white rounded-xl font-bold tracking-wide w-full border-t border-x border-gray-100 border-b-4 border-red-100 text-red-500 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-red-50'
         btn_keycap_red_confirm = 'rounded-lg font-bold tracking-wide text-white border-b-4 border-red-900 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1'
@@ -5559,7 +5553,6 @@ async def open_server_dialog(idx=None):
             new_server_data = data.copy()
             new_server_data['group'] = final_group
 
-            # --- SSH 保存逻辑 ---
             if panel_type == 'ssh':
                 if not inputs.get('ssh_host'): return
                 s_host = inputs['ssh_host'].value.strip()
@@ -5576,7 +5569,6 @@ async def open_server_dialog(idx=None):
                 })
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
-            # --- X-UI 保存逻辑 ---
             elif panel_type == 'xui':
                 if not inputs.get('xui_url'): return
                 x_url_raw = inputs['xui_url'].value.strip()
@@ -5584,13 +5576,9 @@ async def open_server_dialog(idx=None):
                 x_pass = inputs['xui_pass'].value.strip()
                 
                 if not (x_url_raw and x_user and x_pass): 
-                    safe_notify("必填项不能为空", "negative")
-                    return
+                    safe_notify("必填项不能为空", "negative"); return
 
-                # 1. 补全协议
                 if '://' not in x_url_raw: x_url_raw = f"http://{x_url_raw}"
-                
-                # 2. 补全默认端口
                 try:
                     parts = x_url_raw.split('://')
                     body = parts[1]
@@ -5601,9 +5589,7 @@ async def open_server_dialog(idx=None):
 
                 probe_val = inputs['probe_chk'].value
                 new_server_data.update({
-                    'url': x_url_raw, 
-                    'user': x_user, 
-                    'pass': x_pass,
+                    'url': x_url_raw, 'user': x_user, 'pass': x_pass,
                     'prefix': inputs['xui_prefix'].value.strip(),
                     'probe_installed': probe_val
                 })
@@ -5616,13 +5602,11 @@ async def open_server_dialog(idx=None):
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
 
-            # 智能名称
             if not final_name:
                 safe_notify("正在生成名称...", "ongoing")
                 final_name = await generate_smart_name(new_server_data)
             new_server_data['name'] = final_name
 
-            # 执行保存
             success = await save_server_config(new_server_data, is_add=not is_edit, idx=idx)
             
             if success:
@@ -5730,7 +5714,7 @@ async def open_server_dialog(idx=None):
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 render_xui_panel()
 
-        # ================= 5. 全局删除逻辑 =================
+        # ================= 5. 全局删除逻辑 (已修复：删除后立即重绘右侧列表) =================
         if is_edit:
             with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
                 async def open_delete_confirm():
@@ -5795,12 +5779,16 @@ async def open_server_dialog(idx=None):
                             current_data = CURRENT_VIEW_STATE.get('data')
 
                             if is_full_delete:
+                                # 如果正在查看当前单服务器详情
                                 if current_scope == 'SINGLE' and current_data == target_srv:
                                     content_container.clear()
                                     with content_container:
                                         ui.label('该服务器已删除').classes('text-gray-400 text-lg w-full text-center mt-20')
+                                # ✨✨✨ 关键修改：如果正在查看列表，立即静默刷新 ✨✨✨
                                 elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-                                    await refresh_content(current_scope, current_data)
+                                    # 强制打破防抖，触发 refresh_content 重绘
+                                    CURRENT_VIEW_STATE['scope'] = None
+                                    await refresh_content(current_scope, current_data, force_refresh=False)
                             else:
                                 if current_scope == 'SINGLE' and current_data == target_srv:
                                     await refresh_content('SINGLE', target_srv)
