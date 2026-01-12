@@ -9352,32 +9352,64 @@ async def render_desktop_status_page():
         colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
         refs['uptime'].set_content(colored_up)
 
-    # 2. 自动更新循环
+    # 2. 自动更新循环 (混合策略：探针实时，API 节能)
     async def card_autoupdate_loop(url):
+        # 获取服务器配置
+        current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
+        if not current_server: return
+
+        # 判断是否安装了探针
+        is_probe = current_server.get('probe_installed', False)
+
+        # --- 阶段 1: 首次启动延迟 ---
+        if is_probe:
+            # 探针机器：只随机延迟 0.5~3秒，让它尽快显示
+            await asyncio.sleep(random.uniform(0.5, 3.0))
+        else:
+            # X-UI API机器：随机延迟 4~60秒，彻底错峰
+            await asyncio.sleep(random.uniform(4, 60.0))
+        
         while True:
-            await asyncio.sleep(random.uniform(2.0, 3.0))
+            # --- 基础检查 ---
             if url not in RENDERED_CARDS: break 
             if url not in [s['url'] for s in SERVERS_CACHE]: break
             
             item = RENDERED_CARDS.get(url)
             if not item: break 
-            if not item['card'].visible: continue 
             
+            # 如果浏览器标签页切到了后台，停止刷新以省流
+            if not item['card'].visible: 
+                await asyncio.sleep(5.0) 
+                continue 
+            
+            # --- 执行获取数据 ---
+            # 重新获取最新的配置引用
             current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
-            if not current_server: continue
-
-            res = None
-            try: res = await asyncio.wait_for(get_server_status(current_server), timeout=2.0)
-            except: res = None
             
-            if res:
-                raw_cache = PROBE_DATA_CACHE.get(url, {})
-                static = raw_cache.get('static', {})
-                update_card_ui(item['refs'], res, static)
+            if current_server:
+                res = None
+                try: 
+                    # 获取状态
+                    # 这里的 timeout 对于 API 请求很重要，对探针读取则是瞬时的
+                    res = await asyncio.wait_for(get_server_status(current_server), timeout=5.0)
+                except: res = None
                 
-                is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
-                if is_online: item['card'].classes(remove='offline-card')
-                else: item['card'].classes(add='offline-card')
+                if res:
+                    raw_cache = PROBE_DATA_CACHE.get(url, {})
+                    static = raw_cache.get('static', {})
+                    update_card_ui(item['refs'], res, static)
+                    
+                    is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
+                    if is_online: item['card'].classes(remove='offline-card')
+                    else: item['card'].classes(add='offline-card')
+
+            # --- 阶段 2: 下一轮刷新的等待时间 (核心差异) ---
+            if is_probe:
+                # 探针：保持 2~3 秒的实时刷新 (读内存不费资源)
+                await asyncio.sleep(random.uniform(2.0, 3.0))
+            else:
+                # X-UI API：休眠 60 秒 (55~65随机) (省流节能)
+                await asyncio.sleep(random.uniform(55.0, 65.0))
 
     # 3. 创建卡片 (✨✨✨ 创建时立即回显 ✨✨✨)
     def create_server_card(s):
