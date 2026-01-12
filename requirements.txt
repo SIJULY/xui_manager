@@ -8,3 +8,4 @@ qrcode
 pillow
 paramiko
 apscheduler
+redis
