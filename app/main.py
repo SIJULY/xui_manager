@@ -16,6 +16,7 @@ import qrcode
 import time
 import io
 import paramiko
+import redis
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from urllib.parse import urlparse, quote
@@ -23,6 +24,8 @@ from nicegui import ui, run, app, Client
 from fastapi import Response, Request
 from fastapi.responses import RedirectResponse
 from collections import Counter
+
+
 
 IP_GEO_CACHE = {}
 
@@ -1040,6 +1043,22 @@ bash /tmp/install_hy2.sh
             btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
 
     d.open()
+
+
+# ================= ✨✨✨ Redis 初始化 (新增) ✨✨✨ =================
+# 从环境变量获取 Redis 地址 (docker-compose 里设置了 REDIS_HOST=redis)
+# 如果没获取到，默认用 127.0.0.1 (方便本地调试)
+REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
+
+# 建立连接池 (decode_responses=True 意味着取出来直接是字符串，不是字节)
+try:
+    rdb = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+    # 测试一下连接，失败也没关系，后面有 try-except
+    rdb.ping() 
+    print(f"✅ [Redis] 连接成功: {REDIS_HOST}")
+except Exception as e:
+    print(f"⚠️ [Redis] 连接警告: {e}")
+
  
 # ================= 全局变量区 (缓存) =================
 PROBE_DATA_CACHE = {} 
@@ -1312,7 +1331,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 后台专用线程池 (处理 90+ 服务器同步)
 BG_EXECUTOR = ThreadPoolExecutor(max_workers=20)
 # 2. 限制后台并发数
-SYNC_SEMAPHORE = asyncio.Semaphore(50) 
+SYNC_SEMAPHORE = asyncio.Semaphore(15) 
 
 
 LAST_AUTO_SYNC_TIME = 0
@@ -1975,41 +1994,45 @@ async def safe_save(filename, data):
     async with FILE_LOCK:
         try: await run.io_bound(_save_file_sync_internal, filename, data)
         except Exception as e: logger.error(f"❌ 保存 {filename} 失败: {e}")
-
 # ================= 数据保存函数 =================
 
-# 1. 保存服务器列表
+# 1. 保存服务器列表 (已修改：同步推送到 Redis)
 async def save_servers(): 
-    global GLOBAL_UI_VERSION # ✨ 关键：引入全局版本变量
+    global GLOBAL_UI_VERSION 
     
-    # 执行保存
+    # A. 执行原有的硬盘保存
     await safe_save(CONFIG_FILE, SERVERS_CACHE)
     
-    # ✨ 关键：更新版本号，通知前台 /status 页面进行结构重绘
+    # B. ✨✨✨ [新增] 同步数据到 Redis 给 Go Worker 使用 ✨✨✨
+    try:
+        # 我们把整个列表转成 JSON 字符串存进去
+        # Key: "config:servers" 是我们和 Go 约定的暗号
+        # 使用 run.io_bound 防止 Redis 网络请求阻塞主线程
+        await run.io_bound(lambda: rdb.set("config:servers", json.dumps(SERVERS_CACHE)))
+        logger.info(f"📡 [Redis] 已同步 {len(SERVERS_CACHE)} 台服务器配置到 Redis")
+    except Exception as e:
+        # 即使 Redis 挂了，也不要影响面板正常运行，记个日志就行
+        logger.error(f"❌ [Redis] 同步失败: {e}")
+
+    # C. 更新 UI 版本号
     GLOBAL_UI_VERSION = time.time() 
     
-    # 触发后台仪表盘数据的静默刷新
+    # D. 触发后台仪表盘数据的静默刷新
     await refresh_dashboard_ui()
 
 # 2. 保存管理配置 (分组/设置)
 async def save_admin_config(): 
-    global GLOBAL_UI_VERSION # ✨ 关键：引入全局版本变量
-    
-    # 执行保存
+    global GLOBAL_UI_VERSION 
     await safe_save(ADMIN_CONFIG_FILE, ADMIN_CONFIG)
-    
-    # ✨ 关键：更新版本号，通知前台 /status 页面进行结构重绘 (例如分组变化)
     GLOBAL_UI_VERSION = time.time()
 
-async def save_subs(): await safe_save(SUBS_FILE, SUBS_CACHE)
+async def save_subs(): 
+    await safe_save(SUBS_FILE, SUBS_CACHE)
 
 async def save_nodes_cache():
     try:
-        # 直接保存所有内存数据，不做任何过滤
         data_snapshot = NODES_DATA.copy()
         await safe_save(NODES_CACHE_FILE, data_snapshot)
-        
-        # 触发静默更新 (流量变化/节点增删)
         await refresh_dashboard_ui()
     except Exception as e:
         logger.error(f"❌ 保存缓存失败: {e}")
@@ -2896,79 +2919,64 @@ async def batch_install_all_probes():
     
     safe_notify("✅ 所有探针安装/更新任务已完成", "positive")
     
-# =================  获取服务器状态 (混合模式：探针优先 + API 兜底) =================
+# ================= 获取服务器状态 (Python 只读版) =================
 async def get_server_status(server_conf):
     raw_url = server_conf['url']
     
-    # --- 策略 A: 探针模式 (保持不变) ---
-    if server_conf.get('probe_installed', False) or raw_url in PROBE_DATA_CACHE:
+    # --- 策略 A: 探针模式 (Root Agent) - 保持不变 ---
+    # 依然由 Python/Agent 负责，不归 Go 管
+    if server_conf.get('probe_installed', False):
         cache = PROBE_DATA_CACHE.get(raw_url)
         if cache:
-            if time.time() - cache.get('last_updated', 0) < 15:
+            if time.time() - cache.get('last_updated', 0) < 30:
                 return cache 
             else:
-                return {'status': 'offline', 'msg': '探针离线 (超时)'}
-        
-    # --- 策略 B: 纯 X-UI 面板模式 (修复版) ---
-    try:
-        mgr = get_manager(server_conf)
-        panel_stats = await run.io_bound(mgr.get_server_status)
-        
-        if panel_stats:
-            # ✨✨✨ [调试核心] 打印原始数据到日志，排查 Oracle 内存问题 ✨✨✨
-            if panel_stats.get('cpu', 0) == 0 or float(panel_stats.get('mem', {}).get('current', 0)) > float(panel_stats.get('mem', {}).get('total', 1)):
-                 print(f"⚠️ [异常数据调试] {server_conf['name']} 返回: {panel_stats.get('mem')}", flush=True)
+                return {'status': 'offline', 'msg': '探针离线'}
 
-            # --- 1. 内存处理 (暴力修正版) ---
-            mem_raw = panel_stats.get('mem')
-            mem_usage = 0
-            mem_total = 0
+    # --- 策略 B: X-UI 模式 (数据全靠 Go 喂饭) ---
+    try:
+        # 直接从 Redis 读，里面现在包含了 Ping + CPU + 内存
+        cached_json = await run.io_bound(lambda: rdb.get(f"status:{raw_url}"))
+        
+        if cached_json:
+            data = json.loads(cached_json)
             
+            # 如果 Go 还没采集到 API 数据 (刚启动时)，可能只有 ping
+            if 'cpu' not in data and data.get('status') == 'online':
+                 return {'status': 'online', 'msg': 'Go: Waiting for Data...', 'ping_tcp': data.get('ping_tcp')}
+            
+            # 如果是离线
+            if data.get('status') == 'offline':
+                 return {'status': 'offline', 'msg': 'Go: Unreachable'}
+
+            # --- 数据清洗 (和以前一样，只是数据源变了) ---
+            # 这里的 data['cpu'] 是 Go 从 API 拿回来存进 Redis 的
+            
+            # 内存处理
+            mem_raw = data.get('mem', {})
+            mem_usage, mem_total = 0, 0
             if isinstance(mem_raw, dict):
                 mem_total = float(mem_raw.get('total', 1))
                 mem_curr = float(mem_raw.get('current', 0))
-                
-                # 计算百分比
-                if mem_total > 0:
-                    mem_usage = (mem_curr / mem_total) * 100
-                
-                # ✨✨✨ 暴力纠错：如果内存 > 100%，强制压回 99% ✨✨✨
-                # 这样界面显示的 "38GB" 就会自动变成 "0.9GB" (跟随总量)
-                if mem_usage > 100:
-                    # 尝试自动除以 1024 (应对 KB/Byte 混用)
-                    if mem_usage > 10000: # 差距过大，可能是 Bytes vs KB (1024倍)
-                         mem_curr /= 1024
-                         mem_usage /= 1024
-                    
-                    # 如果除完还是很离谱，直接暴力修正显示
-                    if mem_usage > 100:
-                        mem_usage = 95.0 # 假定 95%
-            else:
-                mem_usage = float(mem_raw or 0) * 100
+                if mem_total > 0: mem_usage = (mem_curr / mem_total) * 100
+                if mem_usage > 100: mem_usage = 95.0
             
-            # --- 2. 硬盘处理 ---
-            disk_raw = panel_stats.get('disk')
-            disk_usage = 0
-            disk_total = 0
+            # 硬盘处理
+            disk_raw = data.get('disk', {})
+            disk_usage, disk_total = 0, 0
             if isinstance(disk_raw, dict):
                  disk_total = disk_raw.get('total', 0)
-                 if disk_total > 0:
-                     disk_usage = (disk_raw.get('current', 0) / disk_total) * 100
-
-            # --- 3. 其他数据补全 ---
-            net_io = panel_stats.get('netIO', {})       
-            net_traffic = panel_stats.get('netTraffic', {}) 
-            loads = panel_stats.get('loads', [0, 0, 0])     
-            load_1 = loads[0] if isinstance(loads, list) and len(loads) > 0 else 0
-
-            # --- 4. CPU 修正 ---
-            raw_cpu = float(panel_stats.get('cpu', 0))
-            final_cpu = raw_cpu if raw_cpu > 1 else raw_cpu * 100
+                 if disk_total > 0: disk_usage = (disk_raw.get('current', 0) / disk_total) * 100
+            
+            # 流量处理 (netTraffic 是 X-UI 返回的总流量)
+            net_traffic = data.get('netTraffic', {})
+            net_io = data.get('netIO', {})
 
             return {
-                'status': 'warning', 
-                'msg': '⚠️ 未安装探针',
-                'cpu_usage': final_cpu,
+                'status': 'online', 
+                'msg': 'Go API', # 标记一下数据来源
+                'ping_tcp': data.get('ping_tcp', -1), # 显示延迟
+                'cpu_usage': float(data.get('cpu', 0)) * 100 if float(data.get('cpu', 0)) < 1 else float(data.get('cpu', 0)),
                 'mem_usage': mem_usage,
                 'mem_total': mem_total, 
                 'disk_usage': disk_usage,
@@ -2977,15 +2985,14 @@ async def get_server_status(server_conf):
                 'net_speed_out': net_io.get('up', 0),
                 'net_total_in': net_traffic.get('recv', 0),
                 'net_total_out': net_traffic.get('sent', 0),
-                'load_1': load_1,
-                'uptime': f"{int(panel_stats.get('uptime', 0)/86400)}天",
+                'uptime': f"{int(data.get('uptime', 0)/86400)}天",
                 '_is_lite': True 
             }
-    except Exception as e: 
-        # print(f"API Error: {e}")
+
+    except Exception as e:
         pass
 
-    return {'status': 'offline', 'msg': '无信号'}
+    return {'status': 'offline', 'msg': '无数据'}
 # ================= 使用 URL 安全的 Base64 =================
 def safe_base64(s): 
     # 使用 urlsafe_b64encode 避免出现 + 和 /
@@ -3345,24 +3352,11 @@ async def group_sub_handler(group_b64: str, request: Request):
         
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
-# ================= 短链接接口：分组 (智能跟随版) =================
+# ================= 短链接接口：分组 =================
 @app.get('/get/group/{target}/{group_b64}')
-async def short_group_handler(target: str, group_b64: str, request: Request): # ✨ 1. 注入 request
+async def short_group_handler(target: str, group_b64: str):
     try:
-        # ✨ 2. 智能获取当前访问的 协议://域名:端口
-        # 优先读取用户在"探针设置"里填写的地址，如果没有填，则自动识别当前浏览器地址
-        custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        
-        if custom_base:
-            base_url = custom_base
-        else:
-            # 自动识别：获取当前请求的 Host 头 (例如 example.com 或 1.2.3.4:8080)
-            host = request.headers.get('host')
-            scheme = request.url.scheme # http 或 https
-            base_url = f"{scheme}://{host}"
-
-        # 拼接出让 SubConverter 抓取的地址
-        internal_api = f"{base_url}/sub/group/{group_b64}"
+        internal_api = f"http://xui-manager:8080/sub/group/{group_b64}"
 
         params = {
             "target": target,
@@ -3374,8 +3368,6 @@ async def short_group_handler(target: str, group_b64: str, request: Request): # 
             "scv": "true"
         }
         
-        # 注意：如果 SubConverter 也是容器，且和面板不在一个网络，这里用 127.0.0.1 可能会失败
-        # 建议保持 subconverter:25500 (容器名) 或改为你的真实 IP:25500
         converter_api = "http://subconverter:25500/sub"
 
         def _fetch_sync():
@@ -3386,32 +3378,20 @@ async def short_group_handler(target: str, group_b64: str, request: Request): # 
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            # 增加错误提示，方便排查
-            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
-            return Response(err_msg, status_code=502)
+            code = response.status_code if response else 'Timeout'
+            return Response(f"Backend Error: {code} (Check Docker Network)", status_code=502)
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-    
-# ================= 短链接接口：单个订阅 (智能跟随版) =================
+
+# ================= 短链接接口：单个订阅  =================
 @app.get('/get/sub/{target}/{token}')
-async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1. 注入 request
+async def short_sub_handler(target: str, token: str):
     try:
         sub_obj = next((s for s in SUBS_CACHE if s['token'] == token), None)
         if not sub_obj: return Response("Subscription Not Found", 404)
         
-        # ✨ 2. 智能获取当前访问的 协议://域名:端口
-        custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        
-        if custom_base:
-            base_url = custom_base
-        else:
-            # 自动识别
-            host = request.headers.get('host')
-            scheme = request.url.scheme
-            base_url = f"{scheme}://{host}"
-            
-        internal_api = f"{base_url}/sub/{token}"
-        
         opt = sub_obj.get('options', {})
+        internal_api = f"http://xui-manager:8080/sub/{token}"
+        
         params = {
             "target": target,
             "url": internal_api,
@@ -3445,6 +3425,8 @@ async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1.
         ren_rep = opt.get('rename_replacement', '')
         
         if ren_pat:
+            # SubConverter 的 rename 参数格式: pattern@replacement
+            # 注意：SubConverter 默认支持正则，$1 需要写成 $1
             params['rename'] = f"{ren_pat}@{ren_rep}"
 
         converter_api = "http://subconverter:25500/sub"
@@ -3457,9 +3439,9 @@ async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1.
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
-            return Response(err_msg, status_code=502)
+            return Response(f"Backend Error: {response.status_code if response else 'Timeout'}", status_code=502)
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
+
 
 
 # ================= 探针主动注册接口=================
@@ -4111,7 +4093,7 @@ async def delete_inbound_with_confirm(mgr, inbound_id, inbound_remark, callback)
                 
             ui.button('确定删除', color='red', on_click=do_delete)
     d.open()
-# ================= 订阅编辑器 (已增加搜索功能) =================
+# ================= 订阅编辑器  =================
 class SubEditor:
     def __init__(self, data=None):
         self.data = data
@@ -4125,11 +4107,6 @@ class SubEditor:
         self.sel = set(self.d.get('nodes', []))
         self.groups_data = {} 
         self.all_node_keys = set()
-        
-        # ✨ 新增：搜索相关状态
-        self.search_term = "" 
-        self.visible_node_keys = set() # 用于存储当前搜索结果显示的节点Key
-
         self.name_input = None 
         self.token_input = None 
 
@@ -4148,19 +4125,11 @@ class SubEditor:
                     self.token_input.on_value_change(lambda e: self.d.update({'token': e.value.strip()}))
                     ui.button(icon='refresh', on_click=lambda: self.token_input.set_value(str(uuid.uuid4()))).props('flat dense').tooltip('生成随机 UUID')
 
-                # ✨ 修改：操作栏增加搜索框
-                with ui.column().classes('w-full gap-2 bg-gray-100 p-3 rounded'):
-                    # 第一行：标题和搜索框
-                    with ui.row().classes('w-full items-center gap-4'):
-                        ui.label('节点列表').classes('font-bold ml-2 flex-shrink-0')
-                        # 搜索输入框
-                        ui.input(placeholder='🔍 搜索节点或服务器...', on_change=self.on_search_change).props('outlined dense bg-white').classes('flex-grow')
-
-                    # 第二行：全选/清空按钮 (针对当前搜索结果)
-                    with ui.row().classes('w-full justify-end gap-2'):
-                        ui.label('操作当前列表:').classes('text-xs text-gray-500 self-center')
-                        ui.button('全选', on_click=lambda: self.toggle_all(True)).props('flat dense size=sm color=primary bg-white')
-                        ui.button('清空', on_click=lambda: self.toggle_all(False)).props('flat dense size=sm color=red bg-white')
+                with ui.row().classes('w-full items-center justify-between bg-gray-100 p-2 rounded'):
+                    ui.label('节点列表').classes('font-bold ml-2')
+                    with ui.row().classes('gap-2'):
+                        ui.button('全选', on_click=lambda: self.toggle_all(True)).props('flat dense size=sm color=primary')
+                        ui.button('清空', on_click=lambda: self.toggle_all(False)).props('flat dense size=sm color=red')
 
                 self.cont = ui.column().classes('w-full').style('display: flex; flex-direction: column; gap: 10px;')
             
@@ -4189,11 +4158,6 @@ class SubEditor:
                 ui.button('保存', icon='save', on_click=save).classes('w-full h-12 bg-slate-900 text-white')
 
         asyncio.create_task(self.load_data())
-
-    # ✨ 新增：搜索处理函数
-    def on_search_change(self, e):
-        self.search_term = str(e.value).lower().strip()
-        self.render_list()
 
     async def load_data(self):
         with self.cont: 
@@ -4236,78 +4200,39 @@ class SubEditor:
 
     def render_list(self):
         self.cont.clear()
-        self.visible_node_keys = set() # 重置可见节点集合
-
         with self.cont:
             if not self.groups_data:
                 ui.label('暂无数据').classes('text-center w-full mt-4')
                 return
 
             sorted_groups = sorted(self.groups_data.keys())
-            has_match = False # 标记是否有匹配项
 
             for g_name in sorted_groups:
-                # 预先筛选：检查该分组下是否有符合搜索条件的节点
-                servers_in_group = self.groups_data[g_name]
-                visible_servers_ui = []
-                
-                for item in servers_in_group:
-                    srv = item['server']
-                    nodes = item['nodes']
-                    
-                    # 筛选符合条件的节点
-                    matched_nodes = []
-                    for n in nodes:
-                        # 搜索匹配逻辑：匹配 节点备注 或 服务器名称
-                        if (not self.search_term) or \
-                           (self.search_term in n['remark'].lower()) or \
-                           (self.search_term in srv['name'].lower()):
-                            matched_nodes.append(n)
-                            self.visible_node_keys.add(f"{srv['url']}|{n['id']}")
-
-                    if matched_nodes:
-                        visible_servers_ui.append({'server': srv, 'nodes': matched_nodes})
-
-                # 如果该分组下有匹配的节点，才渲染该分组
-                if visible_servers_ui:
-                    has_match = True
-                    # 默认展开，如果是搜索状态
-                    expand_value = True if self.search_term else True 
-                    
-                    with ui.expansion(g_name, icon='folder', value=expand_value).classes('w-full border rounded mb-2').style('width: 100%;'):
-                        with ui.column().classes('w-full p-0').style('display: flex; flex-direction: column; width: 100%;'):
-                            for item in visible_servers_ui:
-                                srv = item['server']
-                                nodes = item['nodes']
-                                
-                                with ui.column().classes('w-full p-2 border-b').style('display: flex; flex-direction: column; align-items: flex-start; width: 100%;'):
-                                    with ui.row().classes('items-center gap-2 mb-2'):
-                                        ui.icon('dns', size='xs')
-                                        ui.label(srv['name']).classes('font-bold')
-                                    
-                                    if nodes:
-                                        with ui.column().classes('w-full pl-4 gap-1').style('display: flex; flex-direction: column; width: 100%;'):
-                                            for n in nodes:
-                                                key = f"{srv['url']}|{n['id']}"
-                                                cb = ui.checkbox(n['remark'], value=(key in self.sel))
-                                                cb.classes('w-full text-sm dense').style('display: flex; width: 100%;')
-                                                cb.on_value_change(lambda e, k=key: self.on_check(k, e.value))
-            
-            if not has_match:
-                ui.label('未找到匹配的节点').classes('text-center w-full mt-4 text-gray-400')
+                with ui.expansion(g_name, icon='folder', value=True).classes('w-full border rounded mb-2').style('width: 100%;'):
+                    with ui.column().classes('w-full p-0').style('display: flex; flex-direction: column; width: 100%;'):
+                        servers = self.groups_data[g_name]
+                        for item in servers:
+                            srv = item['server']
+                            nodes = item['nodes']
+                            with ui.column().classes('w-full p-2 border-b').style('display: flex; flex-direction: column; align-items: flex-start; width: 100%;'):
+                                with ui.row().classes('items-center gap-2 mb-2'):
+                                    ui.icon('dns', size='xs')
+                                    ui.label(srv['name']).classes('font-bold')
+                                if nodes:
+                                    with ui.column().classes('w-full pl-4 gap-1').style('display: flex; flex-direction: column; width: 100%;'):
+                                        for n in nodes:
+                                            key = f"{srv['url']}|{n['id']}"
+                                            cb = ui.checkbox(n['remark'], value=(key in self.sel))
+                                            cb.classes('w-full text-sm dense').style('display: flex; width: 100%;')
+                                            cb.on_value_change(lambda e, k=key: self.on_check(k, e.value))
 
     def on_check(self, key, value):
         if value: self.sel.add(key)
         else: self.sel.discard(key)
 
-    # ✨ 修改：全选逻辑改为只选中/取消选中“当前可见”的节点
     def toggle_all(self, select_state):
-        if select_state:
-            # 全选：将所有可见节点加入选中集合
-            self.sel.update(self.visible_node_keys)
-        else:
-            # 清空：从选中集合中移除所有可见节点
-            self.sel.difference_update(self.visible_node_keys)
+        if select_state: self.sel.update(self.all_node_keys)
+        else: self.sel.clear()
         self.render_list()
 
 def open_sub_editor(d):
@@ -4375,14 +4300,11 @@ def open_quick_group_create_dialog(callback=None):
                         with ui.row().classes('w-full items-center p-2 hover:bg-blue-50 rounded border border-transparent hover:border-blue-200 transition cursor-pointer') as row:
                             chk = ui.checkbox(value=False).props('dense')
                             
-                            # ✨ [新增] 阻止复选框自身的点击事件冒泡给 row，防止双重触发
-                            chk.on('click.stop', lambda: None)
-
-                            # 绑定勾选事件 (保持数据同步)
+                            # 绑定勾选事件
                             chk.on_value_change(lambda e, u=s['url']: selection_map.update({u: e.value}))
                             
-                            # ✨ [修改] 点击整行也能勾选 (已修复 .c 错误，并将监听绑定在 row 上)
-                            row.on('click', lambda: chk.set_value(not chk.value))
+                            # 点击行也能勾选
+                            ui.context.client.layout.on('click', lambda _, c=chk: c.c.set_value(not c.value))
 
                             # 显示名称
                             ui.label(s['name']).classes('text-sm font-bold text-gray-700 ml-2 truncate flex-grow select-none')
@@ -4519,26 +4441,27 @@ def open_group_sort_dialog():
     d.open()
 import traceback # 引入用于打印报错堆栈
 
-# ================= 探针自定义分组一体化管理器 (修复版：全选/新建逻辑重构) =================
+# ================= 探针自定义分组一体化管理器 (优化版：带分页，支持 1000+ 服务器) =================
 def open_unified_group_manager(mode='manage'):
-    # 1. 数据准备
+    # 1. 数据准备与状态初始化
     if 'probe_custom_groups' not in ADMIN_CONFIG: 
         ADMIN_CONFIG['probe_custom_groups'] = []
     
     # 状态字典
     state = {
         'current_group': None,
-        'selected_urls': set(), # ✨ 核心：使用一个集合统一管理当前选中的服务器URL
-        'checkboxes': {},       # 存储当前页 checkbox 引用
-        'page': 1,
-        'search_text': ''
+        'checkboxes': {},
+        'server_map': {s['url']: s for s in SERVERS_CACHE},
+        'page': 1,           # 当前页码
+        'search_text': ''    # 搜索关键词
     }
 
     # UI 引用
     view_list_container = None
     server_list_container = None
     title_input = None
-    pagination_ref = None 
+    action_area = None
+    pagination_ref = None # 分页器引用
 
     # ================= 界面构建 =================
     with ui.dialog() as d, ui.card().classes('w-full max-w-5xl h-[90vh] flex flex-col p-0 gap-0'):
@@ -4552,7 +4475,7 @@ def open_unified_group_manager(mode='manage'):
             ui.space()
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
 
-        # --- 2. 编辑区头部 ---
+        # --- 2. 编辑区头部 (名称 + 搜索 + 全选) ---
         with ui.row().classes('w-full p-4 bg-white border-b items-center gap-4 flex-shrink-0 wrap'):
             title_input = ui.input('视图名称', placeholder='请输入分组名称...').props('outlined dense').classes('min-w-[200px] flex-grow font-bold')
             
@@ -4563,16 +4486,16 @@ def open_unified_group_manager(mode='manage'):
                 ui.button('全选本页', on_click=lambda: toggle_page_all(True)).props('flat dense size=sm color=blue')
                 ui.button('清空本页', on_click=lambda: toggle_page_all(False)).props('flat dense size=sm color=grey')
 
-        # --- 3. 服务器列表 ---
+        # --- 3. 服务器列表 (核心内容) ---
         with ui.scroll_area().classes('w-full flex-grow p-4 bg-gray-50'):
             server_list_container = ui.column().classes('w-full gap-2')
             
-        # --- 3.5 分页 ---
+        # --- 3.5 分页控件栏 ---
         with ui.row().classes('w-full p-2 justify-center bg-gray-50 border-t border-gray-200'):
-            pagination_ref = ui.row() 
+            pagination_ref = ui.row() # 占位符
 
-        # --- 4. 底部保存 ---
-        with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0'):
+        # --- 4. 底部保存区 ---
+        with ui.row().classes('w-full p-4 bg-white border-t justify-between items-center flex-shrink-0') as action_area:
             ui.button('删除此视图', icon='delete', color='red', on_click=lambda: delete_current_group()).props('flat')
             ui.button('保存当前配置', icon='save', on_click=lambda: save_current_group()).classes('bg-slate-900 text-white shadow-lg')
 
@@ -4580,7 +4503,7 @@ def open_unified_group_manager(mode='manage'):
 
     def update_search(val):
         state['search_text'] = str(val).lower().strip()
-        state['page'] = 1 
+        state['page'] = 1 # 搜索时重置回第一页
         render_servers()
 
     def render_views():
@@ -4592,33 +4515,17 @@ def open_unified_group_manager(mode='manage'):
                 btn_props = 'unelevated color=blue' if is_active else 'outline color=grey text-color=grey-8'
                 ui.button(g, on_click=lambda _, name=g: load_group_data(name)).props(f'{btn_props} size=sm')
 
-    def load_group_data(group_name):
-        state['current_group'] = group_name
-        state['page'] = 1
-        state['selected_urls'] = set() # 清空选中状态
-        
-        # 如果是编辑模式，预加载已有的服务器到集合中
-        if group_name:
-            for s in SERVERS_CACHE:
-                # 兼容 tags 和 old group 字段
-                if (group_name in s.get('tags', [])) or (s.get('group') == group_name):
-                    state['selected_urls'].add(s['url'])
-                    
-        render_views()
-        title_input.value = group_name if group_name else ''
-        if not group_name: title_input.run_method('focus')
-        render_servers()
-
     def render_servers():
         server_list_container.clear()
         pagination_ref.clear()
-        state['checkboxes'] = {} 
+        state['checkboxes'] = {} # 重置当前页的 checkbox 引用
         
         if not SERVERS_CACHE:
-            with server_list_container: ui.label('暂无服务器').classes('text-center text-gray-400 mt-10 w-full')
+            with server_list_container:
+                ui.label('⚠️ 暂无服务器数据').classes('w-full text-center text-red-500 mt-10')
             return
 
-        # 1. 过滤
+        # 1. 过滤与排序
         all_srv = SERVERS_CACHE
         if state['search_text']:
             all_srv = [s for s in all_srv if state['search_text'] in s.get('name', '').lower() or state['search_text'] in s.get('url', '').lower()]
@@ -4626,19 +4533,19 @@ def open_unified_group_manager(mode='manage'):
         try: sorted_servers = sorted(all_srv, key=lambda x: str(x.get('name', '')))
         except: sorted_servers = all_srv
 
-        # 2. 分页
-        PAGE_SIZE = 48 
+        # 2. 分页计算
+        PAGE_SIZE = 48 # 每页 48 个 (3列 x 16行)
         total_items = len(sorted_servers)
         total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
         if state['page'] > total_pages: state['page'] = 1
-        if state['page'] < 1: state['page'] = 1
         
         start_idx = (state['page'] - 1) * PAGE_SIZE
         end_idx = start_idx + PAGE_SIZE
         current_page_items = sorted_servers[start_idx:end_idx]
 
-        # 3. 渲染
+        # 3. 渲染列表
         with server_list_container:
+            # 顶部显示数量
             ui.label(f"共 {total_items} 台 (第 {state['page']}/{total_pages} 页)").classes('text-xs text-gray-400 mb-2')
 
             with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2'):
@@ -4646,95 +4553,131 @@ def open_unified_group_manager(mode='manage'):
                     url = s.get('url')
                     if not url: continue
                     
-                    # ✨ 核心：状态只看 state['selected_urls'] 集合
-                    is_checked = url in state['selected_urls']
+                    # 检查是否已在 tags 中
+                    tags = s.get('tags', [])
+                    is_checked = (state['current_group'] in tags) if state['current_group'] else False
                     
+                    # 渲染卡片
                     bg_cls = 'bg-blue-50 border-blue-300' if is_checked else 'bg-white border-gray-200'
                     
                     with ui.row().classes(f'items-center p-2 border rounded cursor-pointer hover:border-blue-400 transition {bg_cls}') as row:
                         chk = ui.checkbox(value=is_checked).props('dense')
                         state['checkboxes'][url] = chk
                         
-                        # 单行点击逻辑
-                        def toggle_row(c=chk, r=row, u=url): 
+                        # 绑定点击行切换
+                        def toggle_row(c=chk, r=row, s_in=s): 
                             c.value = not c.value
-                            update_selection(u, c.value)
-                            # 样式手动更新，避免重绘整个列表
-                            if c.value: r.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200')
-                            else: r.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')
+                            update_row_style(r, c.value)
+                            # 实时更新内存中的 tag (不再等保存按钮) -> 这样翻页不会丢失选中状态
+                            if state['current_group']:
+                                if c.value: 
+                                    if state['current_group'] not in s_in.get('tags', []):
+                                        if 'tags' not in s_in: s_in['tags'] = []
+                                        s_in['tags'].append(state['current_group'])
+                                else:
+                                    if state['current_group'] in s_in.get('tags', []):
+                                        s_in['tags'].remove(state['current_group'])
 
                         row.on('click', toggle_row)
-                        chk.on('click.stop', lambda _, c=chk, r=row, u=url: [update_selection(u, c.value), 
-                            r.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200') if c.value else r.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')])
+                        chk.on('click.stop', lambda _, c=chk, r=row, s_in=s: [update_row_style(r, c.value), toggle_tag_memory(s_in, c.value)]) # 阻止冒泡单独处理
 
+                        # 内容
                         with ui.column().classes('gap-0 ml-2 overflow-hidden'):
                             ui.label(s.get('name', 'Unknown')).classes('text-sm font-bold truncate text-gray-700')
-                            # 仅提示当前状态，不做逻辑判断
-                            if is_checked: ui.label('已选中').classes('text-[10px] text-blue-500 font-bold')
-                            else: ui.label(s.get('group','')).classes('text-[10px] text-gray-300')
+                            ui.label(f"Tags: {len(tags)}").classes('text-[10px] text-gray-400')
 
-        # 4. 分页器
+        # 4. 渲染底部分页器
         if total_pages > 1:
             with pagination_ref:
                 p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue')
                 p.value = state['page']
-                p.on('update:model-value', lambda e: [state.update({'page': e.args}), render_servers()])
+                p.on('update:model-value', lambda e: change_page(e.args))
 
-    def update_selection(url, checked):
-        if checked: state['selected_urls'].add(url)
-        else: state['selected_urls'].discard(url)
+    def update_row_style(row_el, checked):
+        if checked: row_el.classes(add='bg-blue-50 border-blue-300', remove='bg-white border-gray-200')
+        else: row_el.classes(remove='bg-blue-50 border-blue-300', add='bg-white border-gray-200')
 
-    # ✨ 修复后的全选逻辑：遍历当前页 checkbox，更新集合 + 刷新 UI
+    def toggle_tag_memory(s_in, checked):
+        # 针对 Checkbox 直接点击的逻辑
+        if not state['current_group']: return
+        if checked:
+            if 'tags' not in s_in: s_in['tags'] = []
+            if state['current_group'] not in s_in['tags']: s_in['tags'].append(state['current_group'])
+        else:
+            if state['current_group'] in s_in.get('tags', []): s_in['tags'].remove(state['current_group'])
+
+    def change_page(new_page):
+        state['page'] = new_page
+        render_servers()
+
+    def load_group_data(group_name):
+        state['current_group'] = group_name
+        state['page'] = 1 # 切换分组重置页码
+        render_views()
+        title_input.value = group_name if group_name else ''
+        if not group_name: title_input.run_method('focus')
+        action_area.visible = True
+        render_servers()
+
     def toggle_page_all(val):
-        for url in state['checkboxes'].keys():
-            if val: state['selected_urls'].add(url)
-            else: state['selected_urls'].discard(url)
-        render_servers() # 重新渲染以更新 checkbox 状态和样式
+        # 只操作当前页的 checkbox
+        for url, chk in state['checkboxes'].items():
+            if chk.value != val:
+                chk.value = val
+                # 手动触发数据更新
+                s = state['server_map'].get(url)
+                if s: toggle_tag_memory(s, val)
+                # 样式更新无法直接获取 row 元素，这里利用重新渲染更新样式
+        render_servers()
 
     async def save_current_group():
+        # 因为我们在 toggle 时已经实时修改了内存中的 tags，这里主要负责保存到文件和处理改名
         old_name = state['current_group']
         new_name = title_input.value.strip()
         if not new_name: return safe_notify("名称不能为空", "warning")
 
         groups = ADMIN_CONFIG.get('probe_custom_groups', [])
         
-        # 1. 维护分组名列表
-        if not old_name: # 新建
+        # 处理改名
+        if new_name != old_name:
             if new_name in groups: return safe_notify("名称已存在", "negative")
-            groups.append(new_name)
-        elif new_name != old_name: # 改名
-            if new_name in groups: return safe_notify("名称已存在", "negative")
-            idx = groups.index(old_name)
-            groups[idx] = new_name
+            if old_name: 
+                groups[groups.index(old_name)] = new_name
+                # 更新所有服务器的旧 tag 为新 tag
+                for s in SERVERS_CACHE:
+                    if 'tags' in s and old_name in s['tags']:
+                        s['tags'].remove(old_name)
+                        s['tags'].append(new_name)
+            else: 
+                groups.append(new_name)
             
-            # 顺便把所有机器上的旧 tag 换成新 tag
-            for s in SERVERS_CACHE:
-                if 'tags' in s and old_name in s['tags']:
-                    s['tags'].remove(old_name)
-                    s['tags'].append(new_name)
+            # 更新状态
+            state['current_group'] = new_name
 
-        # 2. 应用选中状态到 tags
-        # 遍历所有服务器，如果在 selected_urls 里 -> 加 tag，不在 -> 删 tag
-        for s in SERVERS_CACHE:
-            if 'tags' not in s: s['tags'] = []
-            
-            if s['url'] in state['selected_urls']:
-                if new_name not in s['tags']: s['tags'].append(new_name)
-            else:
-                # 只有当这是编辑现有分组，或者改名后的分组时，才需要移除
-                # 如果是新建分组，原本就没有这个 tag，这里 remove 会抛错吗？不会，list.remove 需要 try
-                if new_name in s['tags']: s['tags'].remove(new_name)
-                # 如果改名了，旧名字上面已经处理过了
+        # 对于“新建模式”，我们刚才在 toggle 时因为没有 current_group 可能没存进去
+        # 所以如果是新建，且刚才改了名，需要重新遍历一遍 checkboxes (针对当前页)
+        # 但由于我们实时逻辑依赖 current_group，新建时建议先保存名字，再选服务器，或者简单处理：
+        # 这里的实时逻辑在新建模式下(old_name is None)可能不会生效，因为 toggle_tag_memory 会 return。
+        # 修正：新建模式下，用户输入名字前选的勾选，需要在保存时批量打标。
+        
+        # 为简化逻辑，我们采取：新建时，输入名字后，点保存创建组。然后才能选服务器。
+        # 或者：遍历 checkboxes，把当前页选中的打上 new_name
+        for url, chk in state['checkboxes'].items():
+            if chk.value:
+                s = state['server_map'].get(url)
+                if s:
+                    if 'tags' not in s: s['tags'] = []
+                    if new_name not in s['tags']: s['tags'].append(new_name)
 
         ADMIN_CONFIG['probe_custom_groups'] = groups
         await save_admin_config()
         await save_servers()
         
         safe_notify(f"✅ 保存成功", "positive")
-        load_group_data(new_name)
+        load_group_data(new_name) # 刷新视图
         
-        # ✨ 修复报错：加上 await
-        try: await render_probe_page()
+        # 刷新主页面（如果正在显示该分组）
+        try: render_probe_page()
         except: pass
 
     async def delete_current_group():
@@ -4751,9 +4694,7 @@ def open_unified_group_manager(mode='manage'):
         
         safe_notify("🗑️ 已删除", "positive")
         load_group_data(None)
-        
-        # ✨ 修复报错：加上 await
-        try: await render_probe_page()
+        try: render_probe_page()
         except: pass
 
     # --- 初始化 ---
@@ -4763,6 +4704,7 @@ def open_unified_group_manager(mode='manage'):
     
     ui.timer(0.1, init, once=True)
     d.open()
+
 # ================= ✨✨✨ 详情弹窗逻辑✨✨✨ =================
 def open_server_detail_dialog(server_conf):
     """
@@ -5208,7 +5150,7 @@ async def load_subs_view():
                         ui.label(f"⚡ 在线节点: {valid_count}").classes(f'text-xs font-bold {color_cls}')
                     
                     with ui.row().classes('gap-2'):
-                        # ✨ 修改点：这里删除了 'tune' (配置处理策略) 按钮
+                        ui.button(icon='tune', on_click=lambda s=sub: open_process_editor(s)).props('flat dense color=purple').tooltip('配置处理策略')
                         ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue').tooltip('编辑订阅内容')
                         async def dl(i=idx): 
                             del SUBS_CACHE[i]
@@ -5232,9 +5174,195 @@ async def load_subs_view():
                         ui.button(icon='bolt', on_click=lambda u=surge_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+                        
+# ================= 订阅策略编辑器  =================
+class SubscriptionProcessEditor:
+    def __init__(self, sub_data):
+        self.sub_data = sub_data
+        if 'options' not in self.sub_data:
+            self.sub_data['options'] = {
+                'emoji': True, 'udp': True, 'sort': False, 'tfo': False,
+                'skip_cert': True, 'include_regex': '', 'exclude_regex': '',
+                'rename_pattern': '', 'rename_replacement': '', 'regions': []
+            }
+        self.opt = self.sub_data['options']
+        
+        self.raw_nodes = []
+        self.preview_nodes = []
+        self.collect_raw_nodes()
+        self.update_preview()
 
+    def collect_raw_nodes(self):
+        self.raw_nodes = []
+        sub_nodes_set = set(self.sub_data.get('nodes', []))
+        for srv in SERVERS_CACHE:
+            nodes = NODES_DATA.get(srv['url'], [])
+            for n in nodes:
+                key = f"{srv['url']}|{n['id']}"
+                if key in sub_nodes_set:
+                    self.raw_nodes.append({'name': n['remark'], 'original_name': n['remark'], 'server_name': srv['name']})
 
-# ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁 + 列表同步) =================
+    def update_preview(self):
+        import re
+        result = []
+        selected_regions = set(self.opt.get('regions', []))
+        
+        for node in self.raw_nodes:
+            current_node = node.copy()
+            name = current_node['name']
+            
+            node_region = detect_country_group(name)
+            if selected_regions and node_region not in selected_regions: continue
+            
+            inc_reg = self.opt.get('include_regex', '').strip()
+            if inc_reg:
+                try: 
+                    if not re.search(inc_reg, name, re.IGNORECASE): continue
+                except: pass
+            
+            exc_reg = self.opt.get('exclude_regex', '').strip()
+            if exc_reg:
+                try:
+                    if re.search(exc_reg, name, re.IGNORECASE): continue
+                except: pass
+
+            ren_pat = self.opt.get('rename_pattern', '').strip()
+            ren_rep = self.opt.get('rename_replacement', '').strip()
+            if ren_pat:
+                try:
+                    py_rep = ren_rep.replace('$', '\\')
+                    name = re.sub(ren_pat, py_rep, name)
+                    current_node['name'] = name
+                except: pass
+
+            if self.opt.get('emoji', True):
+                flag = node_region.split(' ')[0] 
+                if flag and flag not in name: current_node['name'] = f"{flag} {name}"
+            
+            result.append(current_node)
+        
+        if self.opt.get('sort', False): result.sort(key=lambda x: x['name'])
+        self.preview_nodes = result
+        if hasattr(self, 'preview_container'): self.render_preview_ui()
+
+    def ui(self, dlg):
+        with ui.card().classes('w-full max-w-6xl h-[90vh] flex flex-col p-0 overflow-hidden bg-white'):
+            with ui.row().classes('w-full justify-between items-center p-4 bg-white border-b shadow-sm z-20'):
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('tune', color='primary').classes('text-xl')
+                    ui.label(f"订阅策略: {self.sub_data.get('name', '未命名')}").classes('text-lg font-bold text-slate-800')
+                with ui.row().classes('gap-2'):
+                    ui.button('取消', on_click=dlg.close).props('flat color=grey')
+                    ui.button('保存配置', icon='save', on_click=lambda: [self.save(), dlg.close(), safe_notify('策略已更新', 'positive')]).classes('bg-slate-900 text-white shadow-lg')
+
+            with ui.row().classes('w-full flex-grow overflow-hidden gap-0'):
+                with ui.column().classes('w-[350px] flex-shrink-0 h-full border-r bg-gray-50 flex flex-col'):
+                    with ui.row().classes('w-full p-3 bg-white border-b justify-between items-center'):
+                        ui.label('效果预览').classes('text-xs font-bold text-gray-500')
+                        self.count_label = ui.badge(f'{len(self.preview_nodes)}', color='blue')
+                    with ui.scroll_area().classes('w-full flex-grow p-2'):
+                        self.preview_container = ui.column().classes('w-full gap-1')
+                        self.render_preview_ui()
+
+                with ui.column().classes('flex-grow h-full overflow-y-auto bg-white'):
+                    with ui.column().classes('w-full max-w-3xl mx-auto p-8 gap-6'):
+                        ui.label('基础处理').classes('text-sm font-bold text-gray-900')
+                        with ui.grid().classes('w-full grid-cols-1 sm:grid-cols-2 gap-4'):
+                            self._render_switch('自动添加国旗 (Emoji)', 'emoji', 'flag')
+                            self._render_switch('节点自动排序 (A-Z)', 'sort', 'sort_by_alpha')
+                            self._render_switch('强制开启 UDP 转发', 'udp', 'rocket_launch')
+                            self._render_switch('跳过证书验证', 'skip_cert', 'lock_open')
+                            self._render_switch('TCP Fast Open', 'tfo', 'speed')
+                        ui.separator()
+
+                        ui.label('正则重命名 (Rename)').classes('text-sm font-bold text-gray-900')
+                        with ui.card().classes('w-full p-4 border border-gray-200 shadow-none bg-blue-50'):
+                            with ui.row().classes('w-full items-center gap-2 mb-2'):
+                                ui.icon('edit_note').classes('text-blue-500')
+                                ui.label('支持正则匹配与替换 (可以使用 $1, $2 引用分组)').classes('text-xs text-blue-600')
+                            
+                            with ui.grid().classes('w-full grid-cols-1 md:grid-cols-2 gap-4'):
+                                with ui.input('匹配正则 (Pattern)', placeholder='例如: Oracle\|(.*)', value=self.opt.get('rename_pattern', '')) \
+                                    .props('outlined dense clearable bg-white').classes('w-full') as i_pat:
+                                    i_pat.on_value_change(lambda e: [self.opt.update({'rename_pattern': e.value}), self.update_preview()])
+                                
+                                with ui.input('替换为 (Replacement)', placeholder='例如: $1', value=self.opt.get('rename_replacement', '')) \
+                                    .props('outlined dense clearable bg-white').classes('w-full') as i_rep:
+                                    i_rep.on_value_change(lambda e: [self.opt.update({'rename_replacement': e.value}), self.update_preview()])
+                        ui.separator()
+
+                        ui.label('正则过滤').classes('text-sm font-bold text-gray-900')
+                        with ui.column().classes('w-full gap-3'):
+                            with ui.input('保留匹配 (Include)', placeholder='例如: 香港|SG', value=self.opt.get('include_regex', '')) \
+                                .props('outlined dense clearable').classes('w-full') as i1:
+                                i1.on_value_change(lambda e: [self.opt.update({'include_regex': e.value}), self.update_preview()])
+                            with ui.input('排除匹配 (Exclude)', placeholder='例如: 过期|剩余', value=self.opt.get('exclude_regex', '')) \
+                                .props('outlined dense clearable').classes('w-full') as i2:
+                                i2.on_value_change(lambda e: [self.opt.update({'exclude_regex': e.value}), self.update_preview()])
+                        ui.separator()
+
+                        with ui.row().classes('w-full justify-between items-end'):
+                            ui.label('区域过滤').classes('text-sm font-bold text-gray-900')
+                            with ui.row().classes('gap-1'):
+                                ui.button('全选', on_click=lambda: self.toggle_regions(True)).props('flat dense size=xs color=primary')
+                                ui.button('清空', on_click=lambda: self.toggle_regions(False)).props('flat dense size=xs color=grey')
+                        
+                        with ui.card().classes('w-full p-4 border border-gray-200 shadow-none bg-gray-50'):
+                            with ui.grid().classes('w-full grid-cols-2 md:grid-cols-3 gap-2'):
+                                all_regions = set()
+                                for node in self.raw_nodes: all_regions.add(detect_country_group(node['original_name']))
+                                self.region_checks = {}
+                                current_selected = set(self.opt.get('regions', []))
+                                for reg in sorted(list(all_regions)):
+                                    chk = ui.checkbox(reg, value=(reg in current_selected)).classes('text-xs')
+                                    chk.on_value_change(lambda e: [self.sync_regions_opt(), self.update_preview()])
+                                    self.region_checks[reg] = chk
+                        
+                        ui.element('div').classes('h-20')
+
+    def render_preview_ui(self):
+        self.preview_container.clear()
+        self.count_label.text = f'{len(self.preview_nodes)}'
+        with self.preview_container:
+            if not self.preview_nodes:
+                ui.label('无匹配节点').classes('text-xs text-center text-gray-400 mt-4')
+                return
+            for i, node in enumerate(self.preview_nodes):
+                if i > 100:
+                    ui.label(f'... 还有 {len(self.preview_nodes)-100} 个').classes('text-xs text-center text-gray-400')
+                    break
+                with ui.row().classes('w-full p-2 bg-white border border-gray-100 rounded items-center gap-2 hover:border-blue-300 transition'):
+                    ui.label(str(i+1)).classes('text-[10px] text-gray-300 w-4')
+                    ui.label(node['name']).classes('text-xs font-bold text-gray-700 truncate flex-grow')
+
+    def _render_switch(self, label, key, icon):
+        val = self.opt.get(key, False)
+        # ✨✨✨ 修复核心：正确捕获卡片对象并绑定点击事件 ✨✨✨
+        card = ui.card().classes('p-3 border border-gray-200 shadow-none flex-row items-center justify-between hover:bg-gray-50 transition cursor-pointer')
+        with card:
+            with ui.row().classes('items-center gap-3'):
+                ui.icon(icon).classes('text-lg text-blue-500')
+                ui.label(label).classes('text-sm font-medium text-gray-700 select-none')
+            sw = ui.switch(value=val).props('dense color=primary')
+            sw.on_value_change(lambda e: [self.opt.update({key: e.value}), self.update_preview()])
+            
+        # 点击卡片反转开关
+        card.on('click', lambda: sw.set_value(not sw.value))
+
+    def sync_regions_opt(self):
+        self.opt['regions'] = [r for r, chk in self.region_checks.items() if chk.value]
+
+    def toggle_regions(self, state):
+        for chk in self.region_checks.values(): chk.value = state
+        self.sync_regions_opt(); self.update_preview()
+
+    def save(self): asyncio.create_task(save_subs())
+
+# 打开策略编辑器的入口函数
+def open_process_editor(sub_data):
+    with ui.dialog() as d: SubscriptionProcessEditor(sub_data).ui(d); d.open()
+
+# ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     # 1. 基础校验
     if not server_data.get('name') or not server_data.get('url'):
@@ -5271,7 +5399,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
     # ================= ✨✨✨ UI 零闪烁操作区 ✨✨✨ =================
     # 获取新分组名称
     new_group = server_data.get('group', '默认分组')
-    # 计算新分组对应的区域
+    # 计算新分组对应的区域（如果是默认分组，可能被归类到区域里）
     if new_group in ['默认分组', '自动注册', '未分组', '自动导入']:
         try: new_group = detect_country_group(server_data.get('name', ''), server_data)
         except: pass
@@ -5283,10 +5411,13 @@ async def save_server_config(server_data, is_add=True, idx=None):
         if is_add:
             # === 新增 ===
             if new_group in SIDEBAR_UI_REFS['groups']:
+                # 目标分组已在屏幕上，直接追加进去
                 with SIDEBAR_UI_REFS['groups'][new_group]:
                     render_single_sidebar_row(server_data)
+                # 自动展开该组
                 EXPANDED_GROUPS.add(new_group)
             else:
+                # 目标分组是全新的，屏幕上没有，必须刷新
                 need_full_refresh = True
                 
         elif old_group != new_group:
@@ -5295,10 +5426,15 @@ async def save_server_config(server_data, is_add=True, idx=None):
             target_col = SIDEBAR_UI_REFS['groups'].get(new_group)
             
             if row_el and target_col:
+                # 目标存在，直接移动！0闪烁！
                 row_el.move(target_col)
                 EXPANDED_GROUPS.add(new_group)
             else:
+                # 目标分组UI不存在，或者找不到行UI，兜底刷新
                 need_full_refresh = True
+        
+        # === 修改信息 (分组没变) ===
+        # 不需要做任何事！bind_text_from 会自动更新名字
         
     except Exception as e:
         logger.error(f"UI Move Error: {e}")
@@ -5308,23 +5444,15 @@ async def save_server_config(server_data, is_add=True, idx=None):
         try: render_sidebar_content.refresh()
         except: pass
 
-    # ================= ✨✨✨ 右侧主视图同步逻辑 (修正版) ✨✨✨ =================
+    # 5. 右侧主视图逻辑
     current_scope = CURRENT_VIEW_STATE.get('scope')
     current_data = CURRENT_VIEW_STATE.get('data')
-    
-    # 情况1: 如果当前正在查看这台服务器的详情页
     if current_scope == 'SINGLE' and (current_data == server_data or (is_add and server_data == SERVERS_CACHE[-1])):
         try: await refresh_content('SINGLE', server_data, force_refresh=True)
         except: pass
-        
-    # 情况2: 如果当前在列表视图 (全部/分组/区域)，立即静默重绘列表
-    elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-        # ⚠️ 关键修改：强制置空 scope 以绕过 refresh_content 内部的防抖判断
-        # 这样可以触发 UI 重绘 (增/删行)，但 force_refresh=False 不会触发 API 重新请求
-        CURRENT_VIEW_STATE['scope'] = None 
-        try: await refresh_content(current_scope, current_data, force_refresh=False)
+    elif current_scope == 'ALL':
+        try: await refresh_content('ALL', force_refresh=False)
         except: pass
-        
     elif current_scope == 'DASHBOARD':
         try: await refresh_dashboard_ui()
         except: pass
@@ -5341,7 +5469,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (修复版：删除同步优化) =================
+# ================= 小巧卡片式弹窗 (修复版：分离基础信息保存) =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -5377,7 +5505,7 @@ async def open_server_dialog(idx=None):
                 t_ssh = ui.tab('SSH / 探针', icon='terminal')
                 t_xui = ui.tab('X-UI面板', icon='settings')
 
-        # ================= 独立的基础信息保存逻辑 =================
+        # ================= ✨✨✨ 独立的基础信息保存逻辑 (修复版) ✨✨✨ =================
         async def save_basic_info_only():
             if not is_edit: 
                 safe_notify("新增服务器请使用下方的保存按钮", "warning")
@@ -5386,23 +5514,24 @@ async def open_server_dialog(idx=None):
             new_name = name_input.value.strip()
             new_group = group_input.value
             
-            if not new_name: new_name = await generate_smart_name(data)
+            # 如果名称为空，尝试自动生成
+            if not new_name:
+                new_name = await generate_smart_name(data)
             
+            # 更新内存数据
             SERVERS_CACHE[idx]['name'] = new_name
             SERVERS_CACHE[idx]['group'] = new_group
             
+            # 仅保存文件
             await save_servers()
+            
+            # 刷新侧边栏
             render_sidebar_content.refresh()
             
-            # ✨ 基础信息修改同步刷新右侧
-            current_scope = CURRENT_VIEW_STATE.get('scope')
-            if current_scope == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
+            # ✨✨✨ 修复：智能判断是否需要刷新主视图 ✨✨✨
+            # 只有当用户正好在看这台机器详情时，才刷新右侧区域
+            if CURRENT_VIEW_STATE.get('scope') == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
                 try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
-                except: pass
-            elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-                # ⚠️ 关键修改：强制重绘
-                CURRENT_VIEW_STATE['scope'] = None
-                try: await refresh_content(current_scope, CURRENT_VIEW_STATE.get('data'), force_refresh=False)
                 except: pass
             
             safe_notify("✅ 基础信息已更新", "positive")
@@ -5415,12 +5544,17 @@ async def open_server_dialog(idx=None):
             with ui.row().classes('w-full items-center gap-2 no-wrap'):
                 group_input = ui.select(options=get_all_groups(), value=data.get('group','默认分组'), new_value_mode='add-unique', label='分组').classes('flex-grow').props('outlined dense')
                 
+                # ✨ 只有在编辑模式下，才显示这个独立的保存按钮
                 if is_edit:
                     ui.button(icon='save', on_click=save_basic_info_only) \
                         .props('flat dense round color=primary') \
                         .tooltip('仅保存名称和分组 (不重新部署)')
 
+        # ======================================================================
+        
         inputs = {}
+
+        # ==================== 样式定义 ====================
         btn_keycap_blue = 'bg-white rounded-lg font-bold tracking-wide border-t border-x border-gray-100 border-b-4 border-blue-100 text-blue-600 px-4 py-1 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-blue-50'
         btn_keycap_delete = 'bg-white rounded-xl font-bold tracking-wide w-full border-t border-x border-gray-100 border-b-4 border-red-100 text-red-500 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1 hover:bg-red-50'
         btn_keycap_red_confirm = 'rounded-lg font-bold tracking-wide text-white border-b-4 border-red-900 transition-all duration-100 active:border-b-0 active:border-t-4 active:translate-y-1'
@@ -5432,6 +5566,7 @@ async def open_server_dialog(idx=None):
             new_server_data = data.copy()
             new_server_data['group'] = final_group
 
+            # --- SSH 保存逻辑 ---
             if panel_type == 'ssh':
                 if not inputs.get('ssh_host'): return
                 s_host = inputs['ssh_host'].value.strip()
@@ -5448,6 +5583,7 @@ async def open_server_dialog(idx=None):
                 })
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
+            # --- X-UI 保存逻辑 ---
             elif panel_type == 'xui':
                 if not inputs.get('xui_url'): return
                 x_url_raw = inputs['xui_url'].value.strip()
@@ -5455,9 +5591,13 @@ async def open_server_dialog(idx=None):
                 x_pass = inputs['xui_pass'].value.strip()
                 
                 if not (x_url_raw and x_user and x_pass): 
-                    safe_notify("必填项不能为空", "negative"); return
+                    safe_notify("必填项不能为空", "negative")
+                    return
 
+                # 1. 补全协议
                 if '://' not in x_url_raw: x_url_raw = f"http://{x_url_raw}"
+                
+                # 2. 补全默认端口
                 try:
                     parts = x_url_raw.split('://')
                     body = parts[1]
@@ -5468,7 +5608,9 @@ async def open_server_dialog(idx=None):
 
                 probe_val = inputs['probe_chk'].value
                 new_server_data.update({
-                    'url': x_url_raw, 'user': x_user, 'pass': x_pass,
+                    'url': x_url_raw, 
+                    'user': x_user, 
+                    'pass': x_pass,
                     'prefix': inputs['xui_prefix'].value.strip(),
                     'probe_installed': probe_val
                 })
@@ -5481,11 +5623,13 @@ async def open_server_dialog(idx=None):
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
 
+            # 智能名称
             if not final_name:
                 safe_notify("正在生成名称...", "ongoing")
                 final_name = await generate_smart_name(new_server_data)
             new_server_data['name'] = final_name
 
+            # 执行保存
             success = await save_server_config(new_server_data, is_add=not is_edit, idx=idx)
             
             if success:
@@ -5593,7 +5737,7 @@ async def open_server_dialog(idx=None):
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 render_xui_panel()
 
-        # ================= 5. 全局删除逻辑 (已修复：删除后立即重绘右侧列表) =================
+        # ================= 5. 全局删除逻辑 =================
         if is_edit:
             with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
                 async def open_delete_confirm():
@@ -5658,16 +5802,12 @@ async def open_server_dialog(idx=None):
                             current_data = CURRENT_VIEW_STATE.get('data')
 
                             if is_full_delete:
-                                # 如果正在查看当前单服务器详情
                                 if current_scope == 'SINGLE' and current_data == target_srv:
                                     content_container.clear()
                                     with content_container:
                                         ui.label('该服务器已删除').classes('text-gray-400 text-lg w-full text-center mt-20')
-                                # ✨✨✨ 关键修改：如果正在查看列表，立即静默刷新 ✨✨✨
                                 elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-                                    # 强制打破防抖，触发 refresh_content 重绘
-                                    CURRENT_VIEW_STATE['scope'] = None
-                                    await refresh_content(current_scope, current_data, force_refresh=False)
+                                    await refresh_content(current_scope, current_data)
                             else:
                                 if current_scope == 'SINGLE' and current_data == target_srv:
                                     await refresh_content('SINGLE', target_srv)
@@ -6002,9 +6142,9 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
 
     global CURRENT_VIEW_STATE
     
-    # 防抖判断 -> 修改为：如果是重复点击，自动转为“强制刷新”模式
+    # 防抖判断
     if not force_refresh and CURRENT_VIEW_STATE.get('scope') == scope and CURRENT_VIEW_STATE.get('data') == data:
-        force_refresh = True # <--- 关键修改：不再 return，而是标记为强制刷新
+        return 
 
     import time
     current_token = time.time()
@@ -6099,12 +6239,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
             try:
                 render_sidebar_content.refresh()
             except: 
-                pass 
-            
-            # 👇👇👇 [新增] 如果是强制刷新，且当前不是单机详情页，则静默重绘主列表 👇👇👇
-            if force_refresh and scope != 'SINGLE':
-                await _render_ui()
-            # 👆👆👆 [新增结束]
+                pass # 防止极端情况下 UI 上下文丢失
             
             if scope != 'SINGLE': safe_notify("数据已同步", "positive")
         
@@ -6540,7 +6675,7 @@ def show_custom_node_info(node):
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
 
-# ================= 聚合视图渲染 (修复版：移除定时器，防止页面卡死) =================
+# ================= 聚合视图渲染 (优化版：增加分页，支持 1000+ 服务器流畅显示) =================
 async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
     # 1. 触发后台数据更新 (限制并发，分批处理)
     if force_refresh:
@@ -6548,7 +6683,8 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         for i in range(0, len(server_list), chunk_size):
             chunk = server_list[i:i + chunk_size]
             asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in chunk], return_exceptions=True))
-            
+            await asyncio.sleep(0.5)
+
     list_container = ui.column().classes('w-full gap-3 p-1')
     
     # 2. 定义列宽
@@ -6563,11 +6699,11 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
         current_css = cols_ping if show_ping else cols_no_ping
 
     # ================= ✨✨✨ 分页逻辑核心 ✨✨✨ =================
-    PAGE_SIZE = 30  # 每页显示 30 台
+    PAGE_SIZE = 30  # 每页显示 30 台，保证浏览器不卡顿
     total_items = len(server_list)
     total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
     
-    # 记录当前页码
+    # 记录当前页码 (利用函数属性存储)
     if not hasattr(render_aggregated_view, 'current_page'):
         render_aggregated_view.current_page = 1
     
@@ -6604,21 +6740,24 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
             end_idx = start_idx + PAGE_SIZE
             current_page_data = server_list[start_idx:end_idx]
 
-            # === D. 遍历渲染 (修复：移除内部定时器和 refreshable) ===
+            # === D. 遍历渲染 (只渲染当前页) ===
             for srv in current_page_data:
-                panel_n = NODES_DATA.get(srv['url'], []) or []
-                custom_n = srv.get('custom_nodes', []) or []
-                # 标记自定义节点
-                for cn in custom_n: cn['_is_custom'] = True
-                all_nodes = panel_n + custom_n
-                
-                if not all_nodes:
-                    draw_row(srv, None, current_css, use_special_mode, is_first=True)
-                    continue
+                @ui.refreshable
+                def render_server_rows(server_data):
+                    panel_n = NODES_DATA.get(server_data['url'], []) or []
+                    custom_n = server_data.get('custom_nodes', []) or []
+                    for cn in custom_n: cn['_is_custom'] = True
+                    all_nodes = panel_n + custom_n
+                    
+                    if not all_nodes:
+                        draw_row(server_data, None, current_css, use_special_mode, is_first=True)
+                        return
 
-                for index, node in enumerate(all_nodes):
-                    # 直接绘制行，不再包裹定时器
-                    draw_row(srv, node, current_css, use_special_mode, is_first=(index==0))
+                    for index, node in enumerate(all_nodes):
+                        draw_row(server_data, node, current_css, use_special_mode, is_first=(index==0))
+
+                render_server_rows(srv)
+
             
             # === E. 底部翻页器 ===
             if total_pages > 1:
@@ -9352,64 +9491,32 @@ async def render_desktop_status_page():
         colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
         refs['uptime'].set_content(colored_up)
 
-    # 2. 自动更新循环 (混合策略：探针实时，API 节能)
+    # 2. 自动更新循环
     async def card_autoupdate_loop(url):
-        # 获取服务器配置
-        current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
-        if not current_server: return
-
-        # 判断是否安装了探针
-        is_probe = current_server.get('probe_installed', False)
-
-        # --- 阶段 1: 首次启动延迟 ---
-        if is_probe:
-            # 探针机器：只随机延迟 0.5~3秒，让它尽快显示
-            await asyncio.sleep(random.uniform(0.5, 3.0))
-        else:
-            # X-UI API机器：随机延迟 4~60秒，彻底错峰
-            await asyncio.sleep(random.uniform(4, 60.0))
-        
         while True:
-            # --- 基础检查 ---
+            await asyncio.sleep(random.uniform(2.0, 3.0))
             if url not in RENDERED_CARDS: break 
             if url not in [s['url'] for s in SERVERS_CACHE]: break
             
             item = RENDERED_CARDS.get(url)
             if not item: break 
+            if not item['card'].visible: continue 
             
-            # 如果浏览器标签页切到了后台，停止刷新以省流
-            if not item['card'].visible: 
-                await asyncio.sleep(5.0) 
-                continue 
-            
-            # --- 执行获取数据 ---
-            # 重新获取最新的配置引用
             current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
-            
-            if current_server:
-                res = None
-                try: 
-                    # 获取状态
-                    # 这里的 timeout 对于 API 请求很重要，对探针读取则是瞬时的
-                    res = await asyncio.wait_for(get_server_status(current_server), timeout=5.0)
-                except: res = None
-                
-                if res:
-                    raw_cache = PROBE_DATA_CACHE.get(url, {})
-                    static = raw_cache.get('static', {})
-                    update_card_ui(item['refs'], res, static)
-                    
-                    is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
-                    if is_online: item['card'].classes(remove='offline-card')
-                    else: item['card'].classes(add='offline-card')
+            if not current_server: continue
 
-            # --- 阶段 2: 下一轮刷新的等待时间 (核心差异) ---
-            if is_probe:
-                # 探针：保持 2~3 秒的实时刷新 (读内存不费资源)
-                await asyncio.sleep(random.uniform(2.0, 3.0))
-            else:
-                # X-UI API：休眠 60 秒 (55~65随机) (省流节能)
-                await asyncio.sleep(random.uniform(55.0, 65.0))
+            res = None
+            try: res = await asyncio.wait_for(get_server_status(current_server), timeout=2.0)
+            except: res = None
+            
+            if res:
+                raw_cache = PROBE_DATA_CACHE.get(url, {})
+                static = raw_cache.get('static', {})
+                update_card_ui(item['refs'], res, static)
+                
+                is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
+                if is_online: item['card'].classes(remove='offline-card')
+                else: item['card'].classes(add='offline-card')
 
     # 3. 创建卡片 (✨✨✨ 创建时立即回显 ✨✨✨)
     def create_server_card(s):
