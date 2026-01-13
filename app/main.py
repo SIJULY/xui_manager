@@ -8331,18 +8331,35 @@ async def job_monitor_status():
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
 
-# ================= 定义流量同步任务 =================
+# ================= 定义流量同步任务 (极致隐身版：2-3分钟间隔) =================
 async def job_sync_all_traffic():
-    logger.info("🕒 [定时任务] 开始全量同步流量...")
-    # ✨✨✨ [修改点]：显式传入 sync_name=False，确保定时任务只拉流量，不改名字 ✨✨✨
-    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=False) for s in SERVERS_CACHE]
+    logger.info("🕒 [定时任务] 开始每日流量同步 (极致隐身模式)...")
     
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await save_nodes_cache()
-        await refresh_dashboard_ui()
+    total = len(SERVERS_CACHE)
+    
+    # 使用 for 循环遍历每一台服务器
+    for i, s in enumerate(SERVERS_CACHE):
+        try:
+            # 1. 串行执行：等待当前这台完全处理完
+            await fetch_inbounds_safe(s, force_refresh=True, sync_name=False)
+            
+            # 2. 进度日志 (每完成1台就打印一次，因为间隔很久)
+            logger.info(f"⏳ [{i+1}/{total}] {s.get('name')} 同步完成")
+
+            # 3. 🛑 [核心修改]：强制休息 2~3 分钟 (120~180秒)
+            if i < total - 1:
+                wait_time = random.uniform(120, 180)
+                logger.info(f"💤 休息 {int(wait_time)} 秒后继续...")
+                await asyncio.sleep(wait_time)
+                
+        except Exception as e:
+            logger.warning(f"⚠️ 同步异常: {s.get('name')} - {e}")
+
+    # 全部跑完后，统一保存一次数据到硬盘
+    await save_nodes_cache()
+    await refresh_dashboard_ui()
         
-    logger.info("✅ [定时任务] 流量同步完成 (已落盘，跳过名称同步)")
+    logger.info("✅ [定时任务] 每日流量同步完成")
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
@@ -8414,7 +8431,7 @@ async def startup_sequence():
 
     # ✨ 添加定时任务
     # 1. 流量同步 (3小时一次)
-    scheduler.add_job(job_sync_all_traffic, 'interval', hours=3, id='traffic_sync', replace_existing=True, max_instances=1)
+    scheduler.add_job(job_sync_all_traffic, 'interval', hours=24, id='traffic_sync', replace_existing=True, max_instances=1)
     
     # 2. 服务器状态监控与报警 (120秒一次) ✨✨✨
     scheduler.add_job(job_monitor_status, 'interval', seconds=120, id='status_monitor', replace_existing=True, max_instances=1)
