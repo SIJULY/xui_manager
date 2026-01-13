@@ -8331,35 +8331,102 @@ async def job_monitor_status():
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
 
-# ================= 定义流量同步任务 (极致隐身版：2-3分钟间隔) =================
+# ================= 定义流量同步任务 (AI 动态自适应 + 断点续传版) =================
 async def job_sync_all_traffic():
-    logger.info("🕒 [定时任务] 开始每日流量同步 (极致隐身模式)...")
+    logger.info("🕒 [智能同步] 检查同步任务进度...")
     
-    total = len(SERVERS_CACHE)
+    # 目标周期：23.5 小时
+    TARGET_DURATION = 84600 
     
-    # 使用 for 循环遍历每一台服务器
-    for i, s in enumerate(SERVERS_CACHE):
-        try:
-            # 1. 串行执行：等待当前这台完全处理完
-            await fetch_inbounds_safe(s, force_refresh=True, sync_name=False)
-            
-            # 2. 进度日志 (每完成1台就打印一次，因为间隔很久)
-            logger.info(f"⏳ [{i+1}/{total}] {s.get('name')} 同步完成")
+    # 1. 读取持久化状态
+    # last_sync_start: 本轮任务的开始时间戳
+    # last_sync_index: 下一台需要处理的索引 (0开始)
+    start_ts = ADMIN_CONFIG.get('sync_job_start', 0)
+    current_idx = ADMIN_CONFIG.get('sync_job_index', 0)
+    now = time.time()
 
-            # 3. 🛑 [核心修改]：强制休息 2~3 分钟 (120~180秒)
-            if i < total - 1:
-                wait_time = random.uniform(120, 180)
-                logger.info(f"💤 休息 {int(wait_time)} 秒后继续...")
-                await asyncio.sleep(wait_time)
+    # 2. 判断是否需要开启新的一轮
+    # 如果记录的时间超过24小时，或者从未运行过，或者索引越界，则重置
+    if (now - start_ts > 86400) or start_ts == 0 or current_idx >= len(SERVERS_CACHE):
+        logger.info("🔄 [智能同步] 启动新一轮 24h 周期任务")
+        start_ts = now
+        current_idx = 0
+        # 初始化保存
+        ADMIN_CONFIG['sync_job_start'] = start_ts
+        ADMIN_CONFIG['sync_job_index'] = 0
+        await save_admin_config()
+    else:
+        # 恢复旧任务
+        logger.info(f"♻️ [智能同步] 发现中断的任务，恢复进度: 第 {current_idx+1} 台 (已运行 {(now - start_ts)/3600:.1f} 小时)")
+
+    # 3. 进入循环
+    # 注意：这里不再用 for 0..N，而是直接从 current_idx 开始
+    i = current_idx
+    
+    while True:
+        # 实时获取列表长度
+        current_total = len(SERVERS_CACHE)
+        
+        # 结束条件
+        if i >= current_total:
+            break
+            
+        try:
+            server = SERVERS_CACHE[i]
+        except IndexError:
+            break
+
+        loop_step_start = time.time()
+        
+        try:
+            # 4. 执行同步
+            await fetch_inbounds_safe(server, force_refresh=True, sync_name=False)
+            
+            # 计算进度
+            progress = (i + 1) / current_total
+            logger.info(f"⏳ [{i+1}/{current_total}] {server.get('name')} 同步完成 ({progress:.1%})")
+
+            # 5. 【关键】保存进度到硬盘 (断点续传核心)
+            # 标记下一台的索引
+            ADMIN_CONFIG['sync_job_index'] = i + 1
+            await save_admin_config()
+
+            # 6. 动态计算休眠
+            remaining_items = current_total - (i + 1)
+            
+            if remaining_items > 0:
+                # 使用持久化的 start_ts 计算总流逝时间
+                elapsed_time = time.time() - start_ts
+                time_left = TARGET_DURATION - elapsed_time
+                
+                if time_left <= 0:
+                    sleep_seconds = 1
+                    logger.warning(f"⚡ 进度落后，开启极速模式 (剩余 {remaining_items} 台)")
+                else:
+                    base_interval = time_left / remaining_items
+                    sleep_seconds = base_interval * random.uniform(0.9, 1.1)
+                    
+                    cost_time = time.time() - loop_step_start
+                    sleep_seconds = max(1, sleep_seconds - cost_time)
+
+                sleep_display = f"{sleep_seconds/60:.1f}分" if sleep_seconds > 60 else f"{int(sleep_seconds)}秒"
+                logger.info(f"💤 动态休眠: {sleep_display} (剩余窗口 {int(time_left/3600)}小时)...")
+                
+                await asyncio.sleep(sleep_seconds)
                 
         except Exception as e:
-            logger.warning(f"⚠️ 同步异常: {s.get('name')} - {e}")
+            logger.warning(f"⚠️ 同步异常: {server.get('name')} - {e}")
+            await asyncio.sleep(60)
 
-    # 全部跑完后，统一保存一次数据到硬盘
+        i += 1
+
+    # 循环结束（跑完了所有机器）
+    # 此时不要重置 start_ts，让它保持到明天超时自动重置
+    # 但可以将 index 设为超限值或 0 均可，这里保持原样等待下一次调度重置
     await save_nodes_cache()
     await refresh_dashboard_ui()
-        
-    logger.info("✅ [定时任务] 每日流量同步完成")
+    
+    logger.info("✅ [智能同步] 本轮任务全部完成，系统待机中...")
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
