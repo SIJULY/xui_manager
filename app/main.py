@@ -9429,7 +9429,7 @@ async def render_desktop_status_page():
             if group_name == 'ALL' or (group_name in s.get('tags', [])):
                 filtered_servers.append(s)
 
-        PAGE_SIZE = 32
+        PAGE_SIZE = 60
         total_items = len(filtered_servers)
         total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
         if page_state['page'] > total_pages: page_state['page'] = 1
