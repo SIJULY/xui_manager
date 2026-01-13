@@ -1694,7 +1694,7 @@ def get_echarts_region_name(name_raw):
         if key in name: return MATCH_MAP[key]
     return None
 
-# ================= 全局地图数据准备 (修复：包含详细服务器列表) =================
+# ================= 全局地图数据准备 (修复版：强制关联探针实时状态) =================
 def prepare_map_data():
     try:
         city_points_map = {} 
@@ -1703,7 +1703,7 @@ def prepare_map_data():
         region_stats = {} 
         active_regions_for_highlight = set()
 
-        # 1. 国旗 -> 标准地图名映射 (ECharts World Map 英文名)
+        # 1. 国旗 -> 标准地图名映射 (保持不变)
         FLAG_TO_MAP_NAME = {
             '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
             '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
@@ -1720,7 +1720,7 @@ def prepare_map_data():
             '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
         }
 
-        # 2. 地图名别名库 (用于高亮区域)
+        # 2. 地图名别名库 (保持不变)
         MAP_NAME_ALIASES = {
             'United States': ['United States of America', 'USA'],
             'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
@@ -1730,7 +1730,7 @@ def prepare_map_data():
             'Vietnam': ['Viet Nam']
         }
 
-        # 3. 中心点坐标库 (用于点击聚焦)
+        # 3. 中心点坐标库 (保持不变)
         COUNTRY_CENTROIDS = {
             'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
             'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
@@ -1739,7 +1739,6 @@ def prepare_map_data():
             'South Korea': [127.76, 35.90], 'Singapore': [103.81, 1.35], 'Turkey': [35.24, 38.96]
         }
         
-        # 特殊城市坐标修正
         CITY_COORDS_FIX = { 
             'Dubai': (25.20, 55.27), 'Frankfurt': (50.11, 8.68), 'Amsterdam': (52.36, 4.90), 
             'San Jose': (37.33, -121.88), 'Phoenix': (33.44, -112.07), 'Tokyo': (35.68, 139.76),
@@ -1749,48 +1748,42 @@ def prepare_map_data():
         from collections import Counter
         country_counter = Counter()
         snapshot = list(SERVERS_CACHE)
+        import time 
+        now_ts = time.time()
         
-        # 临时存储结构: { 'United States': { flag, cn, total, online, servers: [] } }
+        # 临时存储结构
         temp_stats_storage = {}
 
         for s in snapshot:
             s_name = s.get('name', '')
             
             # --- A. 确定国旗与标准名 ---
-            # 优先从名字里提取国旗
             flag_icon = "📍"
             map_name_standard = None
             
-            # 1. 尝试直接从名字匹配国旗
             for f, m_name in FLAG_TO_MAP_NAME.items():
                 if f in s_name:
                     flag_icon = f
                     map_name_standard = m_name
                     break
             
-            # 2. 如果没找到，尝试通过分组或检测函数
             if not map_name_standard:
                 try:
-                    # 这是一个智能检测函数，会返回如 "🇺🇸 美国"
                     group_str = detect_country_group(s_name, s)
                     if group_str:
                         flag_part = group_str.split(' ')[0]
-                        # 再次查表
                         if flag_part in FLAG_TO_MAP_NAME:
                             flag_icon = flag_part
                             map_name_standard = FLAG_TO_MAP_NAME[flag_part]
                 except: pass
 
-            # 3. 统计饼图数据
             try: country_counter[detect_country_group(s_name, s)] += 1
             except: pass
 
-            # --- B. 确定坐标 (用于飞线) ---
+            # --- B. 确定坐标 ---
             lat, lon = None, None
-            # 优先用修正库
             for city_key, (c_lat, c_lon) in CITY_COORDS_FIX.items():
                 if city_key.lower() in s_name.lower(): lat, lon = c_lat, c_lon; break
-            # 其次用保存的坐标
             if not lat:
                 if 'lat' in s and 'lon' in s: lat, lon = s['lat'], s['lon']
                 else: 
@@ -1799,21 +1792,18 @@ def prepare_map_data():
             
             # --- C. 生成数据点 ---
             if lat and lon and map_name_standard:
-                # 城市点 (圆点)
                 coord_key = f"{lat},{lon}"
                 if coord_key not in city_points_map: 
                     city_points_map[coord_key] = {'name': s_name, 'value': [lon, lat], 'country_key': map_name_standard}
                 
-                # 国旗点 (显示在地图上的Emoji)
                 if flag_icon != "📍" and flag_icon not in flag_points_map:
                     flag_points_map[flag_icon] = {'name': flag_icon, 'value': [lon, lat], 'country_key': map_name_standard}
 
-            # --- D. 聚合统计数据 (关键修改：填充 servers 列表) ---
+            # --- D. 聚合统计数据 (🛑 核心修复位置) ---
             if map_name_standard:
                 unique_deployed_countries.add(map_name_standard)
                 
                 if map_name_standard not in temp_stats_storage:
-                    # 获取中文名用于显示 (例如 "美国")
                     cn_name = map_name_standard
                     try: 
                         full_g = detect_country_group(s_name, s)
@@ -1821,38 +1811,43 @@ def prepare_map_data():
                     except: pass
 
                     temp_stats_storage[map_name_standard] = {
-                        'flag': flag_icon, 
-                        'cn': cn_name,
-                        'total': 0, 'online': 0, 
-                        'servers': [] # ✨✨✨ 初始化列表 ✨✨✨
+                        'flag': flag_icon, 'cn': cn_name,
+                        'total': 0, 'online': 0, 'servers': []
                     }
                 
                 rs = temp_stats_storage[map_name_standard]
                 rs['total'] += 1
                 
-                # 判断在线状态
-                is_on = s.get('_status') == 'online' or (s.get('cpu_usage') is not None)
+                # 🛑 [修复]：优先检查探针缓存是否在线
+                is_on = False
+                
+                # 1. 检查探针缓存
+                probe_cache = PROBE_DATA_CACHE.get(s['url'])
+                if probe_cache:
+                    # 如果探针数据在 20秒内更新过，视为在线
+                    if now_ts - probe_cache.get('last_updated', 0) < 20:
+                        is_on = True
+                
+                # 2. 如果探针不在线，再检查旧的标记 (兼容其他节点)
+                if not is_on and s.get('_status') == 'online':
+                    is_on = True
+
                 if is_on: rs['online'] += 1
                 
-                # ✨✨✨ 将服务器信息加入列表 ✨✨✨
                 rs['servers'].append({
                     'name': s_name,
                     'status': 'online' if is_on else 'offline'
                 })
 
-                # 更新中心点 (如果有坐标的话)
                 if map_name_standard not in COUNTRY_CENTROIDS and lat and lon:
                     COUNTRY_CENTROIDS[map_name_standard] = [lon, lat]
 
         # --- E. 数据后处理 ---
         for std_name, stats in temp_stats_storage.items():
-            # 1. 对服务器列表进行排序：在线的在前，离线的在后
             stats['servers'].sort(key=lambda x: 0 if x['status'] == 'online' else 1)
-            
             region_stats[std_name] = stats
             active_regions_for_highlight.add(std_name)
             
-            # 添加别名索引 (让 UK 和 United Kingdom 都能查到数据)
             if std_name in MAP_NAME_ALIASES:
                 for alias in MAP_NAME_ALIASES[std_name]:
                     region_stats[alias] = stats
@@ -1874,7 +1869,7 @@ def prepare_map_data():
             json.dumps({'cities': city_list, 'flags': flag_list, 'regions': list(active_regions_for_highlight)}, ensure_ascii=False), 
             pie_data, 
             len(unique_deployed_countries), 
-            json.dumps(region_stats, ensure_ascii=False), # 这里现在包含了 servers 列表
+            json.dumps(region_stats, ensure_ascii=False),
             json.dumps(COUNTRY_CENTROIDS, ensure_ascii=False)
         )
     except Exception as e:
@@ -2896,96 +2891,22 @@ async def batch_install_all_probes():
     
     safe_notify("✅ 所有探针安装/更新任务已完成", "positive")
     
-# =================  获取服务器状态 (混合模式：探针优先 + API 兜底) =================
+# =================  获取服务器状态 (纯探针模式：拒绝一切 API 登录) =================
 async def get_server_status(server_conf):
     raw_url = server_conf['url']
     
-    # --- 策略 A: 探针模式 (保持不变) ---
+    # 只有当服务器安装了 Python 探针脚本，才从缓存读取数据
     if server_conf.get('probe_installed', False) or raw_url in PROBE_DATA_CACHE:
         cache = PROBE_DATA_CACHE.get(raw_url)
         if cache:
+            # 检查数据新鲜度 (15秒超时)
             if time.time() - cache.get('last_updated', 0) < 15:
                 return cache 
             else:
                 return {'status': 'offline', 'msg': '探针离线 (超时)'}
-        
-    # --- 策略 B: 纯 X-UI 面板模式 (修复版) ---
-    try:
-        mgr = get_manager(server_conf)
-        panel_stats = await run.io_bound(mgr.get_server_status)
-        
-        if panel_stats:
-            # ✨✨✨ [调试核心] 打印原始数据到日志，排查 Oracle 内存问题 ✨✨✨
-            if panel_stats.get('cpu', 0) == 0 or float(panel_stats.get('mem', {}).get('current', 0)) > float(panel_stats.get('mem', {}).get('total', 1)):
-                 print(f"⚠️ [异常数据调试] {server_conf['name']} 返回: {panel_stats.get('mem')}", flush=True)
-
-            # --- 1. 内存处理 (暴力修正版) ---
-            mem_raw = panel_stats.get('mem')
-            mem_usage = 0
-            mem_total = 0
-            
-            if isinstance(mem_raw, dict):
-                mem_total = float(mem_raw.get('total', 1))
-                mem_curr = float(mem_raw.get('current', 0))
-                
-                # 计算百分比
-                if mem_total > 0:
-                    mem_usage = (mem_curr / mem_total) * 100
-                
-                # ✨✨✨ 暴力纠错：如果内存 > 100%，强制压回 99% ✨✨✨
-                # 这样界面显示的 "38GB" 就会自动变成 "0.9GB" (跟随总量)
-                if mem_usage > 100:
-                    # 尝试自动除以 1024 (应对 KB/Byte 混用)
-                    if mem_usage > 10000: # 差距过大，可能是 Bytes vs KB (1024倍)
-                         mem_curr /= 1024
-                         mem_usage /= 1024
-                    
-                    # 如果除完还是很离谱，直接暴力修正显示
-                    if mem_usage > 100:
-                        mem_usage = 95.0 # 假定 95%
-            else:
-                mem_usage = float(mem_raw or 0) * 100
-            
-            # --- 2. 硬盘处理 ---
-            disk_raw = panel_stats.get('disk')
-            disk_usage = 0
-            disk_total = 0
-            if isinstance(disk_raw, dict):
-                 disk_total = disk_raw.get('total', 0)
-                 if disk_total > 0:
-                     disk_usage = (disk_raw.get('current', 0) / disk_total) * 100
-
-            # --- 3. 其他数据补全 ---
-            net_io = panel_stats.get('netIO', {})       
-            net_traffic = panel_stats.get('netTraffic', {}) 
-            loads = panel_stats.get('loads', [0, 0, 0])     
-            load_1 = loads[0] if isinstance(loads, list) and len(loads) > 0 else 0
-
-            # --- 4. CPU 修正 ---
-            raw_cpu = float(panel_stats.get('cpu', 0))
-            final_cpu = raw_cpu if raw_cpu > 1 else raw_cpu * 100
-
-            return {
-                'status': 'warning', 
-                'msg': '⚠️ 未安装探针',
-                'cpu_usage': final_cpu,
-                'mem_usage': mem_usage,
-                'mem_total': mem_total, 
-                'disk_usage': disk_usage,
-                'disk_total': disk_total, 
-                'net_speed_in': net_io.get('down', 0),
-                'net_speed_out': net_io.get('up', 0),
-                'net_total_in': net_traffic.get('recv', 0),
-                'net_total_out': net_traffic.get('sent', 0),
-                'load_1': load_1,
-                'uptime': f"{int(panel_stats.get('uptime', 0)/86400)}天",
-                '_is_lite': True 
-            }
-    except Exception as e: 
-        # print(f"API Error: {e}")
-        pass
-
-    return {'status': 'offline', 'msg': '无信号'}
+    
+    # 🛑 对于 X-UI 面板账号，直接返回离线，不尝试登录
+    return {'status': 'offline', 'msg': '未安装探针'}
 # ================= 使用 URL 安全的 Base64 =================
 def safe_base64(s): 
     # 使用 urlsafe_b64encode 避免出现 + 和 /
@@ -5444,11 +5365,19 @@ async def open_server_dialog(idx=None):
                     'ssh_auth_type': inputs['auth_type'].value,
                     'ssh_password': inputs['ssh_pwd'].value if inputs['ssh_pwd'] else '',
                     'ssh_key': inputs['ssh_key'].value if inputs['ssh_key'] else '',
-                    'probe_installed': data.get('probe_installed', True)
+                    
+                    # 🛑 [核心修改点]：只要点击保存SSH，就强制开启探针开关
+                    'probe_installed': True 
                 })
+                
+                # 同步更新 UI 上的复选框状态（如果界面上有显示的话）
+                if 'probe_chk' in inputs: 
+                    inputs['probe_chk'].value = True
+
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
             elif panel_type == 'xui':
+                # ... (X-UI 部分保持原样) ...
                 if not inputs.get('xui_url'): return
                 x_url_raw = inputs['xui_url'].value.strip()
                 x_user = inputs['xui_user'].value.strip()
@@ -5481,6 +5410,7 @@ async def open_server_dialog(idx=None):
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
 
+            # ... (通用名称生成逻辑保持不变) ...
             if not final_name:
                 safe_notify("正在生成名称...", "ongoing")
                 final_name = await generate_smart_name(new_server_data)
@@ -5496,8 +5426,11 @@ async def open_server_dialog(idx=None):
                 if panel_type == 'xui' and new_server_data.get('probe_installed'):
                     state['ssh_active'] = True
 
-                if (panel_type == 'ssh' or panel_type == 'xui') and new_server_data.get('probe_installed'):
-                     safe_notify(f"🚀 配置已保存，后台推送 Agent...", "ongoing")
+                # 🛑 [判断逻辑]：这里检查 probe_installed 是否为 True
+                # 因为上面我们在保存 SSH 时强制设为了 True，所以这里一定会触发安装
+                if new_server_data.get('probe_installed'):
+                     safe_notify(f"🚀 配置已保存，正在自动推送探针...", "ongoing")
+                     # 立即触发安装任务
                      asyncio.create_task(install_probe_on_server(new_server_data))
                 else:
                      safe_notify(f"✅ {panel_type.upper()} 已保存", "positive")
@@ -5995,16 +5928,22 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2.5fr 1.5fr 1.5fr 1fr 0.8fr 0.8
 SINGLE_COLS_NO_PING = 'grid-template-columns: 3fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr; align-items: center;'
 
 
-# ================= 刷新逻辑 (修改版：同步完成后刷新侧边栏) =================
-async def refresh_content(scope='ALL', data=None, force_refresh=False):
+# ================= 刷新逻辑 (修复版：名称同步与数据刷新彻底解耦) =================
+async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name_action=False):
+    """
+    scope: 视图范围
+    data: 视图数据
+    force_refresh: 是否强制重新请求 API (获取流量/状态)
+    sync_name_action: 是否允许修改服务器名称 (仅限点击同步按钮时为 True)
+    """
     try: client = ui.context.client
     except: return 
 
     global CURRENT_VIEW_STATE
     
-    # 防抖判断 -> 修改为：如果是重复点击，自动转为“强制刷新”模式
+    # 防抖判断 -> 如果是重复点击侧边栏，转为强制刷新数据，但绝不开启名称同步
     if not force_refresh and CURRENT_VIEW_STATE.get('scope') == scope and CURRENT_VIEW_STATE.get('data') == data:
-        force_refresh = True # <--- 关键修改：不再 return，而是标记为强制刷新
+        force_refresh = True 
 
     import time
     current_token = time.time()
@@ -6015,7 +5954,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
     
     CURRENT_VIEW_STATE['render_token'] = current_token
     
-    # 1. 筛选目标服务器
+    # 1. 筛选目标服务器 (保持不变)
     targets = []
     try:
         if scope == 'ALL': targets = list(SERVERS_CACHE)
@@ -6068,8 +6007,8 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
                                 ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
                         
                         if targets:
-                             # 点击这里的按钮是“主动操作”，所以 force_refresh=True
-                             ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True)).props('outline color=primary')
+                             # 🛑 [核心修改]：只有点击这个按钮，sync_name_action 才为 True
+                             ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True, sync_name_action=True)).props('outline color=primary')
 
                 if not targets:
                     with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
@@ -6091,20 +6030,17 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False):
             if not panel_only_servers: return
             if scope != 'SINGLE': safe_notify(f"正在后台更新 {len(panel_only_servers)} 台面板数据...", "ongoing", timeout=2000)
             
-            # 执行同步 (含改名逻辑)
-            tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=force_refresh) for s in panel_only_servers]
+            # 🛑 [核心修改]：使用传入的 sync_name_action 参数
+            # 侧边栏点击时：force_refresh=False/True, sync_name_action=False -> 只更流量，不改名
+            # 按钮点击时：force_refresh=True, sync_name_action=True -> 更流量 + 改名
+            tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in panel_only_servers]
             await asyncio.gather(*tasks, return_exceptions=True)
             
-            # ✨✨✨ [核心修改点]：数据更新完了，强制刷新左侧侧边栏！ ✨✨✨
-            try:
-                render_sidebar_content.refresh()
-            except: 
-                pass 
+            try: render_sidebar_content.refresh()
+            except: pass 
             
-            # 👇👇👇 [新增] 如果是强制刷新，且当前不是单机详情页，则静默重绘主列表 👇👇👇
             if force_refresh and scope != 'SINGLE':
                 await _render_ui()
-            # 👆👆👆 [新增结束]
             
             if scope != 'SINGLE': safe_notify("数据已同步", "positive")
         
@@ -8314,15 +8250,14 @@ async def send_telegram_message(text):
 
     await run.io_bound(_do_req)
     
-# ================= 优化后的监控任务 (高性能版：高并发 + 防误报 + 历史记录) =================
+# ================= 优化后的监控任务 (高性能版：仅监控已安装探针的机器) =================
 async def job_monitor_status():
     """
     监控任务：每分钟检查一次服务器状态
     优化：将并发数从 5 提升至 50，以支持 1000 台服务器在 30-40秒内完成轮询
+    修正：彻底跳过未安装探针的 X-UI 面板机器
     """
-    # ✨✨✨ 核心修改：将并发数提高到 50 ✨✨✨
-    # 解释：对于 1000 台服务器，50 并发意味着同时处理 50 台，大约 20 轮即可跑完。
-    # 假设每轮耗时 1.5s，总耗时约 30s，完全可以在 60s 或 120s 的间隔内完成。
+    # 50 并发
     sema = asyncio.Semaphore(50) 
     
     # 定义报警阈值：连续失败 3 次才报警
@@ -8331,6 +8266,11 @@ async def job_monitor_status():
     current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     async def _check_single_server(srv):
+        # 🛑 [核心修改]：如果未安装探针，直接跳过所有监控逻辑
+        # 这样后台就不会去尝试获取这些机器的状态，也不会记录历史或报警
+        if not srv.get('probe_installed', False):
+            return
+
         async with sema:
             # 稍微让出一点 CPU 时间片，避免高并发瞬间卡顿 UI
             await asyncio.sleep(0.01) 
@@ -8339,11 +8279,6 @@ async def job_monitor_status():
             name = srv.get('name', 'Unknown')
             url = srv['url']
             
-            # ✨✨✨ [新增] 如果不是探针机器(探针已经在push接口记过了)，则在这里补录历史 ✨✨✨
-            if not srv.get('probe_installed'):
-                 if res and 'pings' in res:
-                     record_ping_history(url, res['pings'])
-
             # 如果没配 TG，后面的报警逻辑就跳过
             if not ADMIN_CONFIG.get('tg_bot_token'): return
 
@@ -8393,7 +8328,6 @@ async def job_monitor_status():
     # 创建所有任务并执行
     tasks = [_check_single_server(s) for s in SERVERS_CACHE]
     await asyncio.gather(*tasks)
-
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
 
@@ -9352,7 +9286,7 @@ async def render_desktop_status_page():
         colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
         refs['uptime'].set_content(colored_up)
 
-    # 2. 自动更新循环 (混合策略：探针实时，API 节能)
+# 2. 自动更新循环 (彻底修正版：非探针机器直接退出，不轮询)
     async def card_autoupdate_loop(url):
         # 获取服务器配置
         current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
@@ -9361,13 +9295,13 @@ async def render_desktop_status_page():
         # 判断是否安装了探针
         is_probe = current_server.get('probe_installed', False)
 
-        # --- 阶段 1: 首次启动延迟 ---
-        if is_probe:
-            # 探针机器：只随机延迟 0.5~3秒，让它尽快显示
-            await asyncio.sleep(random.uniform(0.5, 3.0))
-        else:
-            # X-UI API机器：随机延迟 4~60秒，彻底错峰
-            await asyncio.sleep(random.uniform(4, 60.0))
+        # 🛑 核心修改：如果没有安装探针，直接结束此协程！
+        # 这样前端卡片就不会每分钟去骚扰后台了
+        if not is_probe:
+            return 
+
+        # --- 首次启动延迟 ---
+        await asyncio.sleep(random.uniform(0.5, 3.0))
         
         while True:
             # --- 基础检查 ---
@@ -9377,20 +9311,16 @@ async def render_desktop_status_page():
             item = RENDERED_CARDS.get(url)
             if not item: break 
             
-            # 如果浏览器标签页切到了后台，停止刷新以省流
+            # 省流模式：标签页不可见时暂停
             if not item['card'].visible: 
                 await asyncio.sleep(5.0) 
                 continue 
-            
-            # --- 执行获取数据 ---
-            # 重新获取最新的配置引用
+                    
+            # 执行获取数据
             current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
-            
             if current_server:
                 res = None
                 try: 
-                    # 获取状态
-                    # 这里的 timeout 对于 API 请求很重要，对探针读取则是瞬时的
                     res = await asyncio.wait_for(get_server_status(current_server), timeout=5.0)
                 except: res = None
                 
@@ -9399,17 +9329,12 @@ async def render_desktop_status_page():
                     static = raw_cache.get('static', {})
                     update_card_ui(item['refs'], res, static)
                     
-                    is_online = (res.get('status') == 'online') or (res.get('cpu_usage') is not None)
+                    is_online = (res.get('status') == 'online')
                     if is_online: item['card'].classes(remove='offline-card')
                     else: item['card'].classes(add='offline-card')
 
-            # --- 阶段 2: 下一轮刷新的等待时间 (核心差异) ---
-            if is_probe:
-                # 探针：保持 2~3 秒的实时刷新 (读内存不费资源)
-                await asyncio.sleep(random.uniform(2.0, 3.0))
-            else:
-                # X-UI API：休眠 60 秒 (55~65随机) (省流节能)
-                await asyncio.sleep(random.uniform(55.0, 65.0))
+            # 探针刷新间隔
+            await asyncio.sleep(random.uniform(2.0, 3.0))
 
     # 3. 创建卡片 (✨✨✨ 创建时立即回显 ✨✨✨)
     def create_server_card(s):
@@ -9532,7 +9457,7 @@ async def render_desktop_status_page():
     render_tabs()
     render_grid_page()
     
-    # ✨✨✨ [JS 逻辑注入] 地图渲染 + 修复字体样式 + 调整悬浮窗宽度 ✨✨✨
+    # ✨✨✨ [JS 逻辑注入] 地图渲染 + 修复字体样式 + 调整悬浮窗宽度 + 区域高亮修复 ✨✨✨
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
@@ -9550,7 +9475,6 @@ async def render_desktop_status_page():
                 .then(response => response.json())
                 .then(data => {{
                     if(data.latitude && data.longitude) {{
-                        console.log("Using HTTPS IP Location:", data.latitude, data.longitude);
                         defaultPt = [data.longitude, data.latitude];
                         if(!isZoomed && myChart) renderMap();
                     }}
@@ -9593,13 +9517,37 @@ async def render_desktop_status_page():
                     var borderColor = isDark ? '#404a59' : '#a5b4fc'; 
                     
                     // 双色主题定义
-                    var ttBg = isDark ? 'rgba(23, 23, 23, 0.95)' : 'rgba(255, 255, 255, 0.95)'; // 更深的黑色背景
+                    var ttBg = isDark ? 'rgba(23, 23, 23, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                     var ttTextMain = isDark ? '#fff' : '#1e293b';
                     var ttTextSub = isDark ? 'rgba(255, 255, 255, 0.6)' : 'rgba(30, 41, 59, 0.6)';
                     var ttBorder = isDark ? '1px solid rgba(255,255,255,0.1)' : '1px solid #e2e8f0';
 
-                    // ✅ 字体优化：优先使用 Google Noto Sans SC (黑体)，确保中文显示现代、清晰
+                    // 字体优化
                     var emojiFont = "'Twemoji Country Flags', 'Noto Sans SC', 'Roboto', 'Helvetica Neue', 'Arial', sans-serif";
+
+                    // ✨✨✨ [核心修复]：构建高亮区域配置 ✨✨✨
+                    var highlightFill = isDark ? 'rgba(37, 99, 235, 0.4)' : 'rgba(147, 197, 253, 0.5)'; // 蓝色半透明
+                    var highlightStroke = isDark ? '#3b82f6' : '#2563eb'; // 边框颜色
+                    
+                    var activeRegions = mapData.regions || [];
+                    var geoRegions = activeRegions.map(function(name) {{
+                        return {{
+                            name: name,
+                            itemStyle: {{ 
+                                areaColor: highlightFill, 
+                                borderColor: highlightStroke,
+                                borderWidth: 1.5,
+                                opacity: 1
+                            }},
+                            emphasis: {{
+                                itemStyle: {{
+                                    areaColor: highlightFill,
+                                    borderColor: '#60a5fa',
+                                    borderWidth: 2
+                                }}
+                            }}
+                        }};
+                    }});
 
                     var option = {{
                         backgroundColor: 'transparent',
@@ -9609,7 +9557,7 @@ async def render_desktop_status_page():
                                 var searchKey = params.name;
                                 if (params.data && params.data.country_key) searchKey = params.data.country_key;
                                 var stats = window.regionStats[searchKey];
-                                if (!stats) return;
+                                if (!stats) return; // 没有数据的区域不显示弹窗
                                 
                                 var serverListHtml = '';
                                 var displayLimit = 5; 
@@ -9621,7 +9569,6 @@ async def render_desktop_status_page():
                                     var statusColor = isOnline ? '#22c55e' : '#ef4444'; 
                                     var statusText = isOnline ? '在线' : '离线';
                                     
-                                    // 列表项样式调整：行高紧凑，字体清晰
                                     serverListHtml += `
                                         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; line-height: 1.2;">
                                             <div style="display: flex; align-items: center; max-width: 170px;">
@@ -9637,8 +9584,7 @@ async def render_desktop_status_page():
                                     serverListHtml += `<div style="font-size: 11px; color: ${{ttTextSub}}; margin-top: 8px; text-align: right; opacity: 0.8;">+${{servers.length - displayLimit}} 更多...</div>`;
                                 }}
                                 
-                                // ✅ 外框样式调整：宽度缩窄，圆角适中
-                                return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding: 14px 16px; border-radius: 10px; color:${{ttTextMain}}; font-family: ${{emojiFont}}; box-shadow: 0 4px 16px rgba(0,0,0,0.3); min-width: 240px; max-width: 260px;">
+                                return `<div style="background:${{ttBg}}; border:${{ttBorder}}; padding: 14px 16px; border-radius: 10px; color:${{ttTextMain}}; font-family: ${{emojiFont}}; box-shadow: 0 4px 16px rgba(0,0,0,0.3); min-width: 240px; max-width: 260px; pointer-events: none;">
                                     <div style="font-size: 16px; font-weight: 700; margin-bottom: 2px; display: flex; align-items: center; letter-spacing: 0.5px;">
                                         <span style="margin-right: 8px; font-size: 20px;">${{stats.flag}}</span>${{stats.cn}}
                                     </div>
@@ -9655,7 +9601,10 @@ async def render_desktop_status_page():
                             map: 'world', left: mapLeft, top: mapTop, roam: viewRoam, zoom: viewZoom, center: viewCenter,
                             aspectScale: 0.85, label: {{ show: false }},
                             itemStyle: {{ areaColor: areaColor, borderColor: borderColor, borderWidth: 1 }},
-                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#1e3a8a' : '#bfdbfe' }} }}
+                            emphasis: {{ itemStyle: {{ areaColor: isDark ? '#1e3a8a' : '#bfdbfe' }} }},
+                            
+                            // 🛑 核心修复：注入区域高亮配置
+                            regions: geoRegions 
                         }},
                         series: [
                             {{ type: 'lines', zlevel: 2, effect: {{ show: true, period: 4, trailLength: 0.5, color: '#00ffff', symbol: 'arrow', symbolSize: 6 }}, lineStyle: {{ color: '#00ffff', width: 0, curveness: 0.2, opacity: 0 }}, data: lines, silent: true }},
@@ -9697,9 +9646,11 @@ async def render_desktop_status_page():
         checkAndRender();
     }})();
     ''')
+    # ================= 循环更新逻辑 (修复版：统计探针心跳) =================
     async def loop_update():
         nonlocal local_ui_version
         try:
+            # 1. 检查版本号，如果变动则重绘架构 (保持不变)
             if GLOBAL_UI_VERSION != local_ui_version:
                 local_ui_version = GLOBAL_UI_VERSION
                 render_tabs(); render_grid_page() 
@@ -9707,9 +9658,33 @@ async def render_desktop_status_page():
                 except: new_map = "{}"; new_cnt = 0; new_stats = "{}"; new_centroids = "{}"
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
                 ui.run_javascript(f'''if(window.updatePublicMap){{ window.regionStats = {new_stats}; window.countryCentroids = {new_centroids}; window.updatePublicMap({new_map}); }}''')
-            real_online_count = len([s for s in SERVERS_CACHE if s.get('_status') == 'online'])
-            if header_refs.get('online_count'): header_refs['online_count'].set_text(f'在线: {real_online_count}')
-        except: pass
+            
+            # 2. ✨✨✨ [核心修复]：实时统计在线数量 ✨✨✨
+            real_online_count = 0
+            now_ts = time.time()
+            
+            for s in SERVERS_CACHE:
+                is_node_online = False
+                
+                # A. 优先检查探针心跳 (20秒内有更新算在线)
+                probe_cache = PROBE_DATA_CACHE.get(s['url'])
+                if probe_cache and (now_ts - probe_cache.get('last_updated', 0) < 20):
+                    is_node_online = True
+                
+                # B. 兼容旧状态字段 (如果探针没在线，看下系统标记)
+                elif s.get('_status') == 'online':
+                    is_node_online = True
+                
+                if is_node_online:
+                    real_online_count += 1
+
+            # 3. 更新 UI 文字
+            if header_refs.get('online_count'): 
+                header_refs['online_count'].set_text(f'在线: {real_online_count}')
+                
+        except Exception as e: 
+            pass # 忽略临时错误
+            
         ui.timer(5.0, loop_update, once=True)
 
     ui.timer(0.1, loop_update, once=True)
