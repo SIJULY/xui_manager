@@ -5154,14 +5154,13 @@ async def load_subs_view():
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
 
-
-# ================= 通用服务器保存函数 (UI 操控版：彻底消除闪烁 + 列表同步) =================
+# ================= 通用服务器保存函数 (UI 操控版：修改后强制刷新 + 重置冷却) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     # 1. 基础校验
     if not server_data.get('name') or not server_data.get('url'):
         safe_notify("名称和地址不能为空", "negative"); return False
 
-    # 记录旧信息
+    # 记录旧信息 (用于判断是否移动了分组)
     old_group = None
     if not is_add and idx is not None and 0 <= idx < len(SERVERS_CACHE):
         old_group = SERVERS_CACHE[idx].get('group')
@@ -5171,6 +5170,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
         for s in SERVERS_CACHE:
             if s['url'] == server_data['url']: safe_notify(f"已存在！", "warning"); return False
         
+        # 自动补全白旗 (如果没国旗的话)
         has_flag = False
         for v in AUTO_COUNTRY_MAP.values():
             if v.split(' ')[0] in server_data['name']: has_flag = True; break
@@ -5189,10 +5189,10 @@ async def save_server_config(server_data, is_add=True, idx=None):
     # 3. 保存到硬盘
     await save_servers()
 
-    # ================= ✨✨✨ UI 零闪烁操作区 ✨✨✨ =================
+    # ================= ✨✨✨ 左侧侧边栏 UI 零闪烁操作区 ✨✨✨ =================
     # 获取新分组名称
     new_group = server_data.get('group', '默认分组')
-    # 计算新分组对应的区域
+    # 计算新分组对应的区域 (用于侧边栏归类)
     if new_group in ['默认分组', '自动注册', '未分组', '自动导入']:
         try: new_group = detect_country_group(server_data.get('name', ''), server_data)
         except: pass
@@ -5203,15 +5203,17 @@ async def save_server_config(server_data, is_add=True, idx=None):
     try:
         if is_add:
             # === 新增 ===
+            # 如果目标分组已展开，直接插入新行
             if new_group in SIDEBAR_UI_REFS['groups']:
                 with SIDEBAR_UI_REFS['groups'][new_group]:
                     render_single_sidebar_row(server_data)
                 EXPANDED_GROUPS.add(new_group)
             else:
-                need_full_refresh = True
+                need_full_refresh = True # 分组还没渲染过，只能全刷
                 
         elif old_group != new_group:
             # === 移动分组 ===
+            # 尝试将旧行移动到新分组容器
             row_el = SIDEBAR_UI_REFS['rows'].get(server_data['url'])
             target_col = SIDEBAR_UI_REFS['groups'].get(new_group)
             
@@ -5229,29 +5231,35 @@ async def save_server_config(server_data, is_add=True, idx=None):
         try: render_sidebar_content.refresh()
         except: pass
 
-    # ================= ✨✨✨ 右侧主视图同步逻辑 (修正版) ✨✨✨ =================
+    # ================= ✨✨✨ 右侧主视图同步逻辑 (关键修改) ✨✨✨ =================
     current_scope = CURRENT_VIEW_STATE.get('scope')
     current_data = CURRENT_VIEW_STATE.get('data')
     
-    # 情况1: 如果当前正在查看这台服务器的详情页
+    # 情况1: 如果当前正在查看这台服务器的详情页 -> 立即刷新该单页
     if current_scope == 'SINGLE' and (current_data == server_data or (is_add and server_data == SERVERS_CACHE[-1])):
         try: await refresh_content('SINGLE', server_data, force_refresh=True)
         except: pass
         
-    # 情况2: 如果当前在列表视图 (全部/分组/区域)，立即静默重绘列表
+    # 情况2: 如果当前在列表视图 (全部/分组/区域) -> 立即刷新列表并重置冷却
     elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-        # ⚠️ 关键修改：强制置空 scope 以绕过 refresh_content 内部的防抖判断
-        # 这样可以触发 UI 重绘 (增/删行)，但 force_refresh=False 不会触发 API 重新请求
+        # 强制置空 scope 以绕过 refresh_content 内部的状态判断 (确保 _render_ui 被调用)
         CURRENT_VIEW_STATE['scope'] = None 
-        try: await refresh_content(current_scope, current_data, force_refresh=False)
+        try: 
+            # 🟢 [Trigger 2 生效点]：force_refresh=True
+            # 这会：
+            # 1. 忽略 30分钟 冷却
+            # 2. 立即启动后台同步
+            # 3. 同步完成后更新 LAST_SYNC_MAP，开启新的 30分钟 倒计时
+            await refresh_content(current_scope, current_data, force_refresh=True) 
         except: pass
         
     elif current_scope == 'DASHBOARD':
         try: await refresh_dashboard_ui()
         except: pass
 
-    # ================= ✨ 后台任务 ✨ =================
+    # ================= ✨ 后台任务 (GeoIP / 探针安装) ✨ =================
     asyncio.create_task(fast_resolve_single_server(server_data))
+    
     if ADMIN_CONFIG.get('probe_enabled', False) and server_data.get('probe_installed', False):
         async def delayed_install():
             await asyncio.sleep(1)
@@ -5928,33 +5936,146 @@ COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2.5fr 1.5fr 1.5fr 1fr 0.8fr 0.8
 SINGLE_COLS_NO_PING = 'grid-template-columns: 3fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr; align-items: center;'
 
 
-# ================= 刷新逻辑 (修复版：名称同步与数据刷新彻底解耦) =================
-async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name_action=False):
-    """
-    scope: 视图范围
-    data: 视图数据
-    force_refresh: 是否强制重新请求 API (获取流量/状态)
-    sync_name_action: 是否允许修改服务器名称 (仅限点击同步按钮时为 True)
-    """
-    try: client = ui.context.client
-    except: return 
+# ================= 全局配置 =================
+REFRESH_LOCKS = set()
+LAST_SYNC_MAP = {} # 🕒 格式: {'TAG::香港::P1': timestamp, 'TAG::香港::P2': timestamp}
+PAGE_SIZE = 20
+SYNC_COOLDOWN = 1800 # 30分钟
 
-    global CURRENT_VIEW_STATE
-    
-    # 防抖判断 -> 如果是重复点击侧边栏，转为强制刷新数据，但绝不开启名称同步
-    if not force_refresh and CURRENT_VIEW_STATE.get('scope') == scope and CURRENT_VIEW_STATE.get('data') == data:
-        force_refresh = True 
+# ================= 刷新逻辑 (最终版：页级冷却 + 自动更新) =================
+async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name_action=False, page_num=1, manual_client=None):
+    # 1. 上下文获取
+    client = manual_client
+    if not client:
+        try: client = ui.context.client
+        except: pass
+    if not client: return
 
-    import time
-    current_token = time.time()
-    
-    if not force_refresh:
+    with client:
+        global CURRENT_VIEW_STATE, REFRESH_LOCKS, LAST_SYNC_MAP
+        import time
+        
+        # 唯一标识 key (精确到页)
+        cache_key = f"{scope}::{data}::P{page_num}"
+        lock_key = cache_key
+        
+        now = time.time()
+        last_sync = LAST_SYNC_MAP.get(cache_key, 0)
+        
+        # 2. 🛑 冷却逻辑判断
+        # 如果不是按钮强制点击，且在 30分钟内 -> 命中缓存
+        if not force_refresh and (now - last_sync < SYNC_COOLDOWN):
+            
+            # 即使命中缓存，也要更新一下状态，保证下次翻页逻辑正确
+            CURRENT_VIEW_STATE['scope'] = scope
+            CURRENT_VIEW_STATE['data'] = data
+            CURRENT_VIEW_STATE['page'] = page_num
+            CURRENT_VIEW_STATE['render_token'] = now # 强制重绘
+            
+            # 渲染 UI (直接显示内存里的旧数据)
+            await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
+            
+            # 计算剩余分钟数
+            mins_ago = int((now - last_sync) / 60)
+            logger.info(f"❄️ [缓存命中] {cache_key} 上次同步于 {mins_ago} 分钟前，跳过后台。")
+            # 弹个轻提示让您知道
+            safe_notify(f"显示缓存数据 ({mins_ago}分钟前)", "ongoing", timeout=800)
+            return
+
+        # 3. 锁机制
+        if lock_key in REFRESH_LOCKS:
+             if force_refresh: safe_notify(f"第 {page_num} 页正在更新中...", type='warning')
+             return
+
+        # 4. 状态更新
         CURRENT_VIEW_STATE['scope'] = scope
         CURRENT_VIEW_STATE['data'] = data
-    
-    CURRENT_VIEW_STATE['render_token'] = current_token
-    
-    # 1. 筛选目标服务器 (保持不变)
+        CURRENT_VIEW_STATE['page'] = page_num
+        CURRENT_VIEW_STATE['render_token'] = now
+        
+        # 5. 先渲染 UI (显示旧数据占位)
+        await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
+
+        # 6. 准备后台同步
+        targets = get_targets_by_scope(scope, data)
+        start_index = (page_num - 1) * PAGE_SIZE
+        end_index = start_index + PAGE_SIZE
+        panel_only_servers = targets[start_index:end_index]
+        
+        if not panel_only_servers: return
+
+        REFRESH_LOCKS.add(lock_key)
+
+        async def _background_fetch():
+            try:
+                with client:
+                    log_msg = f"正在同步第 {page_num} 页 ({len(panel_only_servers)} 台)..."
+                    logger.info(f"🔄 [分页同步] {log_msg}")
+                    
+                    # 只有强制刷新才弹长提示，自动刷新弹短提示
+                    notify_duration = 1000 if force_refresh else 500
+                    safe_notify(log_msg, "ongoing", timeout=notify_duration)
+                    
+                    # 执行同步
+                    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in panel_only_servers]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    try: render_sidebar_content.refresh()
+                    except: pass 
+                    
+                    # 同步完成，重绘界面显示新流量
+                    await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
+                    
+                    # ✅✅✅ 关键：更新该页的时间戳，开启 30分钟 冷却
+                    LAST_SYNC_MAP[cache_key] = time.time()
+                    
+                    logger.info(f"✅ [分页同步] 第 {page_num} 页同步完成 (下次更新: 30分钟后)")
+                    if force_refresh:
+                        safe_notify(f"第 {page_num} 页同步完成", "positive")
+                    
+            finally:
+                REFRESH_LOCKS.discard(lock_key)
+            
+        asyncio.create_task(_background_fetch())
+
+# --- 辅助函数 (保持不变) ---
+async def _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client):
+    if content_container:
+        content_container.clear()
+        content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
+        with content_container:
+            targets = get_targets_by_scope(scope, data)
+            if scope == 'SINGLE': 
+                if targets: await render_single_server_view(targets[0]); return 
+                else: ui.label('服务器未找到'); return 
+            
+            title = ""
+            is_group_view = False
+            show_ping = False
+            if scope == 'ALL': title = f"🌍 所有服务器 ({len(targets)})"
+            elif scope == 'TAG': title = f"🏷️ 自定义分组: {data} ({len(targets)})"; is_group_view = True
+            elif scope == 'COUNTRY': title = f"🏳️ 区域: {data} ({len(targets)})"; is_group_view = True; show_ping = True 
+
+            with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
+                with ui.row().classes('items-center gap-4'): ui.label(title).classes('text-2xl font-bold')
+                with ui.row().classes('items-center gap-2'):
+                    if is_group_view and targets:
+                        with ui.row().classes('gap-1'):
+                            ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey')
+                            ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange')
+                            ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green')
+                    if targets:
+                            # 按钮点击 = 强制刷新 (绕过冷却)
+                            ui.button('同步当前页', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True, sync_name_action=True, page_num=page_num, manual_client=client)).props('outline color=primary')
+
+            if not targets:
+                with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'): ui.icon('inbox', size='4rem'); ui.label('列表为空')
+            else: 
+                try: targets.sort(key=smart_sort_key)
+                except: pass
+                await render_aggregated_view(targets, show_ping=show_ping, token=None, initial_page=page_num)
+
+def get_targets_by_scope(scope, data):
     targets = []
     try:
         if scope == 'ALL': targets = list(SERVERS_CACHE)
@@ -5967,84 +6088,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
         elif scope == 'SINGLE':
              if data in SERVERS_CACHE: targets = [data]
     except: pass
-
-    # 2. UI 绘制逻辑
-    async def _render_ui():
-        if CURRENT_VIEW_STATE.get('render_token') != current_token: return
-        with client:
-            if not content_container: return
-            content_container.clear()
-            content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
-            
-            with content_container:
-                if scope == 'SINGLE': 
-                    if targets: await render_single_server_view(targets[0])
-                    else: ui.label('服务器未找到').classes('text-gray-400')
-                    return 
-                
-                title = ""
-                is_group_view = False
-                show_ping = False
-                
-                if scope == 'ALL': title = f"🌍 所有服务器 ({len(targets)})"
-                elif scope == 'TAG': 
-                    title = f"🏷️ 自定义分组: {data} ({len(targets)})"
-                    is_group_view = True
-                elif scope == 'COUNTRY':
-                    title = f"🏳️ 区域: {data} ({len(targets)})"
-                    is_group_view = True
-                    show_ping = True 
-
-                with ui.row().classes('items-center w-full mb-4 border-b pb-2 justify-between'):
-                    with ui.row().classes('items-center gap-4'):
-                        ui.label(title).classes('text-2xl font-bold')
-
-                    with ui.row().classes('items-center gap-2'):
-                        if is_group_view and targets:
-                            with ui.row().classes('gap-1'):
-                                ui.button(icon='content_copy', on_click=lambda: copy_group_link(data)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
-                                ui.button(icon='bolt', on_click=lambda: copy_group_link(data, target='surge')).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
-                                ui.button(icon='cloud_queue', on_click=lambda: copy_group_link(data, target='clash')).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
-                        
-                        if targets:
-                             # 🛑 [核心修改]：只有点击这个按钮，sync_name_action 才为 True
-                             ui.button('同步最新数据', icon='sync', on_click=lambda: refresh_content(scope, data, force_refresh=True, sync_name_action=True)).props('outline color=primary')
-
-                if not targets:
-                    with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'):
-                        ui.icon('inbox', size='4rem'); ui.label('列表为空').classes('text-lg')
-                else: 
-                    try: targets.sort(key=smart_sort_key)
-                    except: pass
-                    await render_aggregated_view(targets, show_ping=show_ping, token=current_token)
-
-    if not force_refresh:
-        await _render_ui()
-
-    # 4. 后台数据同步逻辑
-    panel_only_servers = [s for s in targets if not s.get('probe_installed', False)]
-    if force_refresh: panel_only_servers = targets
-
-    if panel_only_servers:
-        async def _background_fetch():
-            if not panel_only_servers: return
-            if scope != 'SINGLE': safe_notify(f"正在后台更新 {len(panel_only_servers)} 台面板数据...", "ongoing", timeout=2000)
-            
-            # 🛑 [核心修改]：使用传入的 sync_name_action 参数
-            # 侧边栏点击时：force_refresh=False/True, sync_name_action=False -> 只更流量，不改名
-            # 按钮点击时：force_refresh=True, sync_name_action=True -> 更流量 + 改名
-            tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in panel_only_servers]
-            await asyncio.gather(*tasks, return_exceptions=True)
-            
-            try: render_sidebar_content.refresh()
-            except: pass 
-            
-            if force_refresh and scope != 'SINGLE':
-                await _render_ui()
-            
-            if scope != 'SINGLE': safe_notify("数据已同步", "positive")
-        
-        asyncio.create_task(_background_fetch())
+    return targets
         
 # ================= 状态面板辅助函数 =================
 
@@ -6475,19 +6519,16 @@ def show_custom_node_info(node):
             ui.button('复制', icon='content_copy', on_click=lambda: [safe_copy_to_clipboard(link), d.close()])
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
+    
+# ================= 聚合视图渲染 (最终完整版：翻页=自然浏览) =================
+async def render_aggregated_view(server_list, show_ping=False, token=None, initial_page=1):
+    
+    # 1. 🟢 [关键]：捕获当前的 Client 上下文 (用于解决后台任务丢失 UI 上下文的问题)
+    parent_client = ui.context.client
 
-# ================= 聚合视图渲染 (修复版：移除定时器，防止页面卡死) =================
-async def render_aggregated_view(server_list, show_ping=False, force_refresh=False, token=None):
-    # 1. 触发后台数据更新 (限制并发，分批处理)
-    if force_refresh:
-        chunk_size = 50
-        for i in range(0, len(server_list), chunk_size):
-            chunk = server_list[i:i + chunk_size]
-            asyncio.create_task(asyncio.gather(*[fetch_inbounds_safe(s, force_refresh=True) for s in chunk], return_exceptions=True))
-            
     list_container = ui.column().classes('w-full gap-3 p-1')
     
-    # 2. 定义列宽
+    # 定义列宽样式
     cols_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 1.5fr' 
     cols_no_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 0.5fr 1.5fr'
     
@@ -6498,32 +6539,34 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
     except:
         current_css = cols_ping if show_ping else cols_no_ping
 
-    # ================= ✨✨✨ 分页逻辑核心 ✨✨✨ =================
-    PAGE_SIZE = 30  # 每页显示 30 台
+    # ================= 分页计算 =================
+    PAGE_SIZE = 20  # 必须与 refresh_content 中的定义保持一致
     total_items = len(server_list)
     total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
     
-    # 记录当前页码
-    if not hasattr(render_aggregated_view, 'current_page'):
-        render_aggregated_view.current_page = 1
-    
-    if render_aggregated_view.current_page > total_pages: render_aggregated_view.current_page = 1
-    if render_aggregated_view.current_page < 1: render_aggregated_view.current_page = 1
+    # 页码校正
+    if initial_page > total_pages: initial_page = 1
+    if initial_page < 1: initial_page = 1
 
-    # 渲染页面的函数
+    # ================= 内部渲染函数 =================
     def render_page(page_num):
         list_container.clear()
+        
+        # 更新全局状态，确保 refresh_content 知道当前在哪一页
+        if 'CURRENT_VIEW_STATE' in globals():
+            CURRENT_VIEW_STATE['page'] = page_num
+
         with list_container:
             # === A. 顶部统计与翻页器 ===
             with ui.row().classes('w-full justify-between items-center px-2 mb-2'):
                 ui.label(f'共 {total_items} 台服务器 (第 {page_num}/{total_pages} 页)').classes('text-xs text-gray-400 font-bold')
                 
                 if total_pages > 1:
-                    pagination = ui.pagination(1, total_pages, direction_links=True).props('dense flat color=blue')
-                    pagination.value = page_num
-                    pagination.on('update:model-value', lambda e: switch_page(e.args))
+                    ui.pagination(1, total_pages, direction_links=True, value=page_num) \
+                        .props('dense flat color=blue') \
+                        .on_value_change(lambda e: handle_pagination_click(e.value))
 
-            # === B. 绘制静态表头 ===
+            # === B. 表头 ===
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b pb-2 px-6 mb-1 uppercase tracking-wider text-xs').style(current_css):
                 ui.label('服务器').classes('text-left pl-1')
                 ui.label('节点名称').classes('text-left pl-1')
@@ -6535,16 +6578,15 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                 if not use_special_mode: ui.label('状态').classes('text-center')
                 ui.label('操作').classes('text-center')
             
-            # === C. 切片获取当前页数据 ===
+            # === C. 数据切片 ===
             start_idx = (page_num - 1) * PAGE_SIZE
             end_idx = start_idx + PAGE_SIZE
             current_page_data = server_list[start_idx:end_idx]
 
-            # === D. 遍历渲染 (修复：移除内部定时器和 refreshable) ===
+            # === D. 渲染行 ===
             for srv in current_page_data:
                 panel_n = NODES_DATA.get(srv['url'], []) or []
                 custom_n = srv.get('custom_nodes', []) or []
-                # 标记自定义节点
                 for cn in custom_n: cn['_is_custom'] = True
                 all_nodes = panel_n + custom_n
                 
@@ -6553,23 +6595,43 @@ async def render_aggregated_view(server_list, show_ping=False, force_refresh=Fal
                     continue
 
                 for index, node in enumerate(all_nodes):
-                    # 直接绘制行，不再包裹定时器
                     draw_row(srv, node, current_css, use_special_mode, is_first=(index==0))
             
             # === E. 底部翻页器 ===
             if total_pages > 1:
                 with ui.row().classes('w-full justify-center mt-4'):
-                    pag_bottom = ui.pagination(1, total_pages, direction_links=True).props('dense flat color=blue')
-                    pag_bottom.value = page_num
-                    pag_bottom.on('update:model-value', lambda e: switch_page(e.args))
+                    ui.pagination(1, total_pages, direction_links=True, value=page_num) \
+                        .props('dense flat color=blue') \
+                        .on_value_change(lambda e: handle_pagination_click(e.value))
 
-    def switch_page(new_page):
-        render_aggregated_view.current_page = new_page
-        render_page(new_page)
+    # ================= 🚀 核心逻辑：翻页事件处理 =================
+    def handle_pagination_click(new_page):
+        try: target_page = int(new_page)
+        except: return 
 
-    # 初始渲染
-    render_page(render_aggregated_view.current_page)
+        current_scope = CURRENT_VIEW_STATE.get('scope', 'ALL')
+        current_data = CURRENT_VIEW_STATE.get('data', None)
 
+        print(f"👉 [Debug] 翻页至: {target_page} (自然浏览)", flush=True)
+
+        # 使用父级上下文包裹异步任务，防止 Context Lost
+        with parent_client:
+            asyncio.create_task(
+                refresh_content(
+                    scope=current_scope,
+                    data=current_data,
+                    # 🛑 [关键修改]：设置为 False
+                    # 这告诉 refresh_content：“我是自然翻页，请先检查是否有缓存且未过期”
+                    force_refresh=False, 
+                    sync_name_action=True,
+                    page_num=target_page,
+                    manual_client=parent_client
+                )
+            )
+
+    # 初次渲染
+    render_page(initial_page)
+    
 # --- 辅助函数：绘制单行 (保持原样，含复制修复) ---
 def draw_row(srv, node, css_style, use_special_mode, is_first=True):
     card_cls = 'grid w-full gap-4 py-3 px-4 items-center group relative bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] mb-2'
