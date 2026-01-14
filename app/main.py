@@ -421,19 +421,22 @@ def open_global_settings_dialog():
 
 
 
-# =================  XHTTP-Reality 部署脚本 =================
-# 特性：自动检测 Caddy/Nginx，如果 443 被占，自动切换到 8443，互不冲突。
+# ================= [V76 终极稳定版] XHTTP-Reality 部署脚本 =================
+# 改进点：使用 Here-Doc 处理 JSON，增加换行符清洗，增加 DNS 检查
 XHTTP_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 export PATH=$PATH:/usr/local/bin
 
-# 1. 基础环境检查
+# 0. 自我清洗 (防止 Windows 换行符 \r 导致脚本执行异常)
+sed -i 's/\r$//' "$0"
+
+# 1. 基础环境检查与依赖安装
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y net-tools lsof curl unzip jq uuid-runtime openssl >/dev/null 2>&1
+    apt-get install -y net-tools lsof curl unzip jq uuid-runtime openssl psmisc dnsutils >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
-    yum install -y net-tools lsof curl unzip jq >/dev/null 2>&1
+    yum install -y net-tools lsof curl unzip jq psmisc bind-utils >/dev/null 2>&1
 fi
 
 # 定义日志
@@ -443,64 +446,51 @@ err() { echo -e "\033[31m[ERROR]\033[0m $1"; }
 DOMAIN="$1"
 if [ -z "$DOMAIN" ]; then err "域名参数缺失"; exit 1; fi
 
-log "========== 开始智能部署 XHTTP =========="
+log "========== 开始部署 XHTTP (V76 稳定版) =========="
+log "目标域名: $DOMAIN"
 
-# 2. 智能端口选择 (核心修改)
-# 默认端口
+# 2. 端口强制清理 (霸道模式)
+if netstat -tlpn | grep -q ":80 "; then
+    log "⚠️ 清理 80 端口..."
+    fuser -k 80/tcp >/dev/null 2>&1; killall -9 nginx >/dev/null 2>&1; killall -9 xray >/dev/null 2>&1
+    sleep 1
+fi
+if netstat -tlpn | grep -q ":443 "; then
+    log "⚠️ 清理 443 端口..."
+    fuser -k 443/tcp >/dev/null 2>&1
+    sleep 1
+fi
+
 PORT_REALITY=443
 PORT_XHTTP=80
 
-# 检查 443 (TCP) 是否被占用 (例如 Caddy/Nginx)
-if netstat -tlpn | grep -q ":443 "; then
-    log "⚠️ 检测到 TCP 443 端口被占用 (可能是 Caddy/Nginx)"
-    log "🔄 自动切换 Reality 端口至: 8443"
-    PORT_REALITY=8443
-else
-    log "✅ TCP 443 端口空闲，将使用默认端口"
-fi
-
-# 检查 80 (TCP) 是否被占用
-if netstat -tlpn | grep -q ":80 "; then
-    log "⚠️ 检测到 TCP 80 端口被占用"
-    log "🔄 自动切换 XHTTP 监听端口至: 8080"
-    PORT_XHTTP=8080
-else
-    log "✅ TCP 80 端口空闲，将使用默认端口"
-fi
-
 # 3. 安装/更新 Xray
-log "正在下载最新版 Xray..."
+log "安装最新版 Xray..."
 xray_bin="/usr/local/bin/xray"
-rm -f "$xray_bin" # 清理旧版
-arch=$(uname -m); 
-case "$arch" in x86_64) a="64";; aarch64) a="arm64-v8a";; esac
+rm -f "$xray_bin"
+arch=$(uname -m); case "$arch" in x86_64) a="64";; aarch64) a="arm64-v8a";; esac
 curl -fsSL https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${a}.zip -o /tmp/xray.zip
-if [ $? -ne 0 ]; then err "Xray 下载失败"; exit 1; fi
-
 unzip -qo /tmp/xray.zip -d /tmp/xray
 install -m 755 /tmp/xray/xray "$xray_bin"
 
-# 4. 生成密钥与配置
+# 4. 生成密钥与ID
 KEYS=$($xray_bin x25519)
 PRI_KEY=$(echo "$KEYS" | grep -i "Private" | awk '{print $NF}')
 PUB_KEY=$(echo "$KEYS" | grep -i "Public" | awk '{print $NF}')
-# 兜底
-if [ -z "$PUB_KEY" ]; then
-    PRI_KEY=$(echo "$KEYS" | head -n1 | awk '{print $NF}')
-    PUB_KEY=$(echo "$KEYS" | tail -n1 | awk '{print $NF}')
-fi
+[ -z "$PUB_KEY" ] && { PRI_KEY=$(echo "$KEYS" | head -n1 | awk '{print $NF}'); PUB_KEY=$(echo "$KEYS" | tail -n1 | awk '{print $NF}'); }
 
 UUID_XHTTP=$(cat /proc/sys/kernel/random/uuid)
 UUID_REALITY=$(cat /proc/sys/kernel/random/uuid)
 XHTTP_PATH="/$(echo "$UUID_XHTTP" | cut -d- -f1 | tr -d '\n')"
 SHORT_ID=$(openssl rand -hex 4)
-# 如果端口不是 443，Reality 目标也要相应调整，这里偷懒直接回环，或者偷一个公网
-SNI="www.icloud.com"
+
+REALITY_SNI="www.icloud.com"
+YOUXUAN_DOMAIN="www.visa.com.hk"
 
 mkdir -p /usr/local/etc/xray
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 
-# 生成配置文件 (使用动态端口变量)
+# 5. 写入配置文件 (使用 EOF 块，避免转义错误)
 cat > $CONFIG_FILE <<EOF
 {
   "log": { "loglevel": "warning" },
@@ -509,7 +499,7 @@ cat > $CONFIG_FILE <<EOF
       "port": $PORT_XHTTP,
       "protocol": "vless",
       "settings": { "clients": [{ "id": "$UUID_XHTTP" }], "decryption": "none" },
-      "streamSettings": { "network": "xhttp", "xhttpSettings": { "path": "$XHTTP_PATH", "mode": "auto" } }
+      "streamSettings": { "network": "xhttp", "security": "none", "xhttpSettings": { "path": "$XHTTP_PATH", "mode": "auto" } }
     },
     {
       "port": $PORT_REALITY,
@@ -522,7 +512,7 @@ cat > $CONFIG_FILE <<EOF
       "streamSettings": {
         "network": "tcp",
         "security": "reality",
-        "realitySettings": { "privateKey": "$PRI_KEY", "serverNames": ["$SNI"], "shortIds": ["$SHORT_ID"], "target": "$SNI:443" }
+        "realitySettings": { "privateKey": "$PRI_KEY", "serverNames": ["$REALITY_SNI"], "shortIds": ["$SHORT_ID"], "target": "$REALITY_SNI:443" }
       }
     }
   ],
@@ -530,7 +520,7 @@ cat > $CONFIG_FILE <<EOF
 }
 EOF
 
-# 5. 启动服务
+# 6. 启动服务
 cat > /etc/systemd/system/xray.service <<EOF
 [Unit]
 Description=Xray Service
@@ -538,6 +528,7 @@ After=network.target
 [Service]
 ExecStart=$xray_bin run -c $CONFIG_FILE
 Restart=on-failure
+LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -547,15 +538,46 @@ systemctl enable xray >/dev/null 2>&1
 systemctl restart xray
 sleep 2
 
-# 6. 生成链接 (使用实际端口)
-VPS_IP=$(curl -fsSL https://api.ipify.org)
-EXTRA_JSON="{\"downloadSettings\":{\"address\":\"$VPS_IP\",\"port\":$PORT_REALITY,\"network\":\"xhttp\",\"xhttpSettings\":{\"path\":\"$XHTTP_PATH\",\"mode\":\"auto\"},\"security\":\"reality\",\"realitySettings\":{\"serverName\":\"$SNI\",\"fingerprint\":\"chrome\",\"show\":false,\"publicKey\":\"$PUB_KEY\",\"shortId\":\"$SHORT_ID\",\"spiderX\":\"/\"}}}"
+# 7. 检查 DNS (诊断)
+log "正在检查域名解析: $DOMAIN"
+nslookup $DOMAIN 8.8.8.8 >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    log "⚠️ 警告: 域名 $DOMAIN 尚未在全球 DNS 生效，连接可能会失败。请稍等几分钟。"
+else
+    log "✅ 域名解析正常。"
+fi
 
-ENC_EXTRA=$(printf '%s' "$EXTRA_JSON" | jq -sRr @uri)
+# 8. 生成链接 (JSON 构造优化)
+VPS_IP=$(curl -fsSL https://api.ipify.org)
+
+# 使用 cat 生成 JSON，避免 Python 字符串转义干扰
+EXTRA_JSON_RAW=$(cat <<EOF
+{
+  "downloadSettings": {
+    "address": "$VPS_IP",
+    "port": $PORT_REALITY,
+    "network": "xhttp",
+    "xhttpSettings": { "path": "$XHTTP_PATH", "mode": "auto" },
+    "security": "reality",
+    "realitySettings": {
+      "serverName": "$REALITY_SNI",
+      "fingerprint": "chrome",
+      "show": false,
+      "publicKey": "$PUB_KEY",
+      "shortId": "$SHORT_ID",
+      "spiderX": "/",
+      "mldsa65Verify": ""
+    }
+  }
+}
+EOF
+)
+
+# 压缩并编码 JSON
+ENC_EXTRA=$(echo "$EXTRA_JSON_RAW" | jq -c . | jq -sRr @uri)
 ENC_PATH=$(printf '%s' "$XHTTP_PATH" | jq -sRr @uri)
 
-# 注意：链接中的端口变为 $PORT_REALITY
-LINK="vless://${UUID_XHTTP}@${VPS_IP}:${PORT_REALITY}?encryption=none&security=tls&sni=${DOMAIN}&type=xhttp&host=${DOMAIN}&path=${ENC_PATH}&mode=auto&extra=${ENC_EXTRA}#XHTTP-Reality"
+LINK="vless://${UUID_XHTTP}@${YOUXUAN_DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=xhttp&host=${DOMAIN}&path=${ENC_PATH}&mode=auto&extra=${ENC_EXTRA}#XHTTP-Reality"
 
 echo "DEPLOY_SUCCESS_LINK: $LINK"
 """
@@ -646,89 +668,60 @@ def parse_vless_link_to_node(link, remark_override=None):
         print(f"[Error] 解析 VLESS 链接失败: {e}")
         return None
 
-# ================= 部署弹窗 (自定义使用 CF API 根域名) =================
+# ================= [V76 智能交互版] 部署弹窗逻辑 =================
 async def open_deploy_xhttp_dialog(server_conf, callback):
-    # 1. 获取服务器真实 IP (用于解析)
-    # 无论配置里填的是域名还是IP，我们都需要解析出最终的 IPv4 地址
+    # 1. 获取 IP
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
-    
     real_ip = target_host
-    import re
-    import socket
-    
-    # 如果填的是域名，先尝试解析出 IP
+    import re, socket
     if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", target_host):
-        try:
-            real_ip = await run.io_bound(socket.gethostbyname, target_host)
-        except:
-            safe_notify(f"❌ 无法解析服务器 IP: {target_host}", "negative")
-            return
+        try: real_ip = await run.io_bound(socket.gethostbyname, target_host)
+        except: safe_notify(f"❌ 无法解析 IP: {target_host}", "negative"); return
 
-    # 2. 读取 Cloudflare 配置
+    # 2. CF 配置检查
     cf_handler = CloudflareHandler()
-    has_cf_api = bool(cf_handler.token)
-    root_domain = cf_handler.root_domain
+    if not cf_handler.token or not cf_handler.root_domain:
+        safe_notify("❌ 请先配置 Cloudflare API 和根域名", "negative"); return
 
-    if not has_cf_api or not root_domain:
-        safe_notify("❌ 自定义模式失败: 请先在左下角配置 Cloudflare API 和根域名", "negative")
-        return
-
-    # 3. 生成自定义使用的新域名
+    # 3. 生成域名
     import random, string
     rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    # 格式: node-1-2-3-4-abcd.aaabb.com
     sub_prefix = f"node-{real_ip.replace('.', '-')}-{rand_suffix}"
-    # ✨✨✨ 核心修改：使用配置的根域名 ✨✨✨
-    target_domain = f"{sub_prefix}.{root_domain}"
+    target_domain = f"{sub_prefix}.{cf_handler.root_domain}"
 
-    # === 构建弹窗 ===
+    # === 构建主弹窗 ===
     with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl'):
         
-        # --- 顶部标题栏 ---
+        # 顶部
         with ui.column().classes('w-full bg-slate-900 p-6 gap-2'):
             with ui.row().classes('items-center gap-2 text-white'):
                 ui.icon('rocket_launch', size='md')
-                ui.label('部署 XHTTP-Reality (自定义域名模式)').classes('text-lg font-bold')
-            
-            ui.label(f"服务器 IP: {real_ip}").classes('text-xs text-gray-400 font-mono')
-            ui.label(f"即将部署到: {target_domain}").classes('text-sm text-green-400 font-mono font-bold')
-            ui.label(f"(忽略原地址，将使用 {root_domain})").classes('text-[10px] text-orange-300')
+                ui.label('部署 XHTTP-Reality (V76 稳定版)').classes('text-lg font-bold')
+            ui.label(f"部署目标: {target_domain}").classes('text-xs text-green-400 font-mono')
 
-        # --- 内容输入区 ---
+        # 内容区
         with ui.column().classes('w-full p-6 gap-4'):
             ui.label('节点备注名称').classes('text-xs font-bold text-gray-500 mb-[-8px]')
-            # 默认备注也改成新域名
             remark_input = ui.input(placeholder=f'默认: Reality-{target_domain}').props('outlined dense clearable').classes('w-full')
             
+            # 日志区
             log_area = ui.log().classes('w-full h-48 bg-gray-900 text-green-400 text-[11px] font-mono p-3 rounded border border-gray-700 hidden transition-all')
 
-        # --- 底部按钮区 ---
+        # 底部按钮
         with ui.row().classes('w-full p-4 bg-gray-50 border-t border-gray-200 justify-end gap-3'):
             btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
             
-            async def start_process():
-                btn_cancel.disable()
-                btn_deploy.props('loading')
-                log_area.classes(remove='hidden')
-                
+            # --- 核心逻辑开始 ---
+            async def run_deploy_script():
+                # 这是真正执行部署的函数
                 try:
-                    # --- 阶段 1: 强制 Cloudflare 解析 ---
-                    log_area.push(f"🔄 [Cloudflare] 正在强制添加解析...")
-                    log_area.push(f"   域名: {target_domain} -> {real_ip}")
-                    
-                    # 调用 auto_configure 自动添加 A 记录 + 开启小云朵 + 设 SSL Flexible
+                    log_area.push(f"🔄 [Cloudflare] 添加解析: {target_domain} -> {real_ip}...")
                     success, msg = await cf_handler.auto_configure(real_ip, sub_prefix)
+                    if not success: raise Exception(f"CF配置失败: {msg}")
                     
-                    if success:
-                        log_area.push(f"✅ 解析成功！等待 3 秒生效...")
-                        await asyncio.sleep(3)
-                    else:
-                        log_area.push(f"❌ 解析失败: {msg}")
-                        raise Exception("CF配置失败")
-
-                    # --- 阶段 2: SSH 部署脚本 ---
-                    log_area.push(f"🚀 [SSH] 开始在服务器上部署 Xray...")
+                    log_area.push(f"🚀 [SSH] 开始执行 V76 部署脚本...")
                     
+                    # 注入 V76 脚本内容
                     deploy_cmd = f"""
 cat > /tmp/install_xhttp.sh << 'EOF_SCRIPT'
 {XHTTP_INSTALL_SCRIPT_TEMPLATE}
@@ -742,37 +735,94 @@ bash /tmp/install_xhttp.sh "{target_domain}"
                         match = re.search(r'DEPLOY_SUCCESS_LINK: (vless://.*)', output)
                         if match:
                             link = match.group(1).strip()
-                            log_area.push("✅ 部署脚本执行完毕！")
+                            log_area.push("✅ 部署成功！正在保存节点...")
                             
                             custom_name = remark_input.value.strip()
                             final_remark = custom_name if custom_name else f"Reality-{target_domain}"
-                            
                             node_data = parse_vless_link_to_node(link, remark_override=final_remark)
                             
                             if node_data:
                                 if 'custom_nodes' not in server_conf: server_conf['custom_nodes'] = []
                                 server_conf['custom_nodes'].append(node_data)
                                 await save_servers()
-                                
-                                safe_notify(f"✅ 节点已添加: {final_remark}", "positive")
+                                safe_notify(f"✅ 节点已添加", "positive")
                                 await asyncio.sleep(1)
                                 d.close()
-                                if callback: await callback() 
-                            else:
-                                log_area.push("❌ 链接解析失败")
+                                if callback: await callback()
+                            else: log_area.push("❌ 链接解析失败")
                         else:
                             log_area.push("❌ 未捕获到链接，请检查日志")
                             log_area.push(output[-500:])
                     else:
                         log_area.push(f"❌ SSH 执行出错: {output}")
-
                 except Exception as e:
                     log_area.push(f"❌ 异常: {str(e)}")
-                
-                btn_cancel.enable()
-                btn_deploy.props(remove='loading')
+                finally:
+                    btn_deploy.props(remove='loading')
+                    btn_cancel.enable()
 
-            btn_deploy = ui.button('自定义部署', on_click=start_process).classes('bg-red-600 text-white shadow-lg')
+            async def start_process():
+                btn_cancel.disable()
+                btn_deploy.props('loading')
+                log_area.classes(remove='hidden')
+                
+                # --- 第一步：侦察端口 ---
+                log_area.push("🔍 正在检查端口占用情况 (80/443)...")
+                
+                # 使用 lsof 或 netstat 检查端口
+                check_cmd = "netstat -tlpn | grep -E ':80 |:443 ' || lsof -i :80 -i :443"
+                
+                is_occupied = False
+                check_output = ""
+                
+                try:
+                    # 执行远程检查
+                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, check_cmd))
+                    if success and output.strip():
+                        is_occupied = True
+                        check_output = output.strip()
+                except:
+                    pass # 如果检查命令本身失败，默认当作没占用，交给脚本处理
+
+                # --- 第二步：决策 ---
+                if is_occupied:
+                    log_area.push("⚠️ 检测到端口被占用！等待用户确认...")
+                    
+                    # 弹出二次确认框
+                    with ui.dialog() as confirm_d, ui.card().classes('w-96 p-5 border-t-4 border-red-500 shadow-xl bg-white'):
+                        with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
+                            ui.icon('warning', size='md')
+                            ui.label('端口冲突警告').classes('font-bold text-lg')
+                        
+                        ui.label('检测到 VPS 上有其他服务占用了 80 或 443 端口：').classes('text-sm text-gray-600 mb-2')
+                        
+                        # 显示占用详情 (截取前5行防止太长)
+                        short_log = "\n".join(check_output.split("\n")[:5])
+                        ui.code(short_log).classes('w-full text-xs bg-gray-100 p-2 rounded mb-3')
+                        
+                        ui.label('如果要继续，脚本将【强制杀掉】这些进程并霸占端口。').classes('text-xs font-bold text-red-500')
+                        ui.label('这可能会导致原来的网站无法访问！').classes('text-xs text-gray-500')
+
+                        with ui.row().classes('w-full justify-end gap-2 mt-4'):
+                            # 取消按钮
+                            ui.button('取消部署', on_click=lambda: [confirm_d.close(), d.close()]).props('flat color=grey')
+                            
+                            # 确认强杀按钮
+                            async def confirm_force():
+                                confirm_d.close()
+                                log_area.push("⚔️ 用户已确认强制霸占，继续部署...")
+                                await run_deploy_script()
+                                
+                            ui.button('强制霸占并部署', color='red', on_click=confirm_force).props('unelevated')
+                    
+                    confirm_d.open()
+                    
+                else:
+                    # 没占用，直接跑
+                    log_area.push("✅ 端口空闲，直接开始部署...")
+                    await run_deploy_script()
+
+            btn_deploy = ui.button('开始部署', on_click=start_process).classes('bg-red-600 text-white shadow-lg')
 
     d.open()
 
@@ -2383,7 +2433,7 @@ def _exec(server_data, cmd, log_area):
         log_area.push(f"系统错误: {repr(e)}") # 使用 repr 显示详细错误类型
     finally:
         client.close()
-# =================  Cloudflare API 工具类 =================
+# ================= [升级版] Cloudflare API 工具类 (含删除功能) =================
 class CloudflareHandler:
     def __init__(self):
         self.token = ADMIN_CONFIG.get('cf_api_token', '')
@@ -2401,14 +2451,11 @@ class CloudflareHandler:
         return h
 
     def get_zone_id(self, domain_name=None):
-        # 如果没有指定域名，用配置的根域名；如果指定了，尝试匹配
         target = self.root_domain
         if domain_name:
-            # 简单尝试：如果域名以配置的根域名结尾，就用根域名去查 Zone
             if self.root_domain and domain_name.endswith(self.root_domain):
                 target = self.root_domain
             else:
-                # 否则尝试推断：取域名的后两段作为 Zone (如 a.b.com -> b.com)
                 parts = domain_name.split('.')
                 if len(parts) >= 2: target = f"{parts[-2]}.{parts[-1]}"
 
@@ -2427,82 +2474,66 @@ class CloudflareHandler:
             payload = {"value": "flexible"}
             r = requests.patch(url, headers=self._headers(), json=payload, timeout=10)
             if r.json().get('success'): return True, "SSL 已强制设为 Flexible"
-            # 如果已经是 flexible 可能会报错或者返回成功，视情况忽略错误
             return True, "SSL 设置指令已发送" 
         except Exception as e: return False, str(e)
 
-    def force_enable_proxy(self, zone_id, full_domain):
-        """查找现有 DNS 记录并强制开启代理 (小云朵)"""
-        url = f"{self.base_url}/zones/{zone_id}/dns_records?name={full_domain}"
-        try:
-            # 1. 查找记录
-            r = requests.get(url, headers=self._headers(), timeout=10)
-            data = r.json()
-            if not data.get('success') or len(data['result']) == 0:
-                return False, "Cloudflare 中未找到此域名的 DNS 记录"
-            
-            record = data['result'][0]
-            record_id = record['id']
-            current_ip = record['content']
-            current_proxy = record['proxied']
-            
-            # 2. 如果已经是 Proxied，直接返回
-            if current_proxy:
-                return True, "代理 (小云朵) 已处于开启状态"
-            
-            # 3. 更新记录
-            update_url = f"{self.base_url}/zones/{zone_id}/dns_records/{record_id}"
-            payload = {
-                "type": record['type'],
-                "name": full_domain,
-                "content": current_ip,
-                "proxied": True  # ✨ 强制开启
-            }
-            r_up = requests.put(update_url, headers=self._headers(), json=payload, timeout=10)
-            if r_up.json().get('success'): return True, "已自动开启代理 (点亮小云朵)"
-            return False, f"开启代理失败: {r_up.text}"
-            
-        except Exception as e: return False, str(e)
-
     async def auto_configure(self, ip, sub_prefix):
-        """(IP 模式) 全自动流程：新建解析 + 设置 SSL"""
+        """新增解析"""
         if not self.token: return False, "未配置 API Token"
         def _task():
             zone_id, err = self.get_zone_id()
             if not zone_id: return False, err
             
-            ok, msg_ssl = self.set_ssl_flexible(zone_id)
-            if not ok: return False, msg_ssl
+            self.set_ssl_flexible(zone_id)
             
             full_domain = f"{sub_prefix}.{self.root_domain}"
-            # 这里复用之前的 add_dns_record 逻辑 (此处略去重复代码，假设你有 add_dns_record)
-            # 为保证完整性，简写一下 add_dns_record 逻辑:
             url = f"{self.base_url}/zones/{zone_id}/dns_records"
             payload = {"type": "A", "name": full_domain, "content": ip, "ttl": 1, "proxied": True}
-            try: requests.post(url, headers=self._headers(), json=payload, timeout=10)
-            except: pass
+            try: 
+                r = requests.post(url, headers=self._headers(), json=payload, timeout=10)
+                if r.json().get('success'): return True, f"解析成功: {full_domain}"
+                else: return False, f"CF API 报错: {r.text}"
+            except Exception as e: return False, str(e)
             
-            return True, f"成功! 域名: {full_domain}"
         return await run.io_bound(_task)
 
-    async def fix_existing_domain(self, domain):
-        """(域名模式) 修复流程：强制 SSL Flexible + 强制 Proxy"""
-        if not self.token: return False, "未配置 API Token"
+    # ✨✨✨ [新增] 删除指定域名的解析记录 ✨✨✨
+    async def delete_record_by_domain(self, domain_to_delete):
+        if not self.token: return False, "未配置 Cloudflare Token"
+        if not domain_to_delete: return False, "域名为空"
+        
+        # 安全检查：只允许删除属于当前配置根域名的子域名
+        # 防止误删 www.visa.com.hk 或 www.icloud.com
+        if self.root_domain not in domain_to_delete:
+            return False, f"安全拦截: {domain_to_delete} 不属于根域名 {self.root_domain}"
+
         def _task():
-            # 1. 获取 Zone
-            zone_id, err = self.get_zone_id(domain)
-            if not zone_id: return False, err
-            
-            logs = []
-            # 2. 设置 SSL
-            ok, msg = self.set_ssl_flexible(zone_id)
-            logs.append(msg if ok else f"SSL设置失败: {msg}")
-            
-            # 3. 开启 Proxy
-            ok, msg = self.force_enable_proxy(zone_id, domain)
-            logs.append(msg if ok else f"代理设置失败: {msg}")
-            
-            return True, " | ".join(logs)
+            # 1. 获取 Zone ID
+            zone_id, err = self.get_zone_id(domain_to_delete)
+            if not zone_id: return False, f"找不到 Zone: {err}"
+
+            # 2. 搜索该域名的记录 ID
+            search_url = f"{self.base_url}/zones/{zone_id}/dns_records?name={domain_to_delete}"
+            try:
+                r = requests.get(search_url, headers=self._headers(), timeout=10)
+                data = r.json()
+                if not data.get('success'): return False, "查询记录失败"
+                
+                records = data.get('result', [])
+                if not records: return True, "记录不存在，无需删除" # 没找到也算成功
+                
+                # 3. 执行删除 (如果有多个同名记录，全部删除)
+                deleted_count = 0
+                for rec in records:
+                    rec_id = rec['id']
+                    del_url = f"{self.base_url}/zones/{zone_id}/dns_records/{rec_id}"
+                    requests.delete(del_url, headers=self._headers(), timeout=5)
+                    deleted_count += 1
+                
+                return True, f"已清理 {deleted_count} 条 DNS 记录"
+
+            except Exception as e: return False, str(e)
+
         return await run.io_bound(_task)
 
 
@@ -6158,25 +6189,70 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui.button('保存', on_click=save).classes('bg-blue-600 text-white')
             d.open()
 
+
         async def uninstall_and_delete(node_data):
             with ui.dialog() as d, ui.card().classes('w-96 p-6'):
                 with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
-                    ui.icon('warning', size='md'); ui.label('确认卸载节点？').classes('font-bold text-lg')
-                ui.label(f"将停止服务并删除节点 [{node_data.get('remark')}]").classes('text-sm text-gray-600')
+                    ui.icon('delete_forever', size='md'); ui.label('卸载并清理环境').classes('font-bold text-lg')
+                
+                ui.label(f"节点: {node_data.get('remark')}").classes('text-sm font-bold text-gray-800')
+                ui.label("即将执行以下操作：").classes('text-xs text-gray-500 mt-2')
+                
+                # 分析将要删除的域名
+                domain_to_del = None
+                raw_link = node_data.get('_raw_link', '')
+                if raw_link and '://' in raw_link:
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        # 解析 VLESS 链接中的参数
+                        query = urlparse(raw_link).query
+                        params = parse_qs(query)
+                        # 优先找 sni，其次找 host
+                        if 'sni' in params: domain_to_del = params['sni'][0]
+                        elif 'host' in params: domain_to_del = params['host'][0]
+                    except: pass
+                
+                with ui.column().classes('ml-2 gap-1 mt-1'):
+                    ui.label('1. 停止 Xray 服务并清除残留进程').classes('text-xs text-gray-600')
+                    ui.label('2. 删除 Xray 配置文件').classes('text-xs text-gray-600')
+                    if domain_to_del and ADMIN_CONFIG.get('cf_root_domain') in domain_to_del:
+                        ui.label(f'3. 🗑️ 自动删除 CF 解析: {domain_to_del}').classes('text-xs text-red-500 font-bold')
+                    else:
+                        ui.label('3. 跳过 DNS 清理 (非托管域名)').classes('text-xs text-gray-400')
+
                 async def start_uninstall():
                     d.close()
-                    notification = ui.notification(message='正在执行卸载...', timeout=0, spinner=True)
+                    notification = ui.notification(message='正在执行卸载与清理...', timeout=0, spinner=True)
+                    
+                    # 1. 尝试删除 Cloudflare 解析
+                    if domain_to_del:
+                        cf = CloudflareHandler()
+                        # 只有当域名包含我们配置的根域名时才删，防止删错 Visa
+                        if cf.token and cf.root_domain and (cf.root_domain in domain_to_del):
+                            ok, msg = await cf.delete_record_by_domain(domain_to_del)
+                            if ok: safe_notify(f"☁️ {msg}", "positive")
+                            else: safe_notify(f"⚠️ DNS 删除失败: {msg}", "warning")
+
+                    # 2. 执行 SSH 卸载脚本
                     success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, XHTTP_UNINSTALL_SCRIPT))
+                    
                     notification.dismiss()
-                    if success: safe_notify('✅ 服务已停止，配置已清理', 'positive')
-                    else: safe_notify(f'⚠️ 卸载异常: {output}', 'warning')
+                    
+                    if success: 
+                        safe_notify('✅ 服务已卸载，进程已清理', 'positive')
+                    else: 
+                        safe_notify(f'⚠️ SSH 卸载可能有残留: {output}', 'warning')
+                    
+                    # 3. 删除本地数据
                     if 'custom_nodes' in server_conf and node_data in server_conf['custom_nodes']:
                         server_conf['custom_nodes'].remove(node_data)
                         await save_servers()
+                    
                     await reload_and_refresh_ui()
+
                 with ui.row().classes('w-full justify-end mt-6 gap-2'):
-                    ui.button('取消', on_click=d.close).props('flat')
-                    ui.button('确认卸载', on_click=start_uninstall).classes('bg-red-600 text-white')
+                    ui.button('取消', on_click=d.close).props('flat color=grey')
+                    ui.button('确认执行', color='red', on_click=start_uninstall).props('unelevated')
             d.open()
 
         # ================= 布局构建 =================
