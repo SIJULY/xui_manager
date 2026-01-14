@@ -5939,7 +5939,7 @@ SINGLE_COLS_NO_PING = 'grid-template-columns: 3fr 1fr 1.5fr 1fr 1fr 1fr 1.5fr; a
 # ================= 全局配置 =================
 REFRESH_LOCKS = set()
 LAST_SYNC_MAP = {} # 🕒 格式: {'TAG::香港::P1': timestamp, 'TAG::香港::P2': timestamp}
-PAGE_SIZE = 20
+PAGE_SIZE = 30
 SYNC_COOLDOWN = 1800 # 30分钟
 
 # ================= 刷新逻辑 (最终版：页级冷却 + 自动更新) =================
@@ -6540,7 +6540,7 @@ async def render_aggregated_view(server_list, show_ping=False, token=None, initi
         current_css = cols_ping if show_ping else cols_no_ping
 
     # ================= 分页计算 =================
-    PAGE_SIZE = 20  # 必须与 refresh_content 中的定义保持一致
+    PAGE_SIZE = 30  # 必须与 refresh_content 中的定义保持一致
     total_items = len(server_list)
     total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
     
