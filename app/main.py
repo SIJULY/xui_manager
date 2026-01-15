@@ -10544,8 +10544,6 @@ async def render_mobile_status_page():
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("🚀 系统正在初始化...")
     
-    # ✨✨✨ 启动配置 (已开启静默重连) ✨✨✨
-    # reconnect_timeout=600.0: 允许客户端断线 10 分钟内自动重连而不刷新页面
     ui.run(
         title='X-Fusion Panel', 
         host='0.0.0.0', 
@@ -10553,5 +10551,15 @@ if __name__ in {"__main__", "__mp_main__"}:
         language='zh-CN', 
         storage_secret='sijuly_secret_key', 
         reload=False, 
-        reconnect_timeout=600.0 
+        reconnect_timeout=600.0,
+        
+        # ✨✨✨ 【关键修改】针对 Cloudflare 的心跳保活设置 ✨✨✨
+        uvicorn_kwargs={
+            # Cloudflare 会在 100秒无数据时断开，所以我们设置为 20秒 发一次心跳
+            'ws_ping_interval': 20, 
+            # 如果发送心跳后 20秒没回应，视为断开
+            'ws_ping_timeout': 20,
+            # 保持连接的超时时间
+            'timeout_keep_alive': 60
+        }
     )
