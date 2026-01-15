@@ -2968,105 +2968,114 @@ def generate_node_link(node, server_host):
         return ""
     return ""
 
-# ================= 生成 Surge/Loon 格式明文配置 (教程适配版) =================
+# ================= 生成 Surge/Loon 格式明文配置 (修复 Host/SNI 冲突版) =================
 def generate_detail_config(node, server_host):
     try:
-        # 1. 优先处理自定义节点 (一键部署的 Hy2/XHTTP)
+        # 1. 基础信息清洗
+        clean_host = server_host.replace('http://', '').replace('https://', '')
+        if ':' in clean_host and not clean_host.startswith('['):
+            clean_host = clean_host.split(':')[0]
+
+        remark = node.get('remark', 'Unnamed').replace(',', '_').replace('=', '_').strip()
+        address = node.get('listen') or clean_host
+        port = node['port']
+        
+        # === A. 自定义节点 (Hy2) ===
         if node.get('_is_custom'):
             raw_link = node.get('_raw_link', '')
-            remark = node.get('remark', 'Hy2-Node')
-            
-            # --- Hysteria 2 (纯净版 - 无混淆，完美适配 Surge 教程) ---
             if raw_link.startswith('hy2://'):
                 from urllib.parse import urlparse, parse_qs
                 parsed = urlparse(raw_link)
                 password = parsed.username
-                host = parsed.hostname
-                port = parsed.port
+                h_host = parsed.hostname or address 
+                h_port = parsed.port or port
                 params = parse_qs(parsed.query)
-                
                 sni = params.get('sni', [''])[0] or params.get('peer', [''])[0]
                 
-                # 构建 Surge 格式
-                # 格式: 节点名 = hysteria2, IP, Port, password=..., sni=..., skip-cert-verify=true, download-bandwidth=500
-                
-                surge_line = f"{remark} = hysteria2, {host}, {port}, password={password}"
-                
-                if sni: 
-                    surge_line += f", sni={sni}"
-                
-                # 教程重点：强制跳过证书验证
-                surge_line += ", skip-cert-verify=true"
-                
-                # 教程重点：强制指定带宽 (Surge 必需)
-                surge_line += ", download-bandwidth=500"
-                
-                # 补充 UDP 转发支持
-                surge_line += ", udp-relay=true"
-                
-                return surge_line
+                line = f"{remark} = hysteria2, {h_host}, {h_port}, password={password}"
+                if sni: line += f", sni={sni}"
+                line += ", skip-cert-verify=true, download-bandwidth=500, udp-relay=true"
+                return line
+            elif raw_link.startswith('vless://'):
+                 return f"// Surge 暂未原生支持 XHTTP: {remark}"
 
-            # --- XHTTP (Surge 暂不支持，保持原样) ---
-            elif raw_link.startswith('vless://') and 'type=xhttp' in raw_link:
-                 return f"// Surge 暂不支持 XHTTP 直连配置: {raw_link}"
-
-        # 2. 处理面板原有节点逻辑 (保持完全不变，防止影响 VMess/Trojan)
-        p = node['protocol']
-        remark = node['remark']
-        port = node['port']
-        add = node.get('listen') or server_host
+        # === B. 面板标准节点 (VMess / Trojan) ===
+        protocol = node['protocol']
         
-        # 安全解析配置
-        s = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
-        st = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
+        # 解析 JSON 配置
+        settings = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
+        stream = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
         
-        net = st.get('network', 'tcp')
-        security = st.get('security', 'none')
-        tls = (security == 'tls')
+        net = stream.get('network', 'tcp')
+        security = stream.get('security', 'none')
+        tls = (security == 'tls') or (security == 'reality')
         
-        # 旧版兼容格式: protocol=ip:port, ... tag=Name
-        base = f"{p}={add}:{port}"
-        params = []
-
-        if p == 'vmess':
-            uuid = s['clients'][0]['id']
-            params.append("method=auto")
-            params.append(f"password={uuid}")
-            params.append("fast-open=false")
-            params.append("udp-relay=false")
+        # --- VMess ---
+        if protocol == 'vmess':
+            uuid = settings['clients'][0]['id']
+            line = f"{remark} = vmess, {address}, {port}, username={uuid}"
             
+            # WebSocket 处理
             if net == 'ws':
-                ws_set = st.get('wsSettings', {})
+                ws_set = stream.get('wsSettings', {})
                 path = ws_set.get('path', '/')
-                host = ws_set.get('headers', {}).get('Host', '')
-                params.append("obfs=websocket")
-                params.append(f"obfs-uri={path}")
-                if host: params.append(f"obfs-host={host}")
-            
+                
+                # 获取面板里的 Host
+                panel_host = ws_set.get('headers', {}).get('Host', '')
+                
+                # 获取 TLS SNI
+                sni = ""
+                if tls:
+                    tls_set = stream.get('tlsSettings', {})
+                    sni = tls_set.get('serverName', '')
+
+                line += f", ws=true, ws-path={path}"
+                
+                # ✨✨✨ 核心修复逻辑 ✨✨✨
+                # 如果开启了 TLS 且有 SNI，我们忽略面板里可能错误的 Host，
+                # 除非你确定需要 Domain Fronting。对于你的情况，SNI 和 Host 不一致会导致连不上。
+                # Surge 在 TLS 模式下，如果不写 ws-headers，默认会把 Host 设为 SNI，这是最稳妥的。
+                
+                final_host = panel_host
+                
+                # 如果有 SNI，且面板 Host 看起来像那个残留的 "ltetp.tv189.com"，或者为了稳妥起见
+                # 我们强制不写入 ws-headers，让 Surge 自动使用 SNI 作为 Host
+                if tls and sni:
+                    # 策略：只要有 SNI，就不写 ws-headers (让 Surge 自动处理 Host)
+                    # 这样就过滤掉了面板里填错的 ltetp.tv189.com
+                    pass 
+                elif panel_host:
+                    # 没有 TLS 或者没有 SNI 时，才写入面板的 Host
+                    line += f", ws-headers=Host:{panel_host}"
+                
+            # TLS 处理
             if tls:
-                params.append("tls=true")
-                tls_set = st.get('tlsSettings', {})
+                line += ", tls=true"
+                tls_set = stream.get('tlsSettings', {})
                 sni = tls_set.get('serverName', '')
-                if sni: params.append(f"sni={sni}")
+                if sni: line += f", sni={sni}"
+                # 增加跳过证书验证，提高自签证书成功率
+                line += ", skip-cert-verify=true"
+            
+            line += ", tfo=true, udp-relay=true"
+            return line
 
-        elif p == 'trojan':
-            pwd = s['clients'][0]['password']
-            params.append(f"password={pwd}")
+        # --- Trojan ---
+        elif protocol == 'trojan':
+            password = settings['clients'][0]['password']
+            line = f"{remark} = trojan, {address}, {port}, password={password}"
             if tls:
-                params.append("tls=true")
-                sni = st.get('tlsSettings', {}).get('serverName', '')
-                if sni: params.append(f"sni={sni}")
-        
-        else:
-            return ""
-
-        params.append(f"tag={remark}")
-        return f"{base}, {', '.join(params)}"
+                line += ", tls=true"
+                sni = stream.get('tlsSettings', {}).get('serverName', '')
+                if sni: line += f", sni={sni}"
+                line += ", skip-cert-verify=true"
+            line += ", tfo=true, udp-relay=true"
+            return line
 
     except Exception as e:
-        print(f"Format Error: {e}")
-        return ""
-
+        return f"// Config Error: {str(e)}"
+    
+    return ""
 # ================= 延迟测试核心逻辑  =================
 PING_CACHE = {}
 
@@ -3245,25 +3254,31 @@ async def group_sub_handler(group_b64: str, request: Request):
         
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
-# ================= 短链接接口：分组 (智能跟随版 - Surge原生生成) =================
+# ================= 短链接接口：分组 (完美混合版) =================
 @app.get('/get/group/{target}/{group_b64}')
 async def short_group_handler(target: str, group_b64: str, request: Request):
     try:
         group_name = decode_base64_safe(group_b64)
         if not group_name: return Response("Invalid Group Name", 400)
 
-        # ✨✨✨ 针对 Surge 直接使用 Python 生成，避开 SubConverter 的 Bug ✨✨✨
+        # -------------------------------------------------------------
+        # 策略 A: 针对 Surge / Loon -> 使用 Python 原生生成 (解决 Hy2 无法转换 + VMess 格式问题)
+        # -------------------------------------------------------------
         if target == 'surge':
             links = []
+            
+            # 1. 筛选服务器
             target_servers = [
                 s for s in SERVERS_CACHE 
                 if s.get('group', '默认分组') == group_name or group_name in s.get('tags', [])
             ]
             
+            # 2. 遍历服务器生成配置
             for srv in target_servers:
                 panel_nodes = NODES_DATA.get(srv['url'], []) or []
                 custom_nodes = srv.get('custom_nodes', []) or []
                 
+                # 获取干净的 Host
                 raw_url = srv['url']
                 try:
                     if '://' not in raw_url: raw_url = f'http://{raw_url}'
@@ -3271,28 +3286,44 @@ async def short_group_handler(target: str, group_b64: str, request: Request):
                     host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
                 except: host = raw_url
 
-                # 遍历所有节点生成 Surge 格式
+                # 合并处理面板节点和自定义节点
                 for n in (panel_nodes + custom_nodes):
                     if n.get('enable'):
-                        # 调用上面的 generate_detail_config (已包含带宽参数)
+                        # 调用我们修复后的 generate_detail_config
                         line = generate_detail_config(n, host)
-                        if line and not line.startswith('//'):
+                        if line and not line.startswith('//') and not line.startswith('None'):
                             links.append(line)
-                            
+            
             if not links:
                 return Response(f"// Group [{group_name}] is empty", media_type="text/plain; charset=utf-8")
                 
             return Response("\n".join(links), media_type="text/plain; charset=utf-8")
 
-        # === 非 Surge 客户端 (Clash等) 继续走 SubConverter ===
+        # -------------------------------------------------------------
+        # 策略 B: 针对 Clash / 其他 -> 继续使用 SubConverter
+        # (注意：SubConverter 可能依然无法解析 Hy2，但能正常解析 VMess)
+        # -------------------------------------------------------------
         custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        if custom_base: base_url = custom_base
+        if custom_base: 
+            base_url = custom_base
         else:
-            host = request.headers.get('host'); scheme = request.url.scheme
+            host = request.headers.get('host')
+            scheme = request.url.scheme
             base_url = f"{scheme}://{host}"
 
         internal_api = f"{base_url}/sub/group/{group_b64}"
-        params = { "target": target, "url": internal_api, "insert": "false", "list": "true", "ver": "4", "udp": "true", "scv": "true" }
+        
+        # 关键参数：scv=true (跳过证书验证), udp=true
+        params = { 
+            "target": target, 
+            "url": internal_api, 
+            "insert": "false", 
+            "list": "true", 
+            "ver": "4", 
+            "udp": "true", 
+            "scv": "true" 
+        }
+        
         converter_api = "http://subconverter:25500/sub"
 
         def _fetch_sync():
@@ -3303,18 +3334,20 @@ async def short_group_handler(target: str, group_b64: str, request: Request):
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            return Response(f"SubConverter Error", status_code=502)
+            return Response(f"SubConverter Error (Code: {getattr(response, 'status_code', 'Unk')})", status_code=502)
 
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
     
-# ================= 短链接接口：单个订阅 (智能跟随版 - Surge原生生成) =================
+# ================= 短链接接口：单个订阅 (完美混合版) =================
 @app.get('/get/sub/{target}/{token}')
 async def short_sub_handler(target: str, token: str, request: Request):
     try:
         sub_obj = next((s for s in SUBS_CACHE if s['token'] == token), None)
         if not sub_obj: return Response("Subscription Not Found", 404)
         
-        # ✨✨✨ 针对 Surge 直接使用 Python 生成，避开 SubConverter 的 Bug ✨✨✨
+        # -------------------------------------------------------------
+        # 策略 A: 针对 Surge -> Python 原生生成
+        # -------------------------------------------------------------
         if target == 'surge':
             links = []
             sub_nodes_set = set(sub_obj.get('nodes', []))
@@ -3322,9 +3355,8 @@ async def short_sub_handler(target: str, token: str, request: Request):
             for srv in SERVERS_CACHE:
                 panel_nodes = NODES_DATA.get(srv['url'], []) or []
                 custom_nodes = srv.get('custom_nodes', []) or []
-                all_nodes = panel_nodes + custom_nodes
-                if not all_nodes: continue
                 
+                # 获取 Host
                 raw_url = srv['url']
                 try:
                     if '://' not in raw_url: raw_url = f'http://{raw_url}'
@@ -3332,34 +3364,42 @@ async def short_sub_handler(target: str, token: str, request: Request):
                     host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
                 except: host = raw_url
                 
-                for n in all_nodes:
-                    # 检查节点是否在订阅列表中
+                for n in (panel_nodes + custom_nodes):
+                    # 检查节点ID是否在订阅中
                     if f"{srv['url']}|{n['id']}" in sub_nodes_set:
-                        # 调用上面的 generate_detail_config (已包含带宽参数)
                         line = generate_detail_config(n, host)
-                        if line and not line.startswith('//'):
+                        if line and not line.startswith('//') and not line.startswith('None'):
                             links.append(line)
                             
             return Response("\n".join(links), media_type="text/plain; charset=utf-8")
 
-        # === 非 Surge 客户端 (Clash等) 继续走 SubConverter ===
+        # -------------------------------------------------------------
+        # 策略 B: Clash / 其他 -> SubConverter
+        # -------------------------------------------------------------
         custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        if custom_base: base_url = custom_base
+        if custom_base: 
+            base_url = custom_base
         else:
-            host = request.headers.get('host'); scheme = request.url.scheme
+            host = request.headers.get('host')
+            scheme = request.url.scheme
             base_url = f"{scheme}://{host}"
             
         internal_api = f"{base_url}/sub/{token}"
         opt = sub_obj.get('options', {})
         
         params = {
-            "target": target, "url": internal_api, "insert": "false", "list": "true", "ver": "4",
-            "emoji": str(opt.get('emoji', True)).lower(), "udp": str(opt.get('udp', True)).lower(),
-            "tfo": str(opt.get('tfo', False)).lower(), "scv": str(opt.get('skip_cert', True)).lower(),
+            "target": target, "url": internal_api, 
+            "insert": "false", "list": "true", "ver": "4",
+            "emoji": str(opt.get('emoji', True)).lower(), 
+            "udp": str(opt.get('udp', True)).lower(),
+            "tfo": str(opt.get('tfo', False)).lower(), 
+            "scv": str(opt.get('skip_cert', True)).lower(),
             "sort": str(opt.get('sort', False)).lower(),
         }
         
-        regions = opt.get('regions', []); includes = []
+        # 处理正则过滤
+        regions = opt.get('regions', [])
+        includes = []
         if opt.get('include_regex'): includes.append(opt['include_regex'])
         if regions:
             region_keywords = []
@@ -3369,6 +3409,7 @@ async def short_sub_handler(target: str, token: str, request: Request):
                 for c, v in AUTO_COUNTRY_MAP.items(): 
                     if v == r and len(c) == 2: region_keywords.append(c)
             if region_keywords: includes.append(f"({'|'.join(region_keywords)})")
+        
         if includes: params['include'] = "|".join(includes)
         if opt.get('exclude_regex'): params['exclude'] = opt['exclude_regex']
         
@@ -3376,6 +3417,7 @@ async def short_sub_handler(target: str, token: str, request: Request):
         if ren_pat: params['rename'] = f"{ren_pat}@{opt.get('rename_replacement', '')}"
 
         converter_api = "http://subconverter:25500/sub"
+        
         def _fetch_sync():
             try: return requests.get(converter_api, params=params, timeout=10)
             except: return None
@@ -3384,7 +3426,7 @@ async def short_sub_handler(target: str, token: str, request: Request):
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            return Response(f"SubConverter Error", status_code=502)
+            return Response(f"SubConverter Error (Code: {getattr(response, 'status_code', 'Unk')})", status_code=502)
 
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
 
