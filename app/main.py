@@ -4302,11 +4302,14 @@ def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
 
 
-# ================= [性能重构版] 全能订阅编辑器 =================
+# ================= 全能订阅编辑器 =================
 class AdvancedSubEditor:
     def __init__(self, sub_data=None):
+        import copy # ✨✨✨ 修复核心：引入 copy 模块，解决报错 ✨✨✨
+        
+        # 1. 数据初始化 (确保深拷贝，防止直接修改源数据)
         if sub_data:
-            self.sub = sub_data.copy()
+            self.sub = copy.deepcopy(sub_data)
         else:
             self.sub = {'name': '', 'token': str(uuid.uuid4()), 'nodes': [], 'options': {}}
             
@@ -4316,14 +4319,18 @@ class AdvancedSubEditor:
         self.selected_ids = list(self.sub.get('nodes', []))
         
         # 缓存映射
-        self.all_nodes_map = {} # { 'url|id': node_obj }
-        self.ui_groups = {} 
+        self.all_nodes_map = {} 
+        self.ui_groups = {}      # 左侧节点行引用 {key: {row, text}}
+        self.server_expansions = {} # 服务器折叠面板引用
+        self.server_items = {} # 服务器下的节点列表引用
         
-        # 预览列表的 UI 引用
+        self.search_text = ""    
+        
+        # UI 引用
         self.preview_container = None
+        self.left_scroll = None
 
     def ui(self, dlg):
-        # 1. 预处理数据
         self._preload_data()
 
         with ui.card().classes('w-full max-w-6xl h-[90vh] flex flex-col p-0 overflow-hidden'):
@@ -4333,51 +4340,61 @@ class AdvancedSubEditor:
                 with ui.row().classes('items-center gap-2'):
                     ui.icon('tune', color='primary').classes('text-xl')
                     ui.label('订阅高级管理').classes('text-lg font-bold')
-                    ui.badge('性能优化版', color='green').props('outline size=xs')
+                    ui.badge('购物车模式', color='orange').props('outline size=xs')
                 ui.button(icon='close', on_click=dlg.close).props('flat round dense color=grey')
 
-            # --- 内容区 (三栏布局: 选择源 | 功能区 | 结果预览) ---
+            # --- 内容区 ---
             with ui.row().classes('w-full flex-grow overflow-hidden gap-0'):
                 
-                # ================= 1. 左侧：节点选择源 (占 40%) =================
+                # ================= 1. 左侧：节点仓库 (40%) =================
                 with ui.column().classes('w-2/5 h-full border-r border-gray-200 flex flex-col bg-gray-50'):
-                    # 搜索栏 (带防抖)
-                    with ui.row().classes('w-full p-2 border-b bg-white gap-2 items-center'):
-                        # ✨✨✨ 关键修复：添加 debounce="500" 防止卡死 ✨✨✨
-                        ui.input(placeholder='🔍 搜索节点 (防抖)', on_change=self.on_search).props('outlined dense dense debounce="500"').classes('flex-grow')
-                        ui.button(icon='select_all', on_click=lambda: self.batch_select(True)).props('flat dense round size=sm').tooltip('全选搜索结果')
-                        ui.button(icon='clear', on_click=lambda: self.batch_select(False)).props('flat dense round size=sm color=red').tooltip('取消全选搜索结果')
+                    # 工具栏
+                    with ui.column().classes('w-full p-2 border-b bg-white gap-2'):
+                        # 搜索框 (仅过滤左侧)
+                        ui.input(placeholder='🔍 搜索源节点 (如: 日本)', on_change=self.on_search) \
+                            .props('outlined dense dense debounce="300"').classes('w-full')
+                        
+                        # 操作按钮
+                        with ui.row().classes('w-full justify-between items-center'):
+                            ui.label('筛选结果操作:').classes('text-xs text-gray-400')
+                            with ui.row().classes('gap-1'):
+                                ui.button('全选', icon='add_circle', on_click=lambda: self.batch_select(True)) \
+                                    .props('unelevated dense size=sm color=blue-6') \
+                                    .tooltip('将当前搜索到的节点全部加入右侧')
+                                
+                                ui.button('清空', icon='remove_circle', on_click=lambda: self.batch_select(False)) \
+                                    .props('flat dense size=sm color=grey-6') \
+                                    .tooltip('将当前搜索到的节点从右侧移除')
 
-                    # 滚动列表容器
-                    with ui.scroll_area().classes('w-full flex-grow p-2'):
+                    # 列表容器
+                    with ui.scroll_area().classes('w-full flex-grow p-2') as area:
+                        self.left_scroll = area
                         self.list_container = ui.column().classes('w-full gap-2')
-                        # 异步渲染，防止打开时卡顿
                         ui.timer(0.1, lambda: asyncio.create_task(self._render_node_tree()), once=True)
 
-                # ================= 2. 中间：功能设置 (占 30%) =================
-                with ui.column().classes('w-[30%] h-full border-r border-gray-200 flex flex-col bg-white overflow-y-auto'):
+                # ================= 2. 中间：功能区 (25%) =================
+                with ui.column().classes('w-1/4 h-full border-r border-gray-200 flex flex-col bg-white overflow-y-auto'):
                     with ui.column().classes('w-full p-4 gap-4'):
                         
-                        # A. 基础信息
+                        # A. 基础信息 (确保回显)
                         ui.label('① 基础设置').classes('text-xs font-bold text-blue-500 uppercase')
                         
-                        # ✨✨✨ 修复：显式设置 value 参数，确保弹窗打开时立即回显数据 ✨✨✨
+                        # ✨✨✨ 显式赋值 value，确保数据回显 ✨✨✨
                         ui.input('订阅名称', value=self.sub.get('name', '')) \
                             .bind_value_to(self.sub, 'name') \
                             .props('outlined dense').classes('w-full')
                         
                         with ui.row().classes('w-full gap-1'):
-                            ui.input('Token (路径)', value=self.sub.get('token', '')) \
+                            ui.input('Token', value=self.sub.get('token', '')) \
                                 .bind_value_to(self.sub, 'token') \
                                 .props('outlined dense').classes('flex-grow')
                             
-                            ui.button(icon='refresh', on_click=lambda: self.sub.update({'token': str(uuid.uuid4())[:8]})).props('flat dense').tooltip('随机生成')
+                            ui.button(icon='refresh', on_click=lambda: self.sub.update({'token': str(uuid.uuid4())[:8]})).props('flat dense')
 
                         ui.separator()
 
-                        # B. 排序工具
-                        ui.label('② 排序工具 (实时生效)').classes('text-xs font-bold text-blue-500 uppercase')
-                        ui.label('点击下方按钮，观察右侧列表变化').classes('text-[10px] text-gray-400')
+                        # B. 排序
+                        ui.label('② 排序工具').classes('text-xs font-bold text-blue-500 uppercase')
                         with ui.grid().classes('w-full grid-cols-2 gap-2'):
                             ui.button('名称 A-Z', on_click=lambda: self.sort_nodes('name_asc')).props('outline dense size=sm')
                             ui.button('名称 Z-A', on_click=lambda: self.sort_nodes('name_desc')).props('outline dense size=sm')
@@ -4386,7 +4403,7 @@ class AdvancedSubEditor:
 
                         ui.separator()
 
-                        # C. 正则重命名
+                        # C. 重命名
                         ui.label('③ 批量重命名').classes('text-xs font-bold text-blue-500 uppercase')
                         with ui.column().classes('w-full gap-2 bg-blue-50 p-2 rounded border border-blue-100'):
                             opt = self.sub.get('options', {})
@@ -4396,16 +4413,18 @@ class AdvancedSubEditor:
                             def apply_regex():
                                 self.sub['options']['rename_pattern'] = pat.value
                                 self.sub['options']['rename_replacement'] = rep.value
-                                self.update_preview() # 刷新预览
-                                safe_notify('重命名规则已应用，请看右侧预览', 'positive')
+                                self.update_preview()
+                                safe_notify('预览已刷新', 'positive')
 
-                            ui.button('应用并预览', on_click=apply_regex).props('unelevated dense size=sm color=blue').classes('w-full')
+                            ui.button('刷新预览', on_click=apply_regex).props('unelevated dense size=sm color=blue').classes('w-full')
 
-                # ================= 3. 右侧：结果预览 (占 30%) =================
-                with ui.column().classes('w-[30%] h-full bg-slate-50 flex flex-col'):
-                    with ui.row().classes('w-full p-2 border-b bg-white items-center justify-between'):
-                        ui.label('最终结果预览').classes('font-bold text-gray-700')
-                        ui.label('').bind_text_from(self, 'selected_ids', lambda x: f"共 {len(x)} 个")
+                # ================= 3. 右侧：已选清单 (35%) =================
+                with ui.column().classes('w-[35%] h-full bg-slate-50 flex flex-col'):
+                    with ui.row().classes('w-full p-3 border-b bg-white items-center justify-between shadow-sm z-10'):
+                        ui.label('已选节点清单').classes('font-bold text-gray-800')
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label('').bind_text_from(self, 'selected_ids', lambda x: f"{len(x)}")
+                            ui.button('清空全部', icon='delete_forever', on_click=self.clear_all_selected).props('flat dense size=sm color=red')
 
                     with ui.scroll_area().classes('w-full flex-grow p-2'):
                         self.preview_container = ui.column().classes('w-full gap-1')
@@ -4417,7 +4436,6 @@ class AdvancedSubEditor:
                     if not self.sub.get('name'): return safe_notify('名称不能为空', 'negative')
                     self.sub['nodes'] = self.selected_ids
                     
-                    # 保存逻辑
                     found = False
                     for i, s in enumerate(SUBS_CACHE):
                         if s.get('token') == self.sub['token']:
@@ -4427,25 +4445,23 @@ class AdvancedSubEditor:
                     await save_subs(); await load_subs_view()
                     dlg.close(); safe_notify('✅ 订阅保存成功', 'positive')
 
-                ui.button('仅保存配置', icon='save', on_click=save_all).classes('bg-slate-800 text-white')
+                ui.button('保存配置', icon='save', on_click=save_all).classes('bg-slate-800 text-white shadow-lg')
 
     def _preload_data(self):
-        """预加载节点映射，用于排序和预览"""
         self.all_nodes_map = {}
         for srv in SERVERS_CACHE:
             nodes = (NODES_DATA.get(srv['url'], []) or []) + srv.get('custom_nodes', [])
             for n in nodes:
                 key = f"{srv['url']}|{n['id']}"
-                # 注入临时属性方便排序
                 n['_server_name'] = srv['name']
                 self.all_nodes_map[key] = n
 
-    # ✨✨✨ 核心优化：异步分批渲染，解决卡死 ✨✨✨
     async def _render_node_tree(self):
         self.list_container.clear()
         self.ui_groups = {}
+        self.server_expansions = {}
+        self.server_items = {}
         
-        # 1. 数据分组准备 (同步操作，很快)
         grouped = {}
         for srv in SERVERS_CACHE:
             nodes = (NODES_DATA.get(srv['url'], []) or []) + srv.get('custom_nodes', [])
@@ -4459,66 +4475,95 @@ class AdvancedSubEditor:
             if g_name not in grouped: grouped[g_name] = []
             grouped[g_name].append({'server': srv, 'nodes': nodes})
 
-        # 2. 异步渲染循环
         sorted_groups = sorted(grouped.keys())
         with self.list_container:
             for i, g_name in enumerate(sorted_groups):
-                # 🛑 防卡死关键：每渲染 2 个分组，就挂起一下，让 UI 线程喘口气
                 if i % 2 == 0: await asyncio.sleep(0.01)
                 
-                with ui.expansion(g_name, icon='folder', value=True).classes('w-full border rounded bg-white shadow-sm mb-1').props('header-class="bg-gray-100 text-sm font-bold p-2 min-h-0"'):
+                # 创建折叠面板
+                exp = ui.expansion(g_name, icon='folder', value=True).classes('w-full border rounded bg-white shadow-sm mb-1').props('header-class="bg-gray-100 text-sm font-bold p-2 min-h-0"')
+                
+                # 记录引用，方便后续控制显示/隐藏
+                self.server_expansions[g_name] = exp
+                self.server_items[g_name] = [] 
+                
+                with exp:
                     with ui.column().classes('w-full p-2 gap-2'):
                         for item in grouped[g_name]:
                             srv = item['server']
+                            search_key = f"{srv['name']}".lower()
+                            container = ui.column().classes('w-full gap-1')
                             
-                            # 服务器标题小条
-                            with ui.row().classes('w-full items-center gap-1 mt-1'):
-                                ui.icon('dns', size='xs').classes('text-blue-400')
-                                ui.label(srv['name']).classes('text-xs font-bold text-gray-500 truncate')
+                            # 记录该服务器的引用 (用于级联隐藏)
+                            # 我们将整个服务器块作为一个整体控制显隐不太方便，因为要遍历节点
+                            # 所以这里我们采用“如果服务器下所有节点都隐藏，则隐藏服务器头”的策略
+                            
+                            with container:
+                                # 服务器头
+                                server_header = ui.row().classes('w-full items-center gap-1 mt-1 px-1')
+                                with server_header:
+                                    ui.icon('dns', size='xs').classes('text-blue-400')
+                                    ui.label(srv['name']).classes('text-xs font-bold text-gray-500 truncate')
 
-                            # 节点列表
-                            for n in item['nodes']:
-                                key = f"{srv['url']}|{n['id']}"
-                                is_checked = key in self.selected_ids
-                                
-                                # 极简行样式，减少 DOM 负担
-                                with ui.row().classes('w-full items-center pl-2 py-1 hover:bg-blue-50 rounded cursor-pointer transition') as row:
-                                    chk = ui.checkbox(value=is_checked).props('dense size=xs')
-                                    chk.on_value_change(lambda e, k=key: self.toggle_node(k, e.value))
+                                for n in item['nodes']:
+                                    key = f"{srv['url']}|{n['id']}"
+                                    is_checked = key in self.selected_ids
                                     
-                                    # 点击行勾选
-                                    row.on('click', lambda _, c=chk: c.set_value(not c.value))
-                                    chk.on('click.stop', lambda: None)
+                                    # 将 key 加入分组索引
+                                    self.server_items[g_name].append(key)
                                     
-                                    ui.label(n.get('remark', '未命名')).classes('text-xs text-gray-700 truncate flex-grow')
-                                    
-                                    # 存储引用用于搜索
-                                    self.ui_groups[key] = {
-                                        'row': row, 'chk': chk,
-                                        'text': f"{srv['name']} {n.get('remark','')}".lower()
-                                    }
+                                    # 节点行
+                                    with ui.row().classes('w-full items-center pl-2 py-1 hover:bg-blue-50 rounded cursor-pointer transition border border-transparent') as row:
+                                        chk = ui.checkbox(value=is_checked).props('dense size=xs')
+                                        chk.disable() 
+                                        row.on('click', lambda _, k=key: self.toggle_node_from_left(k))
+                                        
+                                        ui.label(n.get('remark', '未命名')).classes('text-xs text-gray-700 truncate flex-grow')
+                                        
+                                        full_text = f"{search_key} {n.get('remark','')} {n.get('protocol','')}".lower()
+                                        
+                                        # ✨ 保存更多上下文信息，用于级联隐藏
+                                        self.ui_groups[key] = {
+                                            'row': row, 'chk': chk, 'text': full_text, 
+                                            'group_name': g_name, 'header': server_header,
+                                            'container': container # 服务器容器
+                                        }
 
-    def toggle_node(self, key, value):
-        if value:
-            if key not in self.selected_ids: self.selected_ids.append(key)
+    def toggle_node_from_left(self, key):
+        if key in self.selected_ids:
+            self.remove_node(key) 
         else:
-            if key in self.selected_ids: self.selected_ids.remove(key)
-        self.update_preview() # 实时更新右侧预览
+            self.selected_ids.append(key)
+            self.update_preview()
+            if key in self.ui_groups:
+                self.ui_groups[key]['chk'].value = True
+                self.ui_groups[key]['row'].classes(add='bg-blue-50 border-blue-200', remove='border-transparent')
+
+    def remove_node(self, key):
+        if key in self.selected_ids:
+            self.selected_ids.remove(key)
+            self.update_preview()
+            if key in self.ui_groups:
+                self.ui_groups[key]['chk'].value = False
+                self.ui_groups[key]['row'].classes(remove='bg-blue-50 border-blue-200', add='border-transparent')
+
+    def clear_all_selected(self):
+        for key in list(self.selected_ids):
+            self.remove_node(key)
 
     def update_preview(self):
-        """更新右侧的排序结果预览"""
         self.preview_container.clear()
-        
-        # 获取正则配置
         pat = self.sub.get('options', {}).get('rename_pattern', '')
         rep = self.sub.get('options', {}).get('rename_replacement', '')
         
         with self.preview_container:
             if not self.selected_ids:
-                ui.label('未选择节点').classes('text-gray-400 text-sm text-center mt-10')
+                with ui.column().classes('w-full items-center mt-10 text-gray-300 gap-2'):
+                    ui.icon('shopping_cart', size='3rem')
+                    ui.label('清单为空').classes('text-sm')
+                    ui.label('请从左侧选择节点').classes('text-xs')
                 return
 
-            # 使用 ui.scroll_area 优化长列表
             with ui.column().classes('w-full gap-1'):
                 for idx, key in enumerate(self.selected_ids):
                     node = self.all_nodes_map.get(key)
@@ -4526,60 +4571,113 @@ class AdvancedSubEditor:
                     
                     original_name = node.get('remark', 'Unknown')
                     final_name = original_name
-                    
-                    # 模拟正则替换效果
                     if pat:
                         try:
                             import re
                             final_name = re.sub(pat, rep, original_name)
                         except: pass
                     
-                    # 渲染简单的预览条
-                    with ui.row().classes('w-full items-center p-1 bg-white border border-gray-100 rounded'):
-                        ui.label(str(idx+1)).classes('text-[10px] text-gray-400 w-6 text-center')
+                    with ui.row().classes('w-full items-center p-1.5 bg-white border border-gray-200 rounded shadow-sm group hover:border-red-300 transition'):
+                        ui.label(str(idx+1)).classes('text-[10px] text-gray-400 w-5 text-center')
+                        chk = ui.checkbox(value=True).props('dense size=xs color=green')
+                        chk.on_value_change(lambda e, k=key: self.remove_node(k) if not e.value else None)
                         
-                        if final_name != original_name:
-                            # 显示改名效果
-                            with ui.column().classes('gap-0 leading-none'):
+                        with ui.column().classes('gap-0 leading-none flex-grow ml-1'):
+                            if final_name != original_name:
                                 ui.label(final_name).classes('text-xs font-bold text-blue-600')
                                 ui.label(original_name).classes('text-[9px] text-gray-400 line-through')
-                        else:
-                            ui.label(final_name).classes('text-xs text-gray-700')
+                            else:
+                                ui.label(final_name).classes('text-xs font-bold text-gray-700')
+                        
+                        ui.button(icon='close', on_click=lambda _, k=key: self.remove_node(k)).props('flat dense size=xs color=red').classes('opacity-0 group-hover:opacity-100 transition')
 
     def sort_nodes(self, mode):
         if not self.selected_ids: return safe_notify('列表为空', 'warning')
-        
-        # 构建临时对象列表
         objs = []
         for k in self.selected_ids:
             n = self.all_nodes_map.get(k)
             if n: objs.append({'key': k, 'name': n.get('remark', '').lower()})
         
-        # 执行排序
         if mode == 'name_asc': objs.sort(key=lambda x: x['name'])
         elif mode == 'name_desc': objs.sort(key=lambda x: x['name'], reverse=True)
         elif mode == 'random': import random; random.shuffle(objs)
         elif mode == 'reverse': objs.reverse()
         
-        # 更新 ID 列表
         self.selected_ids = [x['key'] for x in objs]
-        self.update_preview() # 立即刷新预览
+        self.update_preview()
         safe_notify(f'已按 {mode} 重新排序', 'positive')
 
     def on_search(self, e):
+        """✨ 智能过滤：仅过滤左侧列表，且自动隐藏空分组 ✨"""
         txt = str(e.value).lower().strip()
+        
+        # 1. 第一步：先控制每个节点的显隐
         for key, item in self.ui_groups.items():
             visible = (not txt) or (txt in item['text'])
             item['row'].set_visibility(visible)
+            
+        # 2. 第二步：检查每个服务器分组，是否还有可见节点
+        for g_name, keys in self.server_items.items():
+            # 统计该分组下有多少个可见节点
+            visible_count = 0
+            
+            # 这里需要更细粒度的控制：
+            # 如果一个服务器下的所有节点都隐藏了，那么服务器标题也要隐藏
+            # 如果一个分组下的所有服务器都隐藏了，那么分组也要隐藏
+            
+            # 我们先遍历 keys (所有节点)
+            # 为了判断服务器标题是否显示，我们需要对节点进行按服务器归类
+            # 但这里为了性能，我们直接用简单逻辑：
+            
+            # 方法：再次遍历 self.ui_groups，按 group_name 统计
+            # 这比嵌套循环快
+            pass
 
-    def batch_select(self, val):
-        """全选/清空当前搜索可见的节点"""
-        count = 0
+        # 优化版逻辑：
+        # 使用 set 记录可见的 group_name 和 header
+        visible_groups = set()
+        visible_headers = set()
+        
         for key, item in self.ui_groups.items():
             if item['row'].visible:
-                item['chk'].value = val # 这会触发 toggle_node -> update_preview
-                count += 1
-        safe_notify(f"已{'全选' if val else '清空'} {count} 个可见节点", "positive")
+                visible_groups.add(item['group_name'])
+                visible_headers.add(item['header'])
+        
+        # 应用状态到 Group 折叠面板
+        for g_name, exp in self.server_expansions.items():
+            is_group_visible = g_name in visible_groups
+            exp.set_visibility(is_group_visible)
+            if txt and is_group_visible:
+                exp.value = True # 搜索时自动展开
+        
+        # 应用状态到 Server Header
+        # 遍历所有 registered headers (去重)
+        all_headers = set(item['header'] for item in self.ui_groups.values())
+        for header in all_headers:
+            header.set_visibility(header in visible_headers)
+
+    def batch_select(self, val):
+        count = 0
+        for key, item in self.ui_groups.items():
+            if item['row'].visible: # 只操作当前搜索结果可见的
+                if val:
+                    if key not in self.selected_ids:
+                        self.selected_ids.append(key)
+                        item['chk'].value = True
+                        item['row'].classes(add='bg-blue-50 border-blue-200', remove='border-transparent')
+                        count += 1
+                else:
+                    if key in self.selected_ids:
+                        self.selected_ids.remove(key)
+                        item['chk'].value = False
+                        item['row'].classes(remove='bg-blue-50 border-blue-200', add='border-transparent')
+                        count += 1
+        
+        if count > 0:
+            self.update_preview()
+            safe_notify(f"已{'添加' if val else '移除'} {count} 个节点", "positive")
+        else:
+            safe_notify("当前没有可操作的节点", "warning")
 
 # 弹窗入口
 def open_advanced_sub_editor(sub_data=None):
