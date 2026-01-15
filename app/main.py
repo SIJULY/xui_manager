@@ -860,7 +860,6 @@ echo "Xray Service Uninstalled (Binary kept safe)"
 
 
 # ================= Hysteria 2 安装脚本 (纯净版 - 适配 Surge) =================
-# 移除 Salamander 混淆，完全符合 Surge 教程标准
 HYSTERIA_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 # 1. 接收参数
@@ -1022,7 +1021,7 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
 
             btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
     d.open()
-    
+ 
 # ================= 全局变量区 (缓存) =================
 PROBE_DATA_CACHE = {} 
 PING_TREND_CACHE = {} 
@@ -2969,60 +2968,63 @@ def generate_node_link(node, server_host):
         return ""
     return ""
 
-# ================= 生成 Surge/Loon 格式明文配置 (安全分流版) =================
+# ================= 生成 Surge/Loon 格式明文配置 (教程适配版) =================
 def generate_detail_config(node, server_host):
     try:
-        # =========================================================
-        # 🟢 通道一：自定义节点 (Hy2 / XHTTP) - 只有这里会改动
-        # =========================================================
+        # 1. 优先处理自定义节点 (一键部署的 Hy2/XHTTP)
         if node.get('_is_custom'):
             raw_link = node.get('_raw_link', '')
             remark = node.get('remark', 'Hy2-Node')
             
-            # --- 🎯 仅针对 Hysteria 2 启用端口跳跃 ---
+            # --- Hysteria 2 (纯净版 - 无混淆，完美适配 Surge 教程) ---
             if raw_link.startswith('hy2://'):
                 from urllib.parse import urlparse, parse_qs
                 parsed = urlparse(raw_link)
                 password = parsed.username
                 host = parsed.hostname
-                
-                # 🔨 在这里定义跳跃范围 (与服务端 iptables 规则一致)
-                port_range = "20000-50000" 
-
+                port = parsed.port
                 params = parse_qs(parsed.query)
+                
                 sni = params.get('sni', [''])[0] or params.get('peer', [''])[0]
                 
-                # 这里的格式只对 Hy2 生效
-                surge_line = f"{remark} = hysteria2, {host}, {port_range}, password={password}"
+                # 构建 Surge 格式
+                # 格式: 节点名 = hysteria2, IP, Port, password=..., sni=..., skip-cert-verify=true, download-bandwidth=500
                 
-                if sni: surge_line += f", sni={sni}"
+                surge_line = f"{remark} = hysteria2, {host}, {port}, password={password}"
+                
+                if sni: 
+                    surge_line += f", sni={sni}"
+                
+                # 教程重点：强制跳过证书验证
                 surge_line += ", skip-cert-verify=true"
+                
+                # 教程重点：强制指定带宽 (Surge 必需)
                 surge_line += ", download-bandwidth=500"
+                
+                # 补充 UDP 转发支持
                 surge_line += ", udp-relay=true"
                 
                 return surge_line
 
-            # --- XHTTP 保持原样 ---
+            # --- XHTTP (Surge 暂不支持，保持原样) ---
             elif raw_link.startswith('vless://') and 'type=xhttp' in raw_link:
                  return f"// Surge 暂不支持 XHTTP 直连配置: {raw_link}"
 
-        # =========================================================
-        # 🔵 通道二：普通面板节点 (VMess / Trojan / SS) - ⛔️ 绝对不动这里
-        # =========================================================
-        # 下面的代码负责处理你那几十个其他节点
-        # 逻辑和之前完全一样，只读取 node['port'] 单端口
-        
+        # 2. 处理面板原有节点逻辑 (保持完全不变，防止影响 VMess/Trojan)
         p = node['protocol']
         remark = node['remark']
-        port = node['port'] # <--- 看这里，普通节点依然读取原始端口
+        port = node['port']
         add = node.get('listen') or server_host
         
+        # 安全解析配置
         s = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
         st = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
         
         net = st.get('network', 'tcp')
-        tls = (st.get('security', 'none') == 'tls')
+        security = st.get('security', 'none')
+        tls = (security == 'tls')
         
+        # 旧版兼容格式: protocol=ip:port, ... tag=Name
         base = f"{p}={add}:{port}"
         params = []
 
@@ -3032,6 +3034,7 @@ def generate_detail_config(node, server_host):
             params.append(f"password={uuid}")
             params.append("fast-open=false")
             params.append("udp-relay=false")
+            
             if net == 'ws':
                 ws_set = st.get('wsSettings', {})
                 path = ws_set.get('path', '/')
@@ -3039,9 +3042,11 @@ def generate_detail_config(node, server_host):
                 params.append("obfs=websocket")
                 params.append(f"obfs-uri={path}")
                 if host: params.append(f"obfs-host={host}")
+            
             if tls:
                 params.append("tls=true")
-                sni = st.get('tlsSettings', {}).get('serverName', '')
+                tls_set = st.get('tlsSettings', {})
+                sni = tls_set.get('serverName', '')
                 if sni: params.append(f"sni={sni}")
 
         elif p == 'trojan':
@@ -3053,7 +3058,7 @@ def generate_detail_config(node, server_host):
                 if sni: params.append(f"sni={sni}")
         
         else:
-            return "" # 不支持的协议跳过
+            return ""
 
         params.append(f"tag={remark}")
         return f"{base}, {', '.join(params)}"
@@ -3301,7 +3306,7 @@ async def short_group_handler(target: str, group_b64: str, request: Request):
             return Response(f"SubConverter Error", status_code=502)
 
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-
+    
 # ================= 短链接接口：单个订阅 (智能跟随版 - Surge原生生成) =================
 @app.get('/get/sub/{target}/{token}')
 async def short_sub_handler(target: str, token: str, request: Request):
@@ -3382,7 +3387,7 @@ async def short_sub_handler(target: str, token: str, request: Request):
             return Response(f"SubConverter Error", status_code=502)
 
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-    
+
 # ================= 探针主动注册接口=================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
