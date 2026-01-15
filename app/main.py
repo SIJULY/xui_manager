@@ -10552,14 +10552,8 @@ if __name__ in {"__main__", "__mp_main__"}:
         storage_secret='sijuly_secret_key', 
         reload=False, 
         reconnect_timeout=600.0,
-        
-        # ✨✨✨ 【关键修改】针对 Cloudflare 的心跳保活设置 ✨✨✨
-        uvicorn_kwargs={
-            # Cloudflare 会在 100秒无数据时断开，所以我们设置为 20秒 发一次心跳
-            'ws_ping_interval': 20, 
-            # 如果发送心跳后 20秒没回应，视为断开
-            'ws_ping_timeout': 20,
-            # 保持连接的超时时间
-            'timeout_keep_alive': 60
-        }
+        # 尝试直接传参（如果你的版本支持透传参数给 uvicorn）
+        ws_ping_interval=20,
+        ws_ping_timeout=20,
+        timeout_keep_alive=60
     )
