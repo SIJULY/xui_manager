@@ -3164,49 +3164,57 @@ async def probe_push_data(request: Request):
     except Exception as e:
         return Response("Error", 500)
 
-# ================= 接口处理 =================
+# =================  订阅接口：严格遵循自定义顺序 =================
 @app.get('/sub/{token}')
 async def sub_handler(token: str, request: Request):
     sub = next((s for s in SUBS_CACHE if s['token'] == token), None)
     if not sub: return Response("Invalid Token", 404)
+    
     links = []
     
+    # 1. 构建快速查找字典 (Map)
+    # 格式: { 'url|id': (node_data, server_host) }
+    node_lookup = {}
+    
     for srv in SERVERS_CACHE:
-        # 1. 获取面板节点 (缓存中)
-        panel_nodes = NODES_DATA.get(srv['url'], []) or []
-        
-        # 2. 获取自定义节点 (一键部署的 Hy2/XHTTP)
-        custom_nodes = srv.get('custom_nodes', []) or []
-        
-        # === 合并节点列表 ===
-        all_nodes = panel_nodes + custom_nodes
-        
-        if not all_nodes: continue
-        
+        # 获取 Host
         raw_url = srv['url']
         try:
             if '://' not in raw_url: raw_url = f'http://{raw_url}'
-            parsed = urlparse(raw_url); host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
+            parsed = urlparse(raw_url)
+            host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
         except: host = raw_url
-        
-        sub_nodes_set = set(sub.get('nodes', []))
-        
-        for n in all_nodes:
-            # 检查节点 ID 是否在订阅的选择列表中
-            # 注意：一键部署的节点在保存时也生成了 uuid 作为 id，所以逻辑通用
-            if f"{srv['url']}|{n['id']}" in sub_nodes_set:
-                
-                # A. 优先使用原始链接 (Hy2/XHTTP 部署时存的完整链接)
-                if n.get('_raw_link'):
-                    links.append(n['_raw_link'])
-                
-                # B. 或者是面板节点，需要生成链接
-                else:
-                    l = generate_node_link(n, host)
-                    if l: links.append(l)
+
+        # 收集面板节点
+        panel_nodes = NODES_DATA.get(srv['url'], []) or []
+        for n in panel_nodes:
+            key = f"{srv['url']}|{n['id']}"
+            node_lookup[key] = (n, host)
+            
+        # 收集自定义节点
+        custom_nodes = srv.get('custom_nodes', []) or []
+        for n in custom_nodes:
+            key = f"{srv['url']}|{n['id']}"
+            node_lookup[key] = (n, host)
+
+    # 2. 按照订阅中保存的顺序生成链接
+    # sub['nodes'] 是你在管理面板里排好序的 ID 列表
+    ordered_ids = sub.get('nodes', [])
+    
+    for key in ordered_ids:
+        if key in node_lookup:
+            node, host = node_lookup[key]
+            
+            # A. 优先使用原始链接
+            if node.get('_raw_link'):
+                links.append(node['_raw_link'])
+            # B. 生成标准链接
+            else:
+                l = generate_node_link(node, host)
+                if l: links.append(l)
                     
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
-
+    
 # ================= 分组订阅接口：支持 Tag 和 主分组 =================
 @app.get('/sub/group/{group_b64}')
 async def group_sub_handler(group_b64: str, request: Request):
@@ -3338,7 +3346,7 @@ async def short_group_handler(target: str, group_b64: str, request: Request):
 
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
     
-# ================= 短链接接口：单个订阅 (完美混合版) =================
+# ================= 短链接接口：严格遵循自定义顺序 =================
 @app.get('/get/sub/{target}/{token}')
 async def short_sub_handler(target: str, token: str, request: Request):
     try:
@@ -3346,17 +3354,15 @@ async def short_sub_handler(target: str, token: str, request: Request):
         if not sub_obj: return Response("Subscription Not Found", 404)
         
         # -------------------------------------------------------------
-        # 策略 A: 针对 Surge -> Python 原生生成
+        # 策略 A: 针对 Surge -> Python 原生生成 (严格顺序版)
         # -------------------------------------------------------------
         if target == 'surge':
             links = []
-            sub_nodes_set = set(sub_obj.get('nodes', []))
             
+            # 1. 构建查找字典
+            node_lookup = {}
             for srv in SERVERS_CACHE:
-                panel_nodes = NODES_DATA.get(srv['url'], []) or []
-                custom_nodes = srv.get('custom_nodes', []) or []
-                
-                # 获取 Host
+                # 解析 Host
                 raw_url = srv['url']
                 try:
                     if '://' not in raw_url: raw_url = f'http://{raw_url}'
@@ -3364,18 +3370,31 @@ async def short_sub_handler(target: str, token: str, request: Request):
                     host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
                 except: host = raw_url
                 
-                for n in (panel_nodes + custom_nodes):
-                    # 检查节点ID是否在订阅中
-                    if f"{srv['url']}|{n['id']}" in sub_nodes_set:
-                        line = generate_detail_config(n, host)
-                        if line and not line.startswith('//') and not line.startswith('None'):
-                            links.append(line)
+                # 收集所有节点
+                all_nodes = (NODES_DATA.get(srv['url'], []) or []) + srv.get('custom_nodes', [])
+                for n in all_nodes:
+                    key = f"{srv['url']}|{n['id']}"
+                    node_lookup[key] = (n, host)
+
+            # 2. 按顺序生成配置
+            ordered_ids = sub_obj.get('nodes', [])
+            
+            for key in ordered_ids:
+                if key in node_lookup:
+                    node, host = node_lookup[key]
+                    # 生成 Surge 配置行
+                    line = generate_detail_config(node, host)
+                    if line and not line.startswith('//') and not line.startswith('None'):
+                        links.append(line)
                             
             return Response("\n".join(links), media_type="text/plain; charset=utf-8")
 
         # -------------------------------------------------------------
         # 策略 B: Clash / 其他 -> SubConverter
         # -------------------------------------------------------------
+        # SubConverter 会读取上一步 sub_handler 生成的原始订阅
+        # 只要 sub_handler 是有序的，SubConverter 输出也就是有序的
+        
         custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
         if custom_base: 
             base_url = custom_base
@@ -3394,10 +3413,11 @@ async def short_sub_handler(target: str, token: str, request: Request):
             "udp": str(opt.get('udp', True)).lower(),
             "tfo": str(opt.get('tfo', False)).lower(), 
             "scv": str(opt.get('skip_cert', True)).lower(),
-            "sort": str(opt.get('sort', False)).lower(),
+            "fdn": "false", # 强制不过滤域名
+            "sort": "false", # ✨✨✨ 关键：告诉 SubConverter 不要再次排序，保持原样
         }
         
-        # 处理正则过滤
+        # 处理正则过滤 (保持原样)
         regions = opt.get('regions', [])
         includes = []
         if opt.get('include_regex'): includes.append(opt['include_regex'])
@@ -4280,6 +4300,290 @@ class SubEditor:
 
 def open_sub_editor(d):
     with ui.dialog() as dlg: SubEditor(d).ui(dlg); dlg.open()
+
+
+# ================= [性能重构版] 全能订阅编辑器 =================
+class AdvancedSubEditor:
+    def __init__(self, sub_data=None):
+        if sub_data:
+            self.sub = sub_data.copy()
+        else:
+            self.sub = {'name': '', 'token': str(uuid.uuid4()), 'nodes': [], 'options': {}}
+            
+        if 'options' not in self.sub: self.sub['options'] = {}
+        
+        # 核心数据：选中的节点ID (有序)
+        self.selected_ids = list(self.sub.get('nodes', []))
+        
+        # 缓存映射
+        self.all_nodes_map = {} # { 'url|id': node_obj }
+        self.ui_groups = {} 
+        
+        # 预览列表的 UI 引用
+        self.preview_container = None
+
+    def ui(self, dlg):
+        # 1. 预处理数据
+        self._preload_data()
+
+        with ui.card().classes('w-full max-w-6xl h-[90vh] flex flex-col p-0 overflow-hidden'):
+            
+            # --- 顶部 ---
+            with ui.row().classes('w-full p-4 border-b bg-gray-50 justify-between items-center flex-shrink-0'):
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('tune', color='primary').classes('text-xl')
+                    ui.label('订阅高级管理').classes('text-lg font-bold')
+                    ui.badge('性能优化版', color='green').props('outline size=xs')
+                ui.button(icon='close', on_click=dlg.close).props('flat round dense color=grey')
+
+            # --- 内容区 (三栏布局: 选择源 | 功能区 | 结果预览) ---
+            with ui.row().classes('w-full flex-grow overflow-hidden gap-0'):
+                
+                # ================= 1. 左侧：节点选择源 (占 40%) =================
+                with ui.column().classes('w-2/5 h-full border-r border-gray-200 flex flex-col bg-gray-50'):
+                    # 搜索栏 (带防抖)
+                    with ui.row().classes('w-full p-2 border-b bg-white gap-2 items-center'):
+                        # ✨✨✨ 关键修复：添加 debounce="500" 防止卡死 ✨✨✨
+                        ui.input(placeholder='🔍 搜索节点 (防抖)', on_change=self.on_search).props('outlined dense dense debounce="500"').classes('flex-grow')
+                        ui.button(icon='select_all', on_click=lambda: self.batch_select(True)).props('flat dense round size=sm').tooltip('全选搜索结果')
+                        ui.button(icon='clear', on_click=lambda: self.batch_select(False)).props('flat dense round size=sm color=red').tooltip('取消全选搜索结果')
+
+                    # 滚动列表容器
+                    with ui.scroll_area().classes('w-full flex-grow p-2'):
+                        self.list_container = ui.column().classes('w-full gap-2')
+                        # 异步渲染，防止打开时卡顿
+                        ui.timer(0.1, lambda: asyncio.create_task(self._render_node_tree()), once=True)
+
+                # ================= 2. 中间：功能设置 (占 30%) =================
+                with ui.column().classes('w-[30%] h-full border-r border-gray-200 flex flex-col bg-white overflow-y-auto'):
+                    with ui.column().classes('w-full p-4 gap-4'):
+                        
+                        # A. 基础信息
+                        ui.label('① 基础设置').classes('text-xs font-bold text-blue-500 uppercase')
+                        
+                        # ✨✨✨ 修复：显式设置 value 参数，确保弹窗打开时立即回显数据 ✨✨✨
+                        ui.input('订阅名称', value=self.sub.get('name', '')) \
+                            .bind_value_to(self.sub, 'name') \
+                            .props('outlined dense').classes('w-full')
+                        
+                        with ui.row().classes('w-full gap-1'):
+                            ui.input('Token (路径)', value=self.sub.get('token', '')) \
+                                .bind_value_to(self.sub, 'token') \
+                                .props('outlined dense').classes('flex-grow')
+                            
+                            ui.button(icon='refresh', on_click=lambda: self.sub.update({'token': str(uuid.uuid4())[:8]})).props('flat dense').tooltip('随机生成')
+
+                        ui.separator()
+
+                        # B. 排序工具
+                        ui.label('② 排序工具 (实时生效)').classes('text-xs font-bold text-blue-500 uppercase')
+                        ui.label('点击下方按钮，观察右侧列表变化').classes('text-[10px] text-gray-400')
+                        with ui.grid().classes('w-full grid-cols-2 gap-2'):
+                            ui.button('名称 A-Z', on_click=lambda: self.sort_nodes('name_asc')).props('outline dense size=sm')
+                            ui.button('名称 Z-A', on_click=lambda: self.sort_nodes('name_desc')).props('outline dense size=sm')
+                            ui.button('随机打乱', on_click=lambda: self.sort_nodes('random')).props('outline dense size=sm')
+                            ui.button('列表倒序', on_click=lambda: self.sort_nodes('reverse')).props('outline dense size=sm')
+
+                        ui.separator()
+
+                        # C. 正则重命名
+                        ui.label('③ 批量重命名').classes('text-xs font-bold text-blue-500 uppercase')
+                        with ui.column().classes('w-full gap-2 bg-blue-50 p-2 rounded border border-blue-100'):
+                            opt = self.sub.get('options', {})
+                            pat = ui.input('正则 (如: ^)', value=opt.get('rename_pattern', '')).props('outlined dense bg-white dense').classes('w-full')
+                            rep = ui.input('替换 (如: VIP-)', value=opt.get('rename_replacement', '')).props('outlined dense bg-white dense').classes('w-full')
+                            
+                            def apply_regex():
+                                self.sub['options']['rename_pattern'] = pat.value
+                                self.sub['options']['rename_replacement'] = rep.value
+                                self.update_preview() # 刷新预览
+                                safe_notify('重命名规则已应用，请看右侧预览', 'positive')
+
+                            ui.button('应用并预览', on_click=apply_regex).props('unelevated dense size=sm color=blue').classes('w-full')
+
+                # ================= 3. 右侧：结果预览 (占 30%) =================
+                with ui.column().classes('w-[30%] h-full bg-slate-50 flex flex-col'):
+                    with ui.row().classes('w-full p-2 border-b bg-white items-center justify-between'):
+                        ui.label('最终结果预览').classes('font-bold text-gray-700')
+                        ui.label('').bind_text_from(self, 'selected_ids', lambda x: f"共 {len(x)} 个")
+
+                    with ui.scroll_area().classes('w-full flex-grow p-2'):
+                        self.preview_container = ui.column().classes('w-full gap-1')
+                        self.update_preview() # 初始渲染
+
+            # --- 底部 ---
+            with ui.row().classes('w-full p-3 border-t bg-gray-100 justify-end gap-3 flex-shrink-0'):
+                async def save_all():
+                    if not self.sub.get('name'): return safe_notify('名称不能为空', 'negative')
+                    self.sub['nodes'] = self.selected_ids
+                    
+                    # 保存逻辑
+                    found = False
+                    for i, s in enumerate(SUBS_CACHE):
+                        if s.get('token') == self.sub['token']:
+                            SUBS_CACHE[i] = self.sub; found = True; break
+                    if not found: SUBS_CACHE.append(self.sub)
+                    
+                    await save_subs(); await load_subs_view()
+                    dlg.close(); safe_notify('✅ 订阅保存成功', 'positive')
+
+                ui.button('仅保存配置', icon='save', on_click=save_all).classes('bg-slate-800 text-white')
+
+    def _preload_data(self):
+        """预加载节点映射，用于排序和预览"""
+        self.all_nodes_map = {}
+        for srv in SERVERS_CACHE:
+            nodes = (NODES_DATA.get(srv['url'], []) or []) + srv.get('custom_nodes', [])
+            for n in nodes:
+                key = f"{srv['url']}|{n['id']}"
+                # 注入临时属性方便排序
+                n['_server_name'] = srv['name']
+                self.all_nodes_map[key] = n
+
+    # ✨✨✨ 核心优化：异步分批渲染，解决卡死 ✨✨✨
+    async def _render_node_tree(self):
+        self.list_container.clear()
+        self.ui_groups = {}
+        
+        # 1. 数据分组准备 (同步操作，很快)
+        grouped = {}
+        for srv in SERVERS_CACHE:
+            nodes = (NODES_DATA.get(srv['url'], []) or []) + srv.get('custom_nodes', [])
+            if not nodes: continue
+            
+            g_name = srv.get('group', '默认分组')
+            try: 
+                if g_name in ['默认分组', '自动注册']: g_name = detect_country_group(srv.get('name'), srv)
+            except: pass
+            
+            if g_name not in grouped: grouped[g_name] = []
+            grouped[g_name].append({'server': srv, 'nodes': nodes})
+
+        # 2. 异步渲染循环
+        sorted_groups = sorted(grouped.keys())
+        with self.list_container:
+            for i, g_name in enumerate(sorted_groups):
+                # 🛑 防卡死关键：每渲染 2 个分组，就挂起一下，让 UI 线程喘口气
+                if i % 2 == 0: await asyncio.sleep(0.01)
+                
+                with ui.expansion(g_name, icon='folder', value=True).classes('w-full border rounded bg-white shadow-sm mb-1').props('header-class="bg-gray-100 text-sm font-bold p-2 min-h-0"'):
+                    with ui.column().classes('w-full p-2 gap-2'):
+                        for item in grouped[g_name]:
+                            srv = item['server']
+                            
+                            # 服务器标题小条
+                            with ui.row().classes('w-full items-center gap-1 mt-1'):
+                                ui.icon('dns', size='xs').classes('text-blue-400')
+                                ui.label(srv['name']).classes('text-xs font-bold text-gray-500 truncate')
+
+                            # 节点列表
+                            for n in item['nodes']:
+                                key = f"{srv['url']}|{n['id']}"
+                                is_checked = key in self.selected_ids
+                                
+                                # 极简行样式，减少 DOM 负担
+                                with ui.row().classes('w-full items-center pl-2 py-1 hover:bg-blue-50 rounded cursor-pointer transition') as row:
+                                    chk = ui.checkbox(value=is_checked).props('dense size=xs')
+                                    chk.on_value_change(lambda e, k=key: self.toggle_node(k, e.value))
+                                    
+                                    # 点击行勾选
+                                    row.on('click', lambda _, c=chk: c.set_value(not c.value))
+                                    chk.on('click.stop', lambda: None)
+                                    
+                                    ui.label(n.get('remark', '未命名')).classes('text-xs text-gray-700 truncate flex-grow')
+                                    
+                                    # 存储引用用于搜索
+                                    self.ui_groups[key] = {
+                                        'row': row, 'chk': chk,
+                                        'text': f"{srv['name']} {n.get('remark','')}".lower()
+                                    }
+
+    def toggle_node(self, key, value):
+        if value:
+            if key not in self.selected_ids: self.selected_ids.append(key)
+        else:
+            if key in self.selected_ids: self.selected_ids.remove(key)
+        self.update_preview() # 实时更新右侧预览
+
+    def update_preview(self):
+        """更新右侧的排序结果预览"""
+        self.preview_container.clear()
+        
+        # 获取正则配置
+        pat = self.sub.get('options', {}).get('rename_pattern', '')
+        rep = self.sub.get('options', {}).get('rename_replacement', '')
+        
+        with self.preview_container:
+            if not self.selected_ids:
+                ui.label('未选择节点').classes('text-gray-400 text-sm text-center mt-10')
+                return
+
+            # 使用 ui.scroll_area 优化长列表
+            with ui.column().classes('w-full gap-1'):
+                for idx, key in enumerate(self.selected_ids):
+                    node = self.all_nodes_map.get(key)
+                    if not node: continue
+                    
+                    original_name = node.get('remark', 'Unknown')
+                    final_name = original_name
+                    
+                    # 模拟正则替换效果
+                    if pat:
+                        try:
+                            import re
+                            final_name = re.sub(pat, rep, original_name)
+                        except: pass
+                    
+                    # 渲染简单的预览条
+                    with ui.row().classes('w-full items-center p-1 bg-white border border-gray-100 rounded'):
+                        ui.label(str(idx+1)).classes('text-[10px] text-gray-400 w-6 text-center')
+                        
+                        if final_name != original_name:
+                            # 显示改名效果
+                            with ui.column().classes('gap-0 leading-none'):
+                                ui.label(final_name).classes('text-xs font-bold text-blue-600')
+                                ui.label(original_name).classes('text-[9px] text-gray-400 line-through')
+                        else:
+                            ui.label(final_name).classes('text-xs text-gray-700')
+
+    def sort_nodes(self, mode):
+        if not self.selected_ids: return safe_notify('列表为空', 'warning')
+        
+        # 构建临时对象列表
+        objs = []
+        for k in self.selected_ids:
+            n = self.all_nodes_map.get(k)
+            if n: objs.append({'key': k, 'name': n.get('remark', '').lower()})
+        
+        # 执行排序
+        if mode == 'name_asc': objs.sort(key=lambda x: x['name'])
+        elif mode == 'name_desc': objs.sort(key=lambda x: x['name'], reverse=True)
+        elif mode == 'random': import random; random.shuffle(objs)
+        elif mode == 'reverse': objs.reverse()
+        
+        # 更新 ID 列表
+        self.selected_ids = [x['key'] for x in objs]
+        self.update_preview() # 立即刷新预览
+        safe_notify(f'已按 {mode} 重新排序', 'positive')
+
+    def on_search(self, e):
+        txt = str(e.value).lower().strip()
+        for key, item in self.ui_groups.items():
+            visible = (not txt) or (txt in item['text'])
+            item['row'].set_visibility(visible)
+
+    def batch_select(self, val):
+        """全选/清空当前搜索可见的节点"""
+        count = 0
+        for key, item in self.ui_groups.items():
+            if item['row'].visible:
+                item['chk'].value = val # 这会触发 toggle_node -> update_preview
+                count += 1
+        safe_notify(f"已{'全选' if val else '清空'} {count} 个可见节点", "positive")
+
+# 弹窗入口
+def open_advanced_sub_editor(sub_data=None):
+    with ui.dialog() as d: AdvancedSubEditor(sub_data).ui(d); d.open()
     
 # ================= 全局变量 =================
 # 用于记录当前探针页面选中的标签，防止刷新重置
@@ -5130,7 +5434,7 @@ async def render_probe_page():
                             ui.label(str(probe)).classes('font-bold text-xl text-purple-600')
                            
     
-# ================= 订阅管理视图 (极简模式：只显在线) =================
+# ================= 订阅管理视图 (已增强：增加节点管理按钮) =================
 async def load_subs_view():
     # 标记当前视图
     global CURRENT_VIEW_STATE
@@ -5144,14 +5448,11 @@ async def load_subs_view():
 
     content_container.clear()
     
-    # === 1. 预先统计所有当前存在的节点 Key (面板 + 自定义) ===
+    # === 1. 预先统计所有当前存在的节点 Key ===
     all_active_keys = set()
     for srv in SERVERS_CACHE:
-        # 面板节点
         panel = NODES_DATA.get(srv['url'], []) or []
-        # 自定义节点
         custom = srv.get('custom_nodes', []) or []
-        
         for n in (panel + custom):
             key = f"{srv['url']}|{n['id']}"
             all_active_keys.add(key)
@@ -5160,46 +5461,77 @@ async def load_subs_view():
     with content_container:
         ui.label('订阅管理').classes('text-2xl font-bold mb-4')
         with ui.row().classes('w-full mb-4 justify-end'): 
-            ui.button('新建订阅', icon='add', color='green', on_click=lambda: open_sub_editor(None))
+            # 修改这里，调用新的编辑器
+            ui.button('新建订阅', icon='add', color='green', on_click=lambda: open_advanced_sub_editor(None))
         
+        if not SUBS_CACHE:
+            with ui.column().classes('w-full h-64 justify-center items-center text-gray-400'): 
+                ui.icon('rss_feed', size='4rem'); ui.label('暂无订阅')
+
         for idx, sub in enumerate(SUBS_CACHE):
-            with ui.card().classes('w-full p-4 mb-2 shadow-sm hover:shadow-md transition border-l-4 border-blue-500'):
-                with ui.row().classes('justify-between w-full items-center'):
+            with ui.card().classes('w-full p-4 mb-3 shadow-sm hover:shadow-md transition border-l-4 border-blue-500 rounded-lg'):
+                # 顶部信息栏
+                with ui.row().classes('justify-between w-full items-start'):
                     with ui.column().classes('gap-1'):
-                        ui.label(sub['name']).classes('font-bold text-lg text-slate-800')
+                        with ui.row().classes('items-center gap-2'):
+                            ui.label(sub.get('name', '未命名订阅')).classes('font-bold text-lg text-slate-800')
+                            ui.badge('普通', color='blue').props('outline size=xs') # 预留位置显示类型
                         
                         # 计算有效节点数
                         saved_node_ids = set(sub.get('nodes', []))
                         valid_count = len(saved_node_ids.intersection(all_active_keys))
+                        total_count = len(saved_node_ids)
                         
                         color_cls = 'text-green-600' if valid_count > 0 else 'text-gray-400'
-                        ui.label(f"⚡ 在线节点: {valid_count}").classes(f'text-xs font-bold {color_cls}')
+                        ui.label(f"⚡ 包含节点: {valid_count} (有效) / {total_count} (总计)").classes(f'text-xs font-bold {color_cls} font-mono')
                     
+                    # === ✨✨✨ 操作按钮区 (更新版) ✨✨✨ ===
                     with ui.row().classes('gap-2'):
-                        # ✨ 修改点：这里删除了 'tune' (配置处理策略) 按钮
-                        ui.button(icon='edit', on_click=lambda s=sub: open_sub_editor(s)).props('flat dense color=blue').tooltip('编辑订阅内容')
+                        # 统一为一个强大的 "管理" 按钮
+                        ui.button('管理订阅', icon='tune', on_click=lambda _, s=sub: open_advanced_sub_editor(s)) \
+                            .props('unelevated dense size=sm color=blue-7') \
+                            .tooltip('重命名 / 排序 / 筛选节点')
+                        
+                        # 3. 删除按钮 (保持不变)
                         async def dl(i=idx): 
-                            del SUBS_CACHE[i]
-                            await save_subs()
-                            await load_subs_view()
-                        ui.button(icon='delete', color='red', on_click=dl).props('flat dense')
+                            with ui.dialog() as d, ui.card():
+                                ui.label('确定删除此订阅？').classes('font-bold text-red-600')
+                                with ui.row().classes('justify-end w-full mt-4'):
+                                    ui.button('取消', on_click=d.close).props('flat')
+                                    async def confirm():
+                                        del SUBS_CACHE[i]
+                                        await save_subs()
+                                        await load_subs_view()
+                                        d.close()
+                                        safe_notify('已删除', 'positive')
+                                    ui.button('删除', color='red', on_click=confirm)
+                            d.open()
 
-                ui.separator().classes('my-2')
+                        ui.button(icon='delete', color='red', on_click=dl).props('flat dense size=sm')
+                        
+                ui.separator().classes('my-3 opacity-50')
                 
+                # 链接显示区
                 path = f"/sub/{sub['token']}"
                 raw_url = f"{origin}{path}"
                 
-                with ui.row().classes('w-full items-center gap-2 bg-gray-50 p-2 rounded justify-between'):
+                with ui.row().classes('w-full items-center gap-2 bg-slate-100 p-2 rounded justify-between border border-slate-200'):
                     with ui.row().classes('items-center gap-2 flex-grow overflow-hidden'):
-                        ui.icon('link').classes('text-gray-400')
-                        ui.label(raw_url).classes('text-xs font-mono text-gray-600 truncate')
+                        ui.icon('link').classes('text-gray-400 text-sm')
+                        ui.label(raw_url).classes('text-xs font-mono text-slate-600 truncate select-all')
                     
                     with ui.row().classes('gap-1'):
-                        ui.button(icon='content_copy', on_click=lambda u=raw_url: safe_copy_to_clipboard(u)).props('flat dense round size=sm color=grey').tooltip('复制原始链接')
+                        # 复制按钮组
+                        def btn_copy(icon, color, text, func):
+                            ui.button(icon=icon, on_click=func).props(f'flat dense round size=xs text-color={color}').tooltip(text)
+
+                        btn_copy('content_copy', 'grey-7', '复制原始链接', lambda u=raw_url: safe_copy_to_clipboard(u))
+                        
                         surge_short = f"{origin}/get/sub/surge/{sub['token']}"
-                        ui.button(icon='bolt', on_click=lambda u=surge_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=orange').tooltip('复制 Surge 订阅')
+                        btn_copy('bolt', 'orange', '复制 Surge 订阅', lambda u=surge_short: safe_copy_to_clipboard(u))
+                        
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
-                        ui.button(icon='cloud_queue', on_click=lambda u=clash_short: safe_copy_to_clipboard(u)).props('flat dense round size=sm text-color=green').tooltip('复制 Clash 订阅')
+                        btn_copy('cloud_queue', 'green', '复制 Clash 订阅', lambda u=clash_short: safe_copy_to_clipboard(u))
 
 # ================= 通用服务器保存函数 (UI 操控版：修改后强制刷新 + 重置冷却) =================
 async def save_server_config(server_data, is_add=True, idx=None):
