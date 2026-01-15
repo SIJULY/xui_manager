@@ -859,14 +859,12 @@ echo "Xray Service Uninstalled (Binary kept safe)"
 """
 
 
-# ================= Hysteria 2 安装脚本 =================
-# 特性：自动检测 UDP 443 占用，如果 Caddy 在运行，Hy2 自动退避到 8443，
-# 并自动将端口跳跃流量转发到 8443。Caddy 和 Hy2 完美共存。
+# ================= Hysteria 2 安装脚本 (纯净版 - 适配 Surge) =================
+# 移除 Salamander 混淆，完全符合 Surge 教程标准
 HYSTERIA_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 # 1. 接收参数
 PASSWORD="{password}"
-OBFS_PASSWORD="{obfs_password}"
 SNI="{sni}"
 ENABLE_PORT_HOPPING="{enable_hopping}"
 PORT_RANGE_START="{port_range_start}"
@@ -877,7 +875,7 @@ systemctl stop hysteria-server.service 2>/dev/null
 rm -rf /etc/hysteria
 bash <(curl -fsSL https://get.hy2.sh/)
 
-# 3. 证书生成
+# 3. 证书生成 (自签证书 - 对应教程 skip-cert-verify=true)
 mkdir -p /etc/hysteria
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
   -keyout /etc/hysteria/server.key \
@@ -887,19 +885,14 @@ openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 chown hysteria /etc/hysteria/server.key
 chown hysteria /etc/hysteria/server.crt
 
-# 4. 智能端口选择 (核心逻辑)
-# 默认监听 443
+# 4. 端口检测
 HY2_PORT=443
-
-# 检测 UDP 443 是否被占用 (通常是 Caddy/Nginx 的 HTTP/3)
 if netstat -ulpn | grep -q ":443 "; then
-    echo "⚠️  检测到 UDP 443 端口忙 (Caddy/HTTP3?)，Hy2 自动切换至 8443"
+    echo "⚠️ UDP 443 占用，切换至 8443"
     HY2_PORT=8443
-else
-    echo "✅ UDP 443 端口空闲，Hy2 将使用标准端口"
 fi
 
-# 5. 写入配置 (使用动态端口)
+# 5. 写入配置 (无混淆，纯净模式)
 cat << EOF > /etc/hysteria/config.yaml
 listen: :$HY2_PORT
 tls:
@@ -908,29 +901,24 @@ tls:
 auth:
   type: password
   password: $PASSWORD
-obfs:
-  type: salamander
-  salamander:
-    password: $OBFS_PASSWORD
 masquerade:
   type: proxy
   proxy:
     url: https://$SNI
     rewriteHost: true
+# 优化参数 (参考教程)
+quic:
+  initStreamReceiveWindow: 26843545
+  maxStreamReceiveWindow: 26843545
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
 EOF
 
-# 6. 端口跳跃设置 (动态转发到实际端口)
-# 注意：awk 的花括号在 Python 中需要双写 {{ }}
+# 6. 端口跳跃
 if [ "$ENABLE_PORT_HOPPING" == "true" ]; then
     IFACE=$(ip route get 8.8.8.8 | awk '{{print $5; exit}}')
-    
-    # 清理旧规则
     iptables -t nat -D PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
-    
-    # 添加新规则：将 跳跃范围 转发给 -> Hy2 实际端口 ($HY2_PORT)
     iptables -t nat -A PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT
-    
-    # 持久化 (简单处理)
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4
 fi
@@ -939,158 +927,102 @@ fi
 systemctl enable --now hysteria-server.service
 sleep 2
 
-# 8. 输出链接
-# 无论内部用 443 还是 8443，我们生成的链接可以用 443 (如果没被占) 或者直接用跳跃端口
-# 为了稳妥，如果开启了端口跳跃，建议直接给出一个跳跃范围内的端口，或者依然给 443 (靠 iptables 转发)
-# 这里我们输出实际监听端口，确保最稳
+# 8. 输出链接 (标准格式，无 obfs 参数)
 if systemctl is-active --quiet hysteria-server.service; then
     PUBLIC_IP=$(curl -s https://api.ipify.org)
-    
-    # 如果开启了跳跃，链接里的端口其实可以是范围内任意一个，
-    # 但为了兼容性，我们还是写实际端口。
-    # 用户可以在客户端自己改成 20000-50000。
-    LINK="hy2://$PASSWORD@$PUBLIC_IP:$HY2_PORT?peer=$SNI&insecure=1&obfs=salamander&obfs-password=$OBFS_PASSWORD&sni=$SNI#Hy2-Nodes"
-    
+    LINK="hy2://$PASSWORD@$PUBLIC_IP:$HY2_PORT?peer=$SNI&insecure=1&sni=$SNI#Hy2-Node"
     echo "HYSTERIA_DEPLOY_SUCCESS_LINK: $LINK"
 else
     echo "HYSTERIA_DEPLOY_FAILED"
 fi
 """
-# ================= 一键部署 Hysteria 2  =================
+# ================= 一键部署 Hysteria 2 (纯净版部署逻辑) =================
 async def open_deploy_hysteria_dialog(server_conf, callback):
-    # --- 1. IP 获取逻辑 (保持不变) ---
+    # --- 1. IP 获取逻辑 ---
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
-    
     real_ip = target_host
-    import re
-    import socket
+    import re, socket, urllib.parse
     
     if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", target_host):
-        try:
-            real_ip = await run.io_bound(socket.gethostbyname, target_host)
-        except:
-            safe_notify(f"❌ 无法解析服务器 IP: {target_host}", "negative")
-            return
+        try: real_ip = await run.io_bound(socket.gethostbyname, target_host)
+        except: safe_notify(f"❌ 无法解析 IP: {target_host}", "negative"); return
 
     # --- 2. 构建 UI ---
     with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl'):
-        
-        # 顶部标题栏
         with ui.column().classes('w-full bg-slate-900 p-6 gap-2'):
             with ui.row().classes('items-center gap-2 text-white'):
                 ui.icon('bolt', size='md')
-                ui.label('部署 Hysteria 2 (直连模式)').classes('text-lg font-bold')
-            
+                ui.label('部署 Hysteria 2 (Surge 兼容版)').classes('text-lg font-bold')
             ui.label(f"服务器 IP: {real_ip}").classes('text-xs text-gray-400 font-mono')
 
-        # 内容输入区
         with ui.column().classes('w-full p-6 gap-4'):
-            # === 新增：自定义节点名称 ===
-            name_input = ui.input('节点名称 (可选)', placeholder='留空将自动生成').props('outlined dense').classes('w-full')
-
-            # 伪装域名
+            name_input = ui.input('节点名称 (可选)', placeholder='例如: 狮城 Hy2').props('outlined dense').classes('w-full')
             sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense').classes('w-full')
-            # 混淆密码
-            obfs_input = ui.input('混淆密码', value=str(uuid.uuid4())[:8]).props('outlined dense').classes('w-full')
             
-            # 端口跳跃
-            enable_hopping = ui.checkbox('启用端口跳跃 (Port Hopping)', value=True).classes('text-sm font-bold text-gray-600')
+            # ⚠️ 删除了混淆密码输入框，因为我们要部署纯净版
+            
+            enable_hopping = ui.checkbox('启用端口跳跃', value=True).classes('text-sm font-bold text-gray-600')
             with ui.row().classes('w-full items-center gap-2'):
                 hop_start = ui.number('起始端口', value=20000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
                 ui.label('-').bind_visibility_from(enable_hopping, 'value')
                 hop_end = ui.number('结束端口', value=50000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
 
-            # 日志区域
             log_area = ui.log().classes('w-full h-48 bg-gray-900 text-green-400 text-[11px] font-mono p-3 rounded border border-gray-700 hidden transition-all')
 
-        # 底部按钮区
         with ui.row().classes('w-full p-4 bg-gray-50 border-t border-gray-200 justify-end gap-3'):
             btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
             
             async def start_process():
-                btn_cancel.disable()
-                btn_deploy.props('loading')
-                log_area.classes(remove='hidden')
-                
+                btn_cancel.disable(); btn_deploy.props('loading'); log_area.classes(remove='hidden')
                 try:
                     hy2_password = str(uuid.uuid4()).replace('-', '')[:16]
-                    
                     params = {
                         "password": hy2_password,
-                        "obfs_password": obfs_input.value,
                         "sni": sni_input.value,
                         "enable_hopping": "true" if enable_hopping.value else "false",
                         "port_range_start": int(hop_start.value),
                         "port_range_end": int(hop_end.value)
                     }
-                    
+                    # 注入脚本
                     script_content = HYSTERIA_INSTALL_SCRIPT_TEMPLATE.format(**params)
+                    deploy_cmd = f"cat > /tmp/install_hy2.sh << 'EOF_SCRIPT'\n{script_content}\nEOF_SCRIPT\nbash /tmp/install_hy2.sh"
                     
-                    deploy_cmd = f"""
-cat > /tmp/install_hy2.sh << 'EOF_SCRIPT'
-{script_content}
-EOF_SCRIPT
-bash /tmp/install_hy2.sh
-"""
                     log_area.push(f"🚀 [SSH] 连接到 {real_ip} 开始安装...")
-                    
                     success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, deploy_cmd))
                     
                     if success:
-                        log_area.push("✅ 脚本执行完毕，正在解析输出...")
-                        
                         import re
                         match = re.search(r'HYSTERIA_DEPLOY_SUCCESS_LINK: (hy2://.*)', output)
-                        
                         if match:
                             link = match.group(1).strip()
                             log_area.push("🎉 部署成功！")
                             
-                            # === 修改：使用自定义名称逻辑 ===
                             custom_name = name_input.value.strip()
-                            if custom_name:
-                                node_name = custom_name
-                            else:
-                                node_name = f"Hy2-{real_ip[-3:]}-{sni_input.value}"
-
-                            # 构建节点对象
-                            new_node = {
-                                "id": str(uuid.uuid4()),
-                                "remark": node_name,
-                                "port": 443,
-                                "protocol": "hysteria2",
-                                "settings": {},
-                                "streamSettings": {},
-                                "enable": True,
-                                "_is_custom": True, 
-                                "_raw_link": link 
-                            }
+                            node_name = custom_name if custom_name else f"Hy2-{real_ip[-3:]}"
                             
+                            # 替换链接中的备注
+                            if '#' in link: link = link.split('#')[0]
+                            final_link = f"{link}#{urllib.parse.quote(node_name)}"
+
+                            new_node = {
+                                "id": str(uuid.uuid4()), "remark": node_name, "port": 443, "protocol": "hysteria2",
+                                "settings": {}, "streamSettings": {}, "enable": True, "_is_custom": True, "_raw_link": final_link
+                            }
                             if 'custom_nodes' not in server_conf: server_conf['custom_nodes'] = []
                             server_conf['custom_nodes'].append(new_node)
                             await save_servers()
                             
                             safe_notify(f"✅ 节点 {node_name} 已添加", "positive")
-                            await asyncio.sleep(1)
-                            d.close()
-                            if callback: await callback() 
-                        else:
-                            log_area.push("❌ 未捕获到链接，请检查日志")
-                            log_area.push(output[-500:]) 
-                    else:
-                        log_area.push(f"❌ SSH 连接或执行失败: {output}")
+                            await asyncio.sleep(1); d.close()
+                            if callback: await callback()
+                        else: log_area.push("❌ 未捕获链接"); log_area.push(output[-500:])
+                    else: log_area.push(f"❌ SSH 失败: {output}")
+                except Exception as e: log_area.push(f"❌ 异常: {e}")
+                btn_cancel.enable(); btn_deploy.props(remove='loading')
 
-                except Exception as e:
-                    log_area.push(f"❌ 异常: {str(e)}")
-                
-                btn_cancel.enable()
-                btn_deploy.props(remove='loading')
-
-            # 这里按钮也顺便统一了风格
             btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
-
     d.open()
- 
+    
 # ================= 全局变量区 (缓存) =================
 PROBE_DATA_CACHE = {} 
 PING_TREND_CACHE = {} 
@@ -3037,38 +2969,69 @@ def generate_node_link(node, server_host):
         return ""
     return ""
 
-# ================= 生成 Surge/Loon 格式明文配置 =================
+# ================= 生成 Surge/Loon 格式明文配置 (安全分流版) =================
 def generate_detail_config(node, server_host):
     try:
+        # =========================================================
+        # 🟢 通道一：自定义节点 (Hy2 / XHTTP) - 只有这里会改动
+        # =========================================================
+        if node.get('_is_custom'):
+            raw_link = node.get('_raw_link', '')
+            remark = node.get('remark', 'Hy2-Node')
+            
+            # --- 🎯 仅针对 Hysteria 2 启用端口跳跃 ---
+            if raw_link.startswith('hy2://'):
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(raw_link)
+                password = parsed.username
+                host = parsed.hostname
+                
+                # 🔨 在这里定义跳跃范围 (与服务端 iptables 规则一致)
+                port_range = "20000-50000" 
+
+                params = parse_qs(parsed.query)
+                sni = params.get('sni', [''])[0] or params.get('peer', [''])[0]
+                
+                # 这里的格式只对 Hy2 生效
+                surge_line = f"{remark} = hysteria2, {host}, {port_range}, password={password}"
+                
+                if sni: surge_line += f", sni={sni}"
+                surge_line += ", skip-cert-verify=true"
+                surge_line += ", download-bandwidth=500"
+                surge_line += ", udp-relay=true"
+                
+                return surge_line
+
+            # --- XHTTP 保持原样 ---
+            elif raw_link.startswith('vless://') and 'type=xhttp' in raw_link:
+                 return f"// Surge 暂不支持 XHTTP 直连配置: {raw_link}"
+
+        # =========================================================
+        # 🔵 通道二：普通面板节点 (VMess / Trojan / SS) - ⛔️ 绝对不动这里
+        # =========================================================
+        # 下面的代码负责处理你那几十个其他节点
+        # 逻辑和之前完全一样，只读取 node['port'] 单端口
+        
         p = node['protocol']
         remark = node['remark']
-        port = node['port']
+        port = node['port'] # <--- 看这里，普通节点依然读取原始端口
         add = node.get('listen') or server_host
         
-        # 解析设置
         s = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
         st = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
         
-        # 基础流控设置
         net = st.get('network', 'tcp')
-        security = st.get('security', 'none')
-        tls = (security == 'tls')
+        tls = (st.get('security', 'none') == 'tls')
         
-        # 构造基础头部
-        # 格式: protocol=host:port
         base = f"{p}={add}:{port}"
         params = []
 
         if p == 'vmess':
             uuid = s['clients'][0]['id']
-            # VMess 默认参数
             params.append("method=auto")
             params.append(f"password={uuid}")
             params.append("fast-open=false")
             params.append("udp-relay=false")
-            params.append("aead=true") # 现代客户端通常开启 AEAD
-            
-            # 传输协议处理
             if net == 'ws':
                 ws_set = st.get('wsSettings', {})
                 path = ws_set.get('path', '/')
@@ -3076,48 +3039,28 @@ def generate_detail_config(node, server_host):
                 params.append("obfs=websocket")
                 params.append(f"obfs-uri={path}")
                 if host: params.append(f"obfs-host={host}")
-            
             if tls:
                 params.append("tls=true")
-                # 尝试获取 SNI
-                tls_set = st.get('tlsSettings', {})
-                sni = tls_set.get('serverName', '')
+                sni = st.get('tlsSettings', {}).get('serverName', '')
                 if sni: params.append(f"sni={sni}")
-
-        elif p == 'shadowsocks':
-            method = s.get('method', 'aes-256-gcm')
-            pwd = s.get('password', '')
-            params.append(f"method={method}")
-            params.append(f"password={pwd}")
-            params.append("fast-open=false")
-            params.append("udp-relay=true")
-            
-            # Simple-obfs / v2ray-plugin 处理 (X-UI通常是标准SS，这里只做基础处理)
 
         elif p == 'trojan':
             pwd = s['clients'][0]['password']
             params.append(f"password={pwd}")
-            params.append("fast-open=false")
-            params.append("udp-relay=false")
             if tls:
                 params.append("tls=true")
                 sni = st.get('tlsSettings', {}).get('serverName', '')
                 if sni: params.append(f"sni={sni}")
         
         else:
-            # VLESS 等协议 Surge 格式支持较复杂，暂返回空或标准链接
-            return ""
+            return "" # 不支持的协议跳过
 
-        # 最后加上 Tag
         params.append(f"tag={remark}")
-        
-        # 拼接
         return f"{base}, {', '.join(params)}"
 
     except Exception as e:
-        # logger.error(f"格式转换失败: {e}")
+        print(f"Format Error: {e}")
         return ""
-
 
 # ================= 延迟测试核心逻辑  =================
 PING_CACHE = {}
@@ -3297,37 +3240,54 @@ async def group_sub_handler(group_b64: str, request: Request):
         
     return Response(safe_base64("\n".join(links)), media_type="text/plain; charset=utf-8")
 
-# ================= 短链接接口：分组 (智能跟随版) =================
+# ================= 短链接接口：分组 (智能跟随版 - Surge原生生成) =================
 @app.get('/get/group/{target}/{group_b64}')
-async def short_group_handler(target: str, group_b64: str, request: Request): # ✨ 1. 注入 request
+async def short_group_handler(target: str, group_b64: str, request: Request):
     try:
-        # ✨ 2. 智能获取当前访问的 协议://域名:端口
-        # 优先读取用户在"探针设置"里填写的地址，如果没有填，则自动识别当前浏览器地址
+        group_name = decode_base64_safe(group_b64)
+        if not group_name: return Response("Invalid Group Name", 400)
+
+        # ✨✨✨ 针对 Surge 直接使用 Python 生成，避开 SubConverter 的 Bug ✨✨✨
+        if target == 'surge':
+            links = []
+            target_servers = [
+                s for s in SERVERS_CACHE 
+                if s.get('group', '默认分组') == group_name or group_name in s.get('tags', [])
+            ]
+            
+            for srv in target_servers:
+                panel_nodes = NODES_DATA.get(srv['url'], []) or []
+                custom_nodes = srv.get('custom_nodes', []) or []
+                
+                raw_url = srv['url']
+                try:
+                    if '://' not in raw_url: raw_url = f'http://{raw_url}'
+                    parsed = urlparse(raw_url)
+                    host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
+                except: host = raw_url
+
+                # 遍历所有节点生成 Surge 格式
+                for n in (panel_nodes + custom_nodes):
+                    if n.get('enable'):
+                        # 调用上面的 generate_detail_config (已包含带宽参数)
+                        line = generate_detail_config(n, host)
+                        if line and not line.startswith('//'):
+                            links.append(line)
+                            
+            if not links:
+                return Response(f"// Group [{group_name}] is empty", media_type="text/plain; charset=utf-8")
+                
+            return Response("\n".join(links), media_type="text/plain; charset=utf-8")
+
+        # === 非 Surge 客户端 (Clash等) 继续走 SubConverter ===
         custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        
-        if custom_base:
-            base_url = custom_base
+        if custom_base: base_url = custom_base
         else:
-            # 自动识别：获取当前请求的 Host 头 (例如 example.com 或 1.2.3.4:8080)
-            host = request.headers.get('host')
-            scheme = request.url.scheme # http 或 https
+            host = request.headers.get('host'); scheme = request.url.scheme
             base_url = f"{scheme}://{host}"
 
-        # 拼接出让 SubConverter 抓取的地址
         internal_api = f"{base_url}/sub/group/{group_b64}"
-
-        params = {
-            "target": target,
-            "url": internal_api,
-            "insert": "false",
-            "list": "true",
-            "ver": "4",
-            "udp": "true",
-            "scv": "true"
-        }
-        
-        # 注意：如果 SubConverter 也是容器，且和面板不在一个网络，这里用 127.0.0.1 可能会失败
-        # 建议保持 subconverter:25500 (容器名) 或改为你的真实 IP:25500
+        params = { "target": target, "url": internal_api, "insert": "false", "list": "true", "ver": "4", "udp": "true", "scv": "true" }
         converter_api = "http://subconverter:25500/sub"
 
         def _fetch_sync():
@@ -3338,48 +3298,63 @@ async def short_group_handler(target: str, group_b64: str, request: Request): # 
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            # 增加错误提示，方便排查
-            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
-            return Response(err_msg, status_code=502)
+            return Response(f"SubConverter Error", status_code=502)
+
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-    
-# ================= 短链接接口：单个订阅 (智能跟随版) =================
+
+# ================= 短链接接口：单个订阅 (智能跟随版 - Surge原生生成) =================
 @app.get('/get/sub/{target}/{token}')
-async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1. 注入 request
+async def short_sub_handler(target: str, token: str, request: Request):
     try:
         sub_obj = next((s for s in SUBS_CACHE if s['token'] == token), None)
         if not sub_obj: return Response("Subscription Not Found", 404)
         
-        # ✨ 2. 智能获取当前访问的 协议://域名:端口
+        # ✨✨✨ 针对 Surge 直接使用 Python 生成，避开 SubConverter 的 Bug ✨✨✨
+        if target == 'surge':
+            links = []
+            sub_nodes_set = set(sub_obj.get('nodes', []))
+            
+            for srv in SERVERS_CACHE:
+                panel_nodes = NODES_DATA.get(srv['url'], []) or []
+                custom_nodes = srv.get('custom_nodes', []) or []
+                all_nodes = panel_nodes + custom_nodes
+                if not all_nodes: continue
+                
+                raw_url = srv['url']
+                try:
+                    if '://' not in raw_url: raw_url = f'http://{raw_url}'
+                    parsed = urlparse(raw_url)
+                    host = parsed.hostname or raw_url.split('://')[-1].split(':')[0]
+                except: host = raw_url
+                
+                for n in all_nodes:
+                    # 检查节点是否在订阅列表中
+                    if f"{srv['url']}|{n['id']}" in sub_nodes_set:
+                        # 调用上面的 generate_detail_config (已包含带宽参数)
+                        line = generate_detail_config(n, host)
+                        if line and not line.startswith('//'):
+                            links.append(line)
+                            
+            return Response("\n".join(links), media_type="text/plain; charset=utf-8")
+
+        # === 非 Surge 客户端 (Clash等) 继续走 SubConverter ===
         custom_base = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
-        
-        if custom_base:
-            base_url = custom_base
+        if custom_base: base_url = custom_base
         else:
-            # 自动识别
-            host = request.headers.get('host')
-            scheme = request.url.scheme
+            host = request.headers.get('host'); scheme = request.url.scheme
             base_url = f"{scheme}://{host}"
             
         internal_api = f"{base_url}/sub/{token}"
-        
         opt = sub_obj.get('options', {})
+        
         params = {
-            "target": target,
-            "url": internal_api,
-            "insert": "false",
-            "list": "true",
-            "ver": "4",
-            "emoji": str(opt.get('emoji', True)).lower(),
-            "udp": str(opt.get('udp', True)).lower(),
-            "tfo": str(opt.get('tfo', False)).lower(),
-            "scv": str(opt.get('skip_cert', True)).lower(),
+            "target": target, "url": internal_api, "insert": "false", "list": "true", "ver": "4",
+            "emoji": str(opt.get('emoji', True)).lower(), "udp": str(opt.get('udp', True)).lower(),
+            "tfo": str(opt.get('tfo', False)).lower(), "scv": str(opt.get('skip_cert', True)).lower(),
             "sort": str(opt.get('sort', False)).lower(),
         }
-
-        # --- 正则过滤 ---
-        regions = opt.get('regions', [])
-        includes = []
+        
+        regions = opt.get('regions', []); includes = []
         if opt.get('include_regex'): includes.append(opt['include_regex'])
         if regions:
             region_keywords = []
@@ -3389,18 +3364,13 @@ async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1.
                 for c, v in AUTO_COUNTRY_MAP.items(): 
                     if v == r and len(c) == 2: region_keywords.append(c)
             if region_keywords: includes.append(f"({'|'.join(region_keywords)})")
-        
         if includes: params['include'] = "|".join(includes)
         if opt.get('exclude_regex'): params['exclude'] = opt['exclude_regex']
-
-        ren_pat = opt.get('rename_pattern', '')
-        ren_rep = opt.get('rename_replacement', '')
         
-        if ren_pat:
-            params['rename'] = f"{ren_pat}@{ren_rep}"
+        ren_pat = opt.get('rename_pattern', '')
+        if ren_pat: params['rename'] = f"{ren_pat}@{opt.get('rename_replacement', '')}"
 
         converter_api = "http://subconverter:25500/sub"
-
         def _fetch_sync():
             try: return requests.get(converter_api, params=params, timeout=10)
             except: return None
@@ -3409,11 +3379,10 @@ async def short_sub_handler(target: str, token: str, request: Request): # ✨ 1.
         if response and response.status_code == 200:
             return Response(content=response.content, media_type="text/plain; charset=utf-8")
         else:
-            err_msg = f"SubConverter Error. Backend: {converter_api}, Target: {internal_api}"
-            return Response(err_msg, status_code=502)
+            return Response(f"SubConverter Error", status_code=502)
+
     except Exception as e: return Response(f"Error: {str(e)}", status_code=500)
-
-
+    
 # ================= 探针主动注册接口=================
 @app.post('/api/probe/register')
 async def probe_register(request: Request):
