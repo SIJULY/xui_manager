@@ -6278,7 +6278,7 @@ async def open_server_dialog(idx=None):
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 render_xui_panel()
 
-        # ================= 5. 全局删除逻辑 (已修复：删除后立即重绘右侧列表) =================
+        # ================= 5. 全局删除逻辑 (修复版：解决通知卡死) =================
         if is_edit:
             with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
                 async def open_delete_confirm():
@@ -6288,12 +6288,16 @@ async def open_server_dialog(idx=None):
                         
                         real_ssh_exists = bool(data.get('ssh_host') or data.get('ssh_user'))
                         real_xui_exists = bool(data.get('url') and data.get('user') and data.get('pass'))
+                        has_probe = data.get('probe_installed', False)
 
                         if not real_ssh_exists and not real_xui_exists:
                             real_ssh_exists = True; real_xui_exists = True
 
                         chk_ssh = ui.checkbox('SSH 连接信息', value=real_ssh_exists).classes('text-sm font-bold')
                         chk_xui = ui.checkbox('X-UI 面板信息', value=real_xui_exists).classes('text-sm font-bold')
+                        
+                        chk_uninstall = ui.checkbox('同时卸载远程探针脚本', value=True).classes('text-sm font-bold text-red-500')
+                        chk_uninstall.set_visibility(has_probe)
                         
                         if not real_ssh_exists: chk_ssh.value = False; chk_ssh.disable()
                         if not real_xui_exists: chk_xui.value = False; chk_xui.disable()
@@ -6306,11 +6310,30 @@ async def open_server_dialog(idx=None):
                             
                             will_delete_ssh = chk_ssh.value
                             will_delete_xui = chk_xui.value
+                            will_uninstall = chk_uninstall.value and chk_uninstall.visible
                             
                             remaining_ssh = real_ssh_exists and not will_delete_ssh
                             remaining_xui = real_xui_exists and not will_delete_xui
                             
                             is_full_delete = False
+
+                            # ✨✨✨ 修复核心：使用 notification + try/finally ✨✨✨
+                            if will_uninstall:
+                                # 1. 开启转圈通知
+                                loading_notify = ui.notification('正在尝试连接并卸载探针...', timeout=None, spinner=True)
+                                
+                                try:
+                                    uninstall_cmd = "systemctl stop x-fusion-agent && systemctl disable x-fusion-agent && rm -f /etc/systemd/system/x-fusion-agent.service && systemctl daemon-reload && rm -f /root/x_fusion_agent.py"
+                                    
+                                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(target_srv, uninstall_cmd))
+                                    
+                                    if success:
+                                        ui.notify('✅ 远程探针已卸载清理', type='positive')
+                                    else:
+                                        ui.notify(f'⚠️ 远程卸载失败 (可能是连接超时)，将仅删除本地记录', type='warning')
+                                finally:
+                                    # 2. 无论结果如何，必须关闭转圈
+                                    loading_notify.dismiss()
 
                             if not remaining_ssh and not remaining_xui:
                                 SERVERS_CACHE.pop(idx)
@@ -6318,6 +6341,7 @@ async def open_server_dialog(idx=None):
                                 for k in [u, p_u]:
                                     if k in PROBE_DATA_CACHE: del PROBE_DATA_CACHE[k]
                                     if k in NODES_DATA: del NODES_DATA[k]
+                                    if k in PING_TREND_CACHE: del PING_TREND_CACHE[k]
                                 safe_notify('✅ 服务器已彻底删除', 'positive')
                                 is_full_delete = True
                             else:
@@ -6343,14 +6367,11 @@ async def open_server_dialog(idx=None):
                             current_data = CURRENT_VIEW_STATE.get('data')
 
                             if is_full_delete:
-                                # 如果正在查看当前单服务器详情
                                 if current_scope == 'SINGLE' and current_data == target_srv:
                                     content_container.clear()
                                     with content_container:
                                         ui.label('该服务器已删除').classes('text-gray-400 text-lg w-full text-center mt-20')
-                                # ✨✨✨ 关键修改：如果正在查看列表，立即静默刷新 ✨✨✨
                                 elif current_scope in ['ALL', 'TAG', 'COUNTRY']:
-                                    # 强制打破防抖，触发 refresh_content 重绘
                                     CURRENT_VIEW_STATE['scope'] = None
                                     await refresh_content(current_scope, current_data, force_refresh=False)
                             else:
