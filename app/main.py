@@ -8635,7 +8635,37 @@ SIDEBAR_UI_REFS = {
     'rows': {}         # 存储格式: {'http://1.2.3.4': ui_row_element, ...}
 }
 
-# 提取出来的单行渲染函数 (保持与之前一样的样式)
+# ✨✨✨ [新增] 侧边栏点击防抖处理函数 (核心修复：保护 SSH 连接) ✨✨✨
+async def on_server_click_handler(server):
+    # 1. 获取当前视图状态
+    current_scope = CURRENT_VIEW_STATE.get('scope')
+    current_data = CURRENT_VIEW_STATE.get('data')
+    
+    # 2. 判断是否点击了当前正在显示的服务器 (通过 URL 唯一标识判断)
+    is_same_server = False
+    if current_scope == 'SINGLE' and current_data:
+        try:
+            # 比较 URL 是最稳妥的唯一性判断
+            if current_data.get('url') == server.get('url'):
+                is_same_server = True
+        except: pass
+
+    if is_same_server:
+        # 🛑 核心逻辑：如果是同一台机器，阻止重绘页面！
+        # 这样右下角的 SSH 窗口就不会被销毁，连接得以保持。
+        
+        # 可选：如果希望点击时顺便刷新一下节点列表（不影响 SSH），可以调用这个
+        if REFRESH_CURRENT_NODES:
+            res = REFRESH_CURRENT_NODES()
+            if res and asyncio.iscoroutine(res):
+                await res
+        return 
+
+    # 3. 如果是不同的服务器，才执行正常的切换逻辑 (重绘页面)
+    await refresh_content('SINGLE', server)
+
+
+# ================= 提取出来的单行渲染函数 (修改版) =================
 def render_single_sidebar_row(s):
     # 样式定义 (与之前保持一致)
     btn_keycap_base = 'bg-white border-t border-x border-gray-200 border-b-[3px] border-b-gray-300 rounded-lg transition-all duration-100 active:border-b-0 active:border-t-[3px] active:translate-y-[3px]'
@@ -8644,8 +8674,9 @@ def render_single_sidebar_row(s):
 
     # 创建行容器
     with ui.row().classes('w-full gap-2 no-wrap items-stretch') as row:
-        # 1. 服务器名字按钮 (带绑定)
-        ui.button(on_click=lambda _, s=s: refresh_content('SINGLE', s)) \
+        # 1. 服务器名字按钮 (✨ 修改点：绑定新的防抖处理函数 ✨)
+        # 原代码是直接 lambda: refresh_content(...)，现在改为 lambda: on_server_click_handler(...)
+        ui.button(on_click=lambda _, s=s: on_server_click_handler(s)) \
             .bind_text_from(s, 'name') \
             .props('no-caps align=left flat text-color=grey-8') \
             .classes(btn_name_cls)
@@ -8658,7 +8689,6 @@ def render_single_sidebar_row(s):
     # 注册到全局索引
     SIDEBAR_UI_REFS['rows'][s['url']] = row
     return row
-
 # ================= 侧边栏渲染 (最终版：绑定模式，修改名字0闪烁) =================
 _current_dragged_group = None 
 
