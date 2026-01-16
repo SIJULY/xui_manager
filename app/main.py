@@ -7141,7 +7141,6 @@ async def render_single_server_view(server_conf, force_refresh=False):
 
             with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-1'): 
                 await render_node_list()
-                asyncio.create_task(reload_and_refresh_ui())
 
         ui.element('div').classes('h-6 flex-shrink-0') 
 
