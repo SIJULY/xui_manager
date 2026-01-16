@@ -7251,90 +7251,151 @@ def draw_row(srv, node, css_style, use_special_mode, is_first=True):
             # 设置按钮
             ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-gray-500 hover:text-slate-800 hover:bg-slate-100')
 
-# ================= 核心：静默刷新 UI 数据 (已修复：统一为区域分布) =================
-async def refresh_dashboard_ui():
-    try:
-        # 如果仪表盘还没打开（引用是空的），直接跳过
-        if not DASHBOARD_REFS.get('servers'): return
 
+
+# ================= 核心：前端轮询用的纯数据接口 (API) =================
+@app.get('/api/dashboard/live_data')
+def get_dashboard_live_data():
+    data = calculate_dashboard_data()
+    return data if data else {"error": "Calculation failed"}
+
+
+# ================= 辅助：统一数据计算逻辑 (修改版：优先探针数据) =================
+def calculate_dashboard_data():
+    """
+    计算并返回当前所有面板数据。
+    逻辑调整：优先使用 Root 探针的流量和状态，没有探针才使用 X-UI 数据。
+    """
+    try:
         total_servers = len(SERVERS_CACHE)
         online_servers = 0
         total_nodes = 0
         total_traffic_bytes = 0
         
         server_traffic_map = {}
-        
-        # ✨✨✨ [修复] 使用 country_counter 替代 protocol_count ✨✨✨
         from collections import Counter
         country_counter = Counter()
         
-        # --- 1. 计算基础统计数据 ---
+        import time
+        now_ts = time.time()
+
         for s in SERVERS_CACHE:
-            res = NODES_DATA.get(s['url'], []) or []
-            custom = s.get('custom_nodes', []) or []
+            # 1. 获取基础数据
+            res = NODES_DATA.get(s['url'], []) or []     # X-UI 节点数据
+            custom = s.get('custom_nodes', []) or []     # 自定义节点
+            probe_data = PROBE_DATA_CACHE.get(s['url'])  # 探针数据
+            
             name = s.get('name', '未命名')
-            srv_traffic = 0
             
-            # 统计区域 (与主页逻辑保持一致)
+            # --- 统计区域 ---
             try:
-                # 优先读取 group，如果是默认分组则探测
-                g_name = s.get('group')
-                if not g_name or g_name in ['默认分组', '自动注册', '未分组', '自动导入', '🏳️ 其他地区']:
-                    g_name = detect_country_group(name, s)
-                if not g_name: g_name = "🏳️ 其他"
-                country_counter[g_name] += 1
-            except: 
-                country_counter["🏳️ 其他"] += 1
+                region_str = detect_country_group(name, s)
+                if not region_str or region_str.strip() == "🏳️": region_str = "🏳️ 未知区域"
+            except: region_str = "🏳️ 未知区域"
+            country_counter[region_str] += 1
 
-            if res:
-                online_servers += 1
-                total_nodes += len(res)
-                for n in res: 
-                    t = int(n.get('up', 0)) + int(n.get('down', 0))
-                    total_traffic_bytes += t; srv_traffic += t
-                    # 移除协议统计
+            # --- A. 计算流量 (优先探针) ---
+            srv_traffic = 0
+            use_probe_traffic = False
             
-            if custom:
-                total_nodes += len(custom)
-                # 移除自定义节点协议统计
+            if s.get('probe_installed') and probe_data:
+                # 优先：读取网卡总流量 (入站+出站)
+                # 注意：这里假设探针返回的是累积总量
+                t_in = probe_data.get('net_total_in', 0)
+                t_out = probe_data.get('net_total_out', 0)
+                if t_in > 0 or t_out > 0:
+                    srv_traffic = t_in + t_out
+                    use_probe_traffic = True
+            
+            # 兜底：如果没有探针数据，则累加 X-UI 节点流量
+            if not use_probe_traffic and res:
+                for n in res:
+                    srv_traffic += int(n.get('up', 0)) + int(n.get('down', 0))
 
+            total_traffic_bytes += srv_traffic
             server_traffic_map[name] = srv_traffic
 
-        # --- 2. 更新 UI 文字和图表 ---
-        if DASHBOARD_REFS.get('servers'): DASHBOARD_REFS['servers'].set_text(f"{online_servers}/{total_servers}")
-        if DASHBOARD_REFS.get('nodes'): DASHBOARD_REFS['nodes'].set_text(str(total_nodes))
-        if DASHBOARD_REFS.get('traffic'): DASHBOARD_REFS['traffic'].set_text(f"{total_traffic_bytes/(1024**3):.2f} GB")
-        if DASHBOARD_REFS.get('subs'): DASHBOARD_REFS['subs'].set_text(str(len(SUBS_CACHE)))
+            # --- B. 判断在线状态 (优先探针心跳) ---
+            is_online = False
+            
+            # 1. 探针判定 (心跳在 60秒内算在线)
+            if s.get('probe_installed') and probe_data:
+                if now_ts - probe_data.get('last_updated', 0) < 60:
+                    is_online = True
+            
+            # 2. X-UI 判定 (如果探针没在线，看下 X-UI API 是否通了)
+            if not is_online:
+                # 如果缓存里有节点数据，或者状态标记为 online (由 fetch_inbounds_safe 设置)
+                if res or s.get('_status') == 'online':
+                    is_online = True
+            
+            if is_online:
+                online_servers += 1
 
-        # 更新柱状图 (保持不变)
+            # --- C. 统计节点数 (这个始终来自配置) ---
+            if res: total_nodes += len(res)
+            if custom: total_nodes += len(custom)
+
+        # 构建图表数据
+        sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15]
+        bar_names = [x[0] for x in sorted_traffic]
+        bar_values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
+
+        chart_data = []
+        sorted_regions = country_counter.most_common()
+        
+        # 饼图逻辑 (Top 5 + 其他)
+        if len(sorted_regions) > 5:
+            top_5 = sorted_regions[:5]
+            others_count = sum(item[1] for item in sorted_regions[5:])
+            for k, v in top_5: chart_data.append({'name': f"{k} ({v})", 'value': v})
+            if others_count > 0: chart_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
+        else:
+            for k, v in sorted_regions: chart_data.append({'name': f"{k} ({v})", 'value': v})
+
+        if not chart_data: chart_data = [{'name': '暂无数据', 'value': 0}]
+
+        return {
+            "servers": f"{online_servers}/{total_servers}",
+            "nodes": str(total_nodes),
+            "traffic": f"{total_traffic_bytes/(1024**3):.2f} GB",
+            "subs": str(len(SUBS_CACHE)),
+            "bar_chart": {"names": bar_names, "values": bar_values},
+            "pie_chart": chart_data
+        }
+    except Exception as e:
+        print(f"Error calculating dashboard data: {e}")
+        import traceback; traceback.print_exc()
+        return None
+
+# ================= 核心：静默刷新 UI 数据 (修改版：统一调用计算逻辑) =================
+async def refresh_dashboard_ui():
+    try:
+        # 如果仪表盘还没打开（引用是空的），直接跳过
+        if not DASHBOARD_REFS.get('servers'): return
+
+        # ✨ 直接调用通用计算函数，确保与 API 逻辑绝对一致
+        data = calculate_dashboard_data()
+        if not data: return
+
+        # --- 更新 UI 文字 ---
+        if DASHBOARD_REFS.get('servers'): DASHBOARD_REFS['servers'].set_text(data['servers'])
+        if DASHBOARD_REFS.get('nodes'): DASHBOARD_REFS['nodes'].set_text(data['nodes'])
+        if DASHBOARD_REFS.get('traffic'): DASHBOARD_REFS['traffic'].set_text(data['traffic'])
+        if DASHBOARD_REFS.get('subs'): DASHBOARD_REFS['subs'].set_text(data['subs'])
+
+        # --- 更新 柱状图 ---
         if DASHBOARD_REFS.get('bar_chart'):
-            sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15] 
-            names = [x[0] for x in sorted_traffic]
-            values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
-            DASHBOARD_REFS['bar_chart'].options['xAxis']['data'] = names
-            DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = values
+            DASHBOARD_REFS['bar_chart'].options['xAxis']['data'] = data['bar_chart']['names']
+            DASHBOARD_REFS['bar_chart'].options['series'][0]['data'] = data['bar_chart']['values']
             DASHBOARD_REFS['bar_chart'].update()
 
-        # ✨✨✨ [修复] 更新饼图为区域分布 (Top 5 + Others) ✨✨✨
+        # --- 更新 饼图 ---
         if DASHBOARD_REFS.get('pie_chart'):
-            # 处理数据：排序并合并 Top 5 以外的
-            sorted_regions = country_counter.most_common()
-            
-            pie_data = []
-            if len(sorted_regions) > 5:
-                top_5 = sorted_regions[:5]
-                others_count = sum(item[1] for item in sorted_regions[5:])
-                for k, v in top_5: pie_data.append({'name': f"{k} ({v})", 'value': v})
-                if others_count > 0: pie_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
-            else:
-                for k, v in sorted_regions: pie_data.append({'name': f"{k} ({v})", 'value': v})
-
-            if not pie_data: pie_data = [{'name': '暂无数据', 'value': 0}]
-            
-            DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = pie_data
+            DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = data['pie_chart']
             DASHBOARD_REFS['pie_chart'].update()
 
-        # --- 3. 同步刷新地图数据 (保持不变) ---
+        # --- 更新地图数据 (保持原逻辑) ---
         globe_data_list = []
         seen_locations = set()
         for s in SERVERS_CACHE:
@@ -7362,99 +7423,7 @@ async def refresh_dashboard_ui():
 
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
-
-
-# ================= 核心：前端轮询用的纯数据接口 (API) =================
-@app.get('/api/dashboard/live_data')
-def get_dashboard_live_data():
-    data = calculate_dashboard_data()
-    return data if data else {"error": "Calculation failed"}
-
-
-# ================= 辅助：统一数据计算逻辑 =================
-def calculate_dashboard_data():
-    """
-    计算并返回当前所有面板数据。
-    供 API 和 页面初始化 共用。
-    """
-    try:
-        total_servers = len(SERVERS_CACHE)
-        online_servers = 0
-        total_nodes = 0
-        total_traffic_bytes = 0
         
-        server_traffic_map = {}
-        from collections import Counter
-        protocol_count = Counter()
-        country_counter = Counter()
-
-        for s in SERVERS_CACHE:
-            # 1. 获取面板节点 (X-UI API 数据)
-            res = NODES_DATA.get(s['url'], []) or []
-            # 2. 获取自定义节点 (一键部署的数据)
-            custom = s.get('custom_nodes', []) or []
-            
-            name = s.get('name', '未命名')
-            
-            # 统计区域
-            try:
-                region_str = detect_country_group(name, s)
-                if not region_str or region_str.strip() == "🏳️": region_str = "🏳️ 未知区域"
-            except: region_str = "🏳️ 未知区域"
-            country_counter[region_str] += 1
-
-            # === A. 处理面板节点 (统计流量、协议、在线状态) ===
-            srv_traffic = 0
-            if res:
-                online_servers += 1
-                total_nodes += len(res) # 累加面板节点
-                for n in res: 
-                    t = int(n.get('up', 0)) + int(n.get('down', 0))
-                    total_traffic_bytes += t
-                    srv_traffic += t
-                    proto = str(n.get('protocol', 'unknown')).upper()
-                    protocol_count[proto] += 1
-            
-            # === B. 处理自定义节点 (累加数量和协议) ===
-            if custom:
-                # 注意：如果面板掉线(res为空)但有自定义节点，是否算在线服务器？
-                # 这里暂且保持原逻辑：只根据API连通性判断 online_servers
-                # 但节点数量必须加上去：
-                total_nodes += len(custom)
-                
-                for cn in custom:
-                    # 自定义节点通常没有流量反馈，只统计协议
-                    c_proto = str(cn.get('protocol', 'custom')).upper()
-                    protocol_count[c_proto] += 1
-
-            # 记录该服务器总流量
-            server_traffic_map[name] = srv_traffic
-
-        # 构建图表数据
-        sorted_traffic = sorted(server_traffic_map.items(), key=lambda x: x[1], reverse=True)[:15]
-        bar_names = [x[0] for x in sorted_traffic]
-        bar_values = [round(x[1]/(1024**3), 2) for x in sorted_traffic]
-
-        chart_data = []
-        sorted_regions = country_counter.most_common()
-        top_5 = sorted_regions[:5]
-        for region, count in top_5: chart_data.append({'name': f"{region} ({count})", 'value': count})
-        others_count = sum(count for _, count in sorted_regions[5:])
-        if others_count > 0: chart_data.append({'name': f"🏳️ 其他 ({others_count})", 'value': others_count})
-        if not chart_data: chart_data = [{'name': '暂无数据', 'value': 0}]
-
-        return {
-            "servers": f"{online_servers}/{total_servers}",
-            "nodes": str(total_nodes), # 这里的 total_nodes 现在包含了 Hy2 和 XHTTP
-            "traffic": f"{total_traffic_bytes/(1024**3):.2f} GB",
-            "subs": str(len(SUBS_CACHE)),
-            "bar_chart": {"names": bar_names, "values": bar_values},
-            "pie_chart": chart_data
-        }
-    except Exception as e:
-        # 建议把报错打印出来方便调试，生产环境可以去掉 print
-        print(f"Error calculating dashboard data: {e}")
-        return None
 # ================= 核心：仪表盘主视图渲染 (最终稳定版：切断 JS 关联) =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
