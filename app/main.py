@@ -1069,7 +1069,7 @@ def record_ping_history(url, pings_dict):
         PING_TREND_CACHE[url] = PING_TREND_CACHE[url][-1000:]
 
         
-# ================= 探针安装脚本  =================
+# ================= 探针安装脚本 (升级版：含X-UI数据库读取) =================
 PROBE_INSTALL_SCRIPT = r"""
 bash -c '
 # 1. 提升权限
@@ -1078,16 +1078,16 @@ bash -c '
 # 2. 安装基础依赖
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y python3 iputils-ping util-linux >/dev/null 2>&1
+    apt-get install -y python3 iputils-ping util-linux sqlite3 >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
-    yum install -y python3 iputils util-linux >/dev/null 2>&1
+    yum install -y python3 iputils util-linux sqlite3 >/dev/null 2>&1
 elif [ -f /etc/alpine-release ]; then
-    apk add python3 iputils util-linux >/dev/null 2>&1
+    apk add python3 iputils util-linux sqlite3 >/dev/null 2>&1
 fi
 
 # 3. 写入 Python 脚本
 cat > /root/x_fusion_agent.py << "PYTHON_EOF"
-import time, json, os, socket, sys, subprocess, re, platform
+import time, json, os, socket, sys, subprocess, re, platform, sqlite3
 import urllib.request, urllib.error
 import ssl
 
@@ -1104,6 +1104,10 @@ PING_TARGETS = {
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
+
+# ... (省略原有的 CPU/内存/系统信息获取函数，保持不变，为节省篇幅未重复列出，请保留原脚本中的 get_cpu_model 等函数) ...
+# 注意：实际替换时，请保留 get_cpu_model, get_os_distro, get_network_bytes 等辅助函数！
+# 这里为了展示核心逻辑，我直接写新增的 X-UI 读取函数。
 
 def get_cpu_model():
     model = "Unknown"
@@ -1153,7 +1157,6 @@ def get_ping(target):
     except: pass
     return -1
 
-# ✨✨✨ 新增：读取网卡流量辅助函数 ✨✨✨
 def get_network_bytes():
     r, t = 0, 0
     try:
@@ -1169,6 +1172,42 @@ def get_network_bytes():
     except: pass
     return r, t
 
+# ✨✨✨ 新增：读取 X-UI 数据库 ✨✨✨
+def get_xui_rows():
+    db_path = "/etc/x-ui/x-ui.db"
+    if not os.path.exists(db_path): return None
+    
+    try:
+        # 使用 URI 模式打开，mode=ro (只读)，防止锁死数据库影响面板写入
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        cursor = conn.cursor()
+        # 查询关键字段，尽可能匹配 API 返回的格式
+        cursor.execute("SELECT id, up, down, total, remark, enable, protocol, port, settings, stream_settings, expiry_time, listen FROM inbounds")
+        rows = cursor.fetchall()
+        
+        inbounds = []
+        for row in rows:
+            # 数据清洗与组装
+            node = {
+                "id": row[0],
+                "up": row[1],
+                "down": row[2],
+                "total": row[3],
+                "remark": row[4],
+                "enable": True if row[5] == 1 else False,
+                "protocol": row[6],
+                "port": row[7],
+                "settings": row[8],         # 数据库里存的是 JSON 字符串，直接传给后端
+                "streamSettings": row[9],   # 同上
+                "expiryTime": row[10],
+                "listen": row[11]
+            }
+            inbounds.append(node)
+        conn.close()
+        return inbounds
+    except:
+        return None
+
 def get_info():
     global SERVER_URL
     data = {"token": TOKEN, "static": STATIC_CACHE}
@@ -1182,26 +1221,22 @@ def get_info():
     data["server_url"] = SERVER_URL
 
     try:
-        # ✨ 第一次采样 (网络 + CPU)
         net_in_1, net_out_1 = get_network_bytes()
         with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot1, idle1 = sum(fs), fs[3]
         
-        # 等待 1 秒
+        # 采集等待
         time.sleep(1)
         
-        # ✨ 第二次采样 (网络 + CPU)
         net_in_2, net_out_2 = get_network_bytes()
         with open("/proc/stat") as f:
             fs = [float(x) for x in f.readline().split()[1:5]]
             tot2, idle2 = sum(fs), fs[3]
             
-        # 计算差值
         data["cpu_usage"] = round((1 - (idle2-idle1)/(tot2-tot1)) * 100, 1)
         data["cpu_cores"] = os.cpu_count() or 1
         
-        # ✨ 计算实时网速 (差值)
         data["net_speed_in"] = net_in_2 - net_in_1
         data["net_speed_out"] = net_out_2 - net_out_1
         data["net_total_in"] = net_in_2
@@ -1233,6 +1268,12 @@ def get_info():
         data["uptime"] = "%d天 %d时 %d分" % (d, h, m)
 
         data["pings"] = {k: get_ping(v) for k, v in PING_TARGETS.items()}
+        
+        # ✨✨✨ 获取 X-UI 本地数据并随包推送 ✨✨✨
+        # 只要读到了数据，就放进去。如果没装面板，这里是 None
+        xui = get_xui_rows()
+        if xui is not None:
+            data["xui_data"] = xui
 
     except: pass
     return data
@@ -1244,7 +1285,7 @@ def push():
             req = urllib.request.Request(MANAGER_URL, data=js, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r: pass
         except: pass
-        time.sleep(4) #  降低推送频率，减轻CPU和流量负载 (总周期约5秒)
+        time.sleep(5) # 降低频率，5秒推送一次
 
 if __name__ == "__main__":
     push()
@@ -2585,11 +2626,254 @@ class XUIManager:
         return False, "请求无响应 (超时)"
 
 def get_manager(server_conf):
-    key = server_conf['url']
-    if key not in managers or managers[key].username != server_conf['user']:
-        managers[key] = XUIManager(server_conf['url'], server_conf['user'], server_conf['pass'], server_conf.get('prefix'))
-    return managers[key]
+    # --- 优先级 1：SSH / Root 探针模式 (上帝模式) ---
+    # 只要检测到安装了探针且配置了 SSH Host，无论有没有 API 账号，都优先走 SSH 通道。
+    # 优点：操作数据库更稳，无需担心 API 端口被封或 API 特征检测。
+    if server_conf.get('probe_installed') and server_conf.get('ssh_host'):
+        url = server_conf.get('url')
+        # 使用特殊前缀作为 key 缓存 SSH 管理器实例
+        mgr_key = f"ssh_{url}"
+        if mgr_key not in managers:
+            managers[mgr_key] = SSHXUIManager(server_conf)
+        return managers[mgr_key]
 
+    # --- 优先级 2：标准 API 模式 ---
+    # 只有当 SSH 不可用（未配置探针/SSH）时，才尝试使用 API 账号登录。
+    url = server_conf.get('url')
+    if url and server_conf.get('user') and server_conf.get('pass'):
+        if url not in managers:
+            managers[url] = XUIManager(url, server_conf['user'], server_conf['pass'], server_conf.get('prefix'))
+        return managers[url]
+    
+    # --- 兜底 ---
+    raise Exception("无法创建管理器：未配置 SSH 且缺少 X-UI 账号信息")
+
+# ================== 核心扩展：SSH 数据库直连管理器 (V4 缩进修复版) ==================
+class SSHXUIManager:
+    """
+    通过 SSH 直接操作远程 X-UI 数据库。
+    V4 修复：
+    1. 彻底修复缩进问题 (IndentationError)，防止远程脚本语法报错。
+    2. 增强错误捕获，现在能识别 SyntaxError 并弹窗报错，而不是误报成功。
+    3. 保留了 V3 的自动路径探测 (兼容 3x-ui / x-ui)。
+    """
+    def __init__(self, server_conf):
+        self.server_conf = server_conf
+
+    async def _exec_remote_script(self, python_code):
+        # ✨✨✨ 核心修复：给传入的代码每一行都加 4 个空格缩进 ✨✨✨
+        # 这样才能正确放入 try: 块内部
+        indented_code = "\n".join(["    " + line for line in python_code.split("\n")])
+
+        # 包装脚本
+        wrapper = f"""
+import sqlite3, json, os, sys, time, subprocess
+
+def detect_env():
+    # 1. 探测数据库路径
+    possible_dbs = [
+        "/etc/x-ui/x-ui.db",
+        "/usr/local/x-ui/bin/x-ui.db",
+        "/usr/local/x-ui/x-ui.db"
+    ]
+    real_db = None
+    for p in possible_dbs:
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            real_db = p
+            break
+    
+    if not real_db:
+        raise Exception("无法在常见路径找到 x-ui.db，请确认面板已安装")
+
+    # 2. 探测服务名称
+    svc_name = "x-ui"
+    if os.path.exists("/etc/systemd/system/3x-ui.service"):
+        svc_name = "3x-ui"
+    elif os.path.exists("/usr/lib/systemd/system/3x-ui.service"):
+        svc_name = "3x-ui"
+        
+    return real_db, svc_name
+
+try:
+    db_path, svc_name = detect_env()
+    # print(f"DEBUG: Detected {{db_path}} {{svc_name}}")
+    
+{indented_code}
+except Exception as e:
+    import traceback
+    print("ERROR_TRACE:", traceback.format_exc())
+    print("ERROR:", e)
+    sys.exit(1)
+"""
+        # Base64 编码传输
+        b64_code = base64.b64encode(wrapper.encode('utf-8')).decode()
+        cmd = f"python3 -c \"import base64; exec(base64.b64decode('{b64_code}'))\""
+        
+        success, output = await run.io_bound(lambda: _ssh_exec_wrapper(self.server_conf, cmd))
+        
+        # ✨✨✨ 增强错误检查：捕获语法错误 ✨✨✨
+        # 之前的版本因为脚本没跑起来，没有输出 ERROR: 字样，导致误判为成功
+        # 现在增加对 Traceback 和 SyntaxError 的检测
+        if not success: 
+            raise Exception(f"SSH 连接失败: {output}")
+        if "Traceback" in output or "SyntaxError" in output or "ERROR:" in output: 
+            # 将远程报错抛出给 UI 显示
+            raise Exception(f"远程执行失败: {output}")
+            
+        return output.strip()
+
+    async def get_inbounds(self):
+        # 注意：这里的代码不需要缩进，_exec_remote_script 会自动加
+        script = f"""
+if os.path.exists(db_path):
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+    cur.execute("SELECT * FROM inbounds")
+    rows = cur.fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        for k in ['settings', 'streamSettings', 'sniffing']:
+            if d.get(k):
+                try: d[k] = json.loads(d[k])
+                except: pass
+        d['enable'] = bool(d['enable'])
+        result.append(d)
+    print(json.dumps(result))
+    con.close()
+else:
+    print("[]")
+"""
+        try:
+            output = await self._exec_remote_script(script)
+            return json.loads(output)
+        except Exception as e: 
+            logger.error(f"SSH Get Inbounds Error: {e}")
+            return []
+
+    async def add_inbound(self, inbound_data):
+        payload = {
+            "remark": inbound_data.get('remark', '未命名'),
+            "port": inbound_data.get('port'),
+            "protocol": inbound_data.get('protocol'),
+            "settings": json.dumps(inbound_data.get('settings', {})),
+            "stream_settings": json.dumps(inbound_data.get('streamSettings', {})),
+            "enable": 1,
+            "expiry_time": 0,
+            "listen": "",
+            "total": 0, "up": 0, "down": 0, "tag": "", "sniffing": "{}"
+        }
+        payload_json = json.dumps(payload)
+
+        # 注意：f-string 中的 {{ }} 是为了在 python 脚本中保留 { }
+        # 而 {svc_name} 是 Python 变量
+        script = f"""
+params = json.loads(r'''{payload_json}''')
+
+# 1. 停止服务
+os.system(f"systemctl stop {{svc_name}}") 
+time.sleep(0.5)
+
+con = sqlite3.connect(db_path)
+cur = con.cursor()
+
+# 2. 检查端口
+cur.execute("SELECT id FROM inbounds WHERE port=?", (params['port'],))
+if cur.fetchone(): 
+    con.close()
+    os.system(f"systemctl start {{svc_name}}")
+    raise Exception(f"端口 {{params['port']}} 已被占用")
+
+# 3. 动态插入
+cur.execute("PRAGMA table_info(inbounds)")
+columns = [info[1] for info in cur.fetchall()]
+valid_keys = []
+valid_vals = []
+placeholders = []
+
+for k, v in params.items():
+    if k in columns:
+        valid_keys.append(k)
+        valid_vals.append(v)
+        placeholders.append("?")
+
+if 'user_id' in columns:
+    valid_keys.append('user_id')
+    valid_vals.append(1)
+    placeholders.append("?")
+
+sql = f"INSERT INTO inbounds ({{','.join(valid_keys)}}) VALUES ({{','.join(placeholders)}})"
+cur.execute(sql, tuple(valid_vals))
+con.commit()
+con.close()
+
+# 4. 重启服务
+os.system(f"systemctl start {{svc_name}}")
+print(f"SUCCESS (DB: {{db_path}})")
+"""
+        await self._exec_remote_script(script)
+        return True, "添加成功 (Root模式)"
+
+    async def update_inbound(self, inbound_id, inbound_data):
+        payload = {
+            "id": inbound_id,
+            "remark": inbound_data.get('remark', ''),
+            "port": inbound_data.get('port'),
+            "protocol": inbound_data.get('protocol'),
+            "settings": json.dumps(inbound_data.get('settings', {})),
+            "stream_settings": json.dumps(inbound_data.get('streamSettings', {})),
+            "enable": 1 if inbound_data.get('enable', True) else 0
+        }
+        payload_json = json.dumps(payload)
+
+        script = f"""
+params = json.loads(r'''{payload_json}''')
+
+os.system(f"systemctl stop {{svc_name}}")
+time.sleep(0.5)
+
+con = sqlite3.connect(db_path)
+cur = con.cursor()
+
+sql = "UPDATE inbounds SET remark=?, port=?, protocol=?, settings=?, stream_settings=?, enable=? WHERE id=?"
+cur.execute(sql, (
+    params['remark'], params['port'], params['protocol'], 
+    params['settings'], params['stream_settings'], params['enable'], 
+    params['id']
+))
+
+if cur.rowcount == 0:
+    con.close()
+    os.system(f"systemctl start {{svc_name}}")
+    raise Exception("ID未找到")
+
+con.commit()
+con.close()
+
+os.system(f"systemctl start {{svc_name}}")
+print(f"SUCCESS (DB: {{db_path}})")
+"""
+        await self._exec_remote_script(script)
+        return True, "更新成功 (Root模式)"
+
+    async def delete_inbound(self, inbound_id):
+        script = f"""
+os.system(f"systemctl stop {{svc_name}}")
+time.sleep(0.5)
+
+con = sqlite3.connect(db_path)
+cur = con.cursor()
+cur.execute("DELETE FROM inbounds WHERE id=?", ({inbound_id},))
+con.commit()
+con.close()
+
+os.system(f"systemctl start {{svc_name}}")
+print(f"SUCCESS (DB: {{db_path}})")
+"""
+        await self._exec_remote_script(script)
+        return True, "删除成功 (Root模式)"
+              
 # ================= 即时存档 + 顺序修正 =================
 
 # 1. 辅助函数：后台线程执行
@@ -2600,9 +2884,19 @@ async def run_in_bg_executor(func, *args):
 # 2. 单个服务器同步逻辑 (修改版：增加 sync_name 开关)
 async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False):
     url = server_conf['url']
+    
+    # ✨✨✨ 核心守门员逻辑 ✨✨✨
+    # 如果已安装探针，且不是初次加载（即缓存里有数据），直接信任推送的数据
+    # 这意味着后台任务不会再尝试登录该服务器的 API
+    if server_conf.get('probe_installed', False):
+        # 只要缓存里有数据，就认为同步成功，直接返回缓存
+        # 这样就实现了：探针机器 -> 被动接收；普通机器 -> 主动拉取
+        return NODES_DATA.get(url, [])
+
+    # --- 以下是针对普通机器 (无探针) 的原有主动拉取逻辑 ---
     name = server_conf.get('name', '未命名')
     
-    # 如果不是强制刷新，且缓存里有数据，直接返回缓存
+    # 如果不是强制刷新，且缓存里有数据，返回缓存
     if not force_refresh and url in NODES_DATA: return NODES_DATA[url]
     
     async with SYNC_SEMAPHORE:
@@ -2610,49 +2904,36 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False)
             mgr = get_manager(server_conf)
             inbounds = await run_in_bg_executor(mgr.get_inbounds)
             if inbounds is None:
-                # 登录重试逻辑
+                # 重试
                 mgr = managers[server_conf['url']] = XUIManager(server_conf['url'], server_conf['user'], server_conf['pass'], server_conf.get('prefix')) 
                 inbounds = await run_in_bg_executor(mgr.get_inbounds)
             
             if inbounds is not None:
-                # ✅ 成功：更新内存缓存
                 NODES_DATA[url] = inbounds
                 server_conf['_status'] = 'online' 
                 
-                # ================= ✨✨✨ [逻辑修改]：仅当 sync_name=True 时才同步名称 ✨✨✨ =================
+                # 名称同步逻辑 (仅普通机器需要，探针机器由 Agent 名字决定或手动改)
                 if sync_name: 
                     try:
                         if len(inbounds) > 0:
                             remote_name = inbounds[0].get('remark', '').strip()
                             if remote_name:
                                 current_full_name = server_conf.get('name', '')
-                                
-                                # 分离国旗
                                 if ' ' in current_full_name:
                                     parts = current_full_name.split(' ', 1)
-                                    current_flag = parts[0]
-                                    current_text = parts[1].strip()
+                                    current_flag = parts[0]; current_text = parts[1].strip()
                                 else:
-                                    current_flag = ""
-                                    current_text = current_full_name
-                                
-                                # 比对并更新
+                                    current_flag = ""; current_text = current_full_name
                                 if current_text != remote_name:
-                                    logger.info(f"🔄 [名称同步] (主动触发) 发现变更: {current_text} -> {remote_name}")
-                                    if current_flag:
-                                        new_name = f"{current_flag} {remote_name}"
-                                    else:
-                                        new_name = await auto_prepend_flag(remote_name, url)
-                                    
+                                    if current_flag: new_name = f"{current_flag} {remote_name}"
+                                    else: new_name = await auto_prepend_flag(remote_name, url)
                                     server_conf['name'] = new_name
                                     asyncio.create_task(save_servers())
-                    except Exception as e:
-                        logger.warning(f"⚠️ [名称同步] 异常: {e}")
-                # =========================================================================================
+                    except: pass
                 
                 return inbounds
             
-            # ❌ 失败
+            # 失败处理
             NODES_DATA[url] = [] 
             server_conf['_status'] = 'offline'
             return []
@@ -3123,30 +3404,24 @@ async def batch_ping_nodes(nodes, raw_host):
     if tasks:
         await asyncio.gather(*tasks)
 
-# ================= 探针数据被动接收接口  =================
+# ================= 探针数据被动接收接口 (最终修复版：防双重国旗) =================
 @app.post('/api/probe/push')
 async def probe_push_data(request: Request):
     try:
         data = await request.json()
         token = data.get('token')
-        server_url = data.get('server_url') # Agent 实际汇报上来的地址
+        server_url = data.get('server_url')
         
         # 1. 校验 Token
         correct_token = ADMIN_CONFIG.get('probe_token')
         if not token or token != correct_token:
             return Response("Invalid Token", 403)
             
-        # 2. 查找对应的服务器
-        # 🎯 优先尝试精确匹配 (URL 完全一致)
+        # 2. 查找服务器 (精准匹配 -> IP匹配)
         target_server = next((s for s in SERVERS_CACHE if s['url'] == server_url), None)
-        
-        # ✨✨✨ 核心修复：如果精确匹配失败，尝试 IP 模糊匹配 ✨✨✨
         if not target_server:
             try:
-                # 提取 Agent 汇报的 IP (去掉 http:// 和 端口)
                 push_ip = server_url.split('://')[-1].split(':')[0]
-                
-                # 遍历缓存寻找 IP 相同的服务器
                 for s in SERVERS_CACHE:
                     cache_ip = s['url'].split('://')[-1].split(':')[0]
                     if cache_ip == push_ip:
@@ -3159,14 +3434,77 @@ async def probe_push_data(request: Request):
             if not target_server.get('probe_installed'):
                  target_server['probe_installed'] = True
             
-            # 3. 写入缓存
+            # 3. 写入基础监控数据缓存
             data['status'] = 'online'
             data['last_updated'] = time.time()
-            
-            # 🌟 关键：使用面板里存储的 URL (target_server['url']) 作为 Key
             PROBE_DATA_CACHE[target_server['url']] = data
             
-            # ✨✨✨ [新增] 立即记录历史数据 ✨✨✨
+            # ✨✨✨ 核心逻辑：处理 X-UI 数据 & 自动命名 ✨✨✨
+            if 'xui_data' in data and isinstance(data['xui_data'], list):
+                # 解析节点
+                raw_nodes = data['xui_data']
+                parsed_nodes = []
+                for n in raw_nodes:
+                    try:
+                        if isinstance(n.get('settings'), str): 
+                            n['settings'] = json.loads(n['settings'])
+                        if isinstance(n.get('streamSettings'), str): 
+                            n['streamSettings'] = json.loads(n['streamSettings'])
+                        parsed_nodes.append(n)
+                    except: 
+                        parsed_nodes.append(n)
+                
+                # 更新节点缓存
+                NODES_DATA[target_server['url']] = parsed_nodes
+                target_server['_status'] = 'online'
+
+                # 🟢 [新增补充]：自动同步名称逻辑 (当端口不通时依赖此逻辑)
+                # 只有当有节点，且当前名字看起来像默认IP时，才尝试修改
+                if parsed_nodes:
+                    first_remark = parsed_nodes[0].get('remark', '').strip()
+                    current_name = target_server.get('name', '').strip()
+                    
+                    # 简单的判断：如果名字里没有这个备注
+                    if first_remark and (first_remark not in current_name):
+                        
+                        # ✨✨✨ [修复]：先检查备注里是否自带了国旗 ✨✨✨
+                        has_own_flag = False
+                        # 遍历全局配置中的所有已知国旗
+                        for v in AUTO_COUNTRY_MAP.values():
+                            known_flag = v.split(' ')[0] # 提取 "🇺🇸"
+                            if known_flag in first_remark:
+                                has_own_flag = True
+                                break
+                        
+                        if has_own_flag:
+                            # 情况 A：备注自带国旗 (如 "Oracle|🇺🇸凤凰城") -> 直接用，不加前缀
+                            new_name_candidate = first_remark
+                        else:
+                            # 情况 B：备注没国旗 -> 尝试继承旧国旗或查询 GeoIP 加上
+                            flag = "🏳️"
+                            # 1. 尝试沿用当前名字里的国旗
+                            if ' ' in current_name:
+                                parts = current_name.split(' ', 1)
+                                if len(parts[0]) < 10: 
+                                    flag = parts[0]
+                            else:
+                                # 2. 尝试重新获取国旗 (GeoIP)
+                                try:
+                                    ip_key = target_server['url'].split('://')[-1].split(':')[0]
+                                    geo_info = IP_GEO_CACHE.get(ip_key)
+                                    if geo_info: 
+                                        flag = get_flag_for_country(geo_info[2]).split(' ')[0]
+                                except: pass
+
+                            new_name_candidate = f"{flag} {first_remark}"
+                        
+                        # 执行改名并保存
+                        if target_server['name'] != new_name_candidate:
+                            target_server['name'] = new_name_candidate
+                            asyncio.create_task(save_servers())
+                            logger.info(f"🏷️ [探针同步] 根据节点备注自动改名: {new_name_candidate}")
+
+            # 记录历史
             record_ping_history(target_server['url'], data.get('pings', {}))
             
         return Response("OK", 200)
@@ -3849,30 +4187,25 @@ async def copy_group_link(group_name, target=None):
         safe_notify(f"已复制 [{group_name}] {msg_prefix} 订阅", "positive")
     except Exception as e: safe_notify(f"生成失败: {e}", "negative")
     
-# ================= UI 组件 =================
+# ================= UI 组件：节点编辑器 (修复版：适配 SSH/HTTP 双模式) =================
 class InboundEditor:
     def __init__(self, mgr, data=None, on_success=None):
         self.mgr = mgr; self.cb = on_success; self.is_edit = data is not None
         if not data:
             random_port = random.randint(10000, 65000)
             self.d = {
-                "enable": True, 
-                "remark": "", 
-                "port": random_port,
-                "protocol": "vmess",
+                "enable": True, "remark": "", "port": random_port, "protocol": "vmess",
                 "settings": {"clients": [{"id": str(uuid.uuid4()), "alterId": 0}], "disableInsecureEncryption": False},
                 "streamSettings": {"network": "tcp", "security": "none"},
                 "sniffing": {"enabled": True, "destOverride": ["http", "tls"]}
             }
-        else: 
-            self.d = data.copy()
+        else: self.d = data.copy()
         
-        if isinstance(self.d.get('settings'), str): 
-            try: self.d['settings'] = json.loads(self.d['settings'])
-            except: self.d['settings'] = {}
-        if isinstance(self.d.get('streamSettings'), str): 
-            try: self.d['streamSettings'] = json.loads(self.d['streamSettings'])
-            except: self.d['streamSettings'] = {}
+        # 兼容处理 JSON 字符串
+        for k in ['settings', 'streamSettings']:
+            if isinstance(self.d.get(k), str):
+                try: self.d[k] = json.loads(self.d[k])
+                except: self.d[k] = {}
 
     def ui(self, dlg):
         with ui.card().classes('w-full max-w-4xl p-6 flex flex-col gap-4'):
@@ -3880,19 +4213,25 @@ class InboundEditor:
             with ui.row().classes('justify-between items-center'):
                 ui.label(title).classes('text-xl font-bold')
                 ui.button(icon='close', on_click=dlg.close).props('flat round dense color=grey')
+            
             with ui.row().classes('w-full gap-4'):
                 self.rem = ui.input('备注', value=self.d.get('remark')).classes('flex-grow')
                 self.ena = ui.switch('启用', value=self.d.get('enable', True)).classes('mt-2')
+            
             with ui.row().classes('w-full gap-4'):
                 self.pro = ui.select(['vmess', 'vless', 'trojan', 'shadowsocks', 'socks'], value=self.d['protocol'], label='协议', on_change=self.on_protocol_change).classes('w-1/3')
                 self.prt = ui.number('端口', value=self.d['port'], format='%.0f').classes('w-1/3')
                 ui.button(icon='shuffle', on_click=lambda: self.prt.set_value(int(run.io_bound(lambda: __import__('random').randint(10000, 60000))))).props('flat dense').tooltip('随机端口')
+            
             ui.separator().classes('my-2'); self.auth_box = ui.column().classes('w-full gap-2'); self.refresh_auth_ui(); ui.separator().classes('my-2')
+            
             with ui.row().classes('w-full gap-4'):
                 st = self.d.get('streamSettings', {})
                 self.net = ui.select(['tcp', 'ws', 'grpc'], value=st.get('network', 'tcp'), label='传输协议').classes('w-1/3')
                 self.sec = ui.select(['none', 'tls'], value=st.get('security', 'none'), label='安全加密').classes('w-1/3')
-            with ui.row().classes('w-full justify-end mt-6'): ui.button('保存', on_click=lambda: self.save(dlg)).props('color=primary')
+            
+            with ui.row().classes('w-full justify-end mt-6'): 
+                ui.button('保存', on_click=lambda: self.save(dlg)).props('color=primary')
 
     def on_protocol_change(self, e):
         p = e.value; s = self.d.get('settings', {})
@@ -3929,6 +4268,7 @@ class InboundEditor:
                     ui.input('密码', value=pwd).classes('flex-1').on_value_change(lambda e: s['accounts'][0].update({'pass': e.value}))
 
     async def save(self, dlg):
+        # 1. 收集表单数据
         self.d['remark'] = self.rem.value
         self.d['enable'] = self.ena.value
         try:
@@ -3939,156 +4279,74 @@ class InboundEditor:
         self.d['protocol'] = self.pro.value
         
         if 'streamSettings' not in self.d: self.d['streamSettings'] = {}
-        if 'sniffing' not in self.d: 
-            self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
-            
         self.d['streamSettings']['network'] = self.net.value
         self.d['streamSettings']['security'] = self.sec.value
         
-        def _do_save_sync():
-            try:
-                session = requests.Session()
-                session.verify = False 
-                session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
-                raw_base = str(self.mgr.original_url).strip()
-                base_list = []
-                if '://' not in raw_base:
-                    base_list.append(f"http://{raw_base}")
-                    base_list.append(f"https://{raw_base}")
+        if 'sniffing' not in self.d: 
+            self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
+
+        # 2. ✨✨✨ 核心修复：自动判断是 SSH 还是 HTTP ✨✨✨
+        try:
+            success, msg = False, ""
+            
+            # 判断是否是 SSH 管理器 (通过检查是否有 _exec_remote_script 方法)
+            is_ssh_manager = hasattr(self.mgr, '_exec_remote_script')
+            
+            if is_ssh_manager:
+                # SSH 模式 (异步调用)
+                if self.is_edit:
+                    success, msg = await self.mgr.update_inbound(self.d['id'], self.d)
                 else:
-                    base_list.append(raw_base.rstrip('/'))
-                    if raw_base.startswith('http://'):
-                        base_list.append(raw_base.replace('http://', 'https://'))
+                    success, msg = await self.mgr.add_inbound(self.d)
+            else:
+                # HTTP 模式 (同步调用，需要 run.io_bound)
+                if self.is_edit:
+                    success, msg = await run.io_bound(self.mgr.update_inbound, self.d['id'], self.d)
+                else:
+                    success, msg = await run.io_bound(self.mgr.add_inbound, self.d)
 
-                login_paths = ['/login', '/xui/login', '/panel/login', '/3x-ui/login']
-                if self.mgr.api_prefix:
-                    clean_prefix = self.mgr.api_prefix.strip().rstrip('/')
-                    if clean_prefix: login_paths.insert(0, f"{clean_prefix}/login")
-
-                success_login_url = None
+            if success:
+                safe_notify(f"✅ {msg}", "positive")
+                dlg.close()
+                if self.cb:
+                    res = self.cb()
+                    if asyncio.iscoroutine(res): await res
+            else:
+                safe_notify(f"❌ 失败: {msg}", "negative", timeout=5000)
                 
-                for b_url in base_list:
-                    if success_login_url: break
-                    for path in login_paths:
-                        target_login_url = f"{b_url}{path}"
-                        try:
-                            r = session.post(target_login_url, data={'username': self.mgr.username, 'password': self.mgr.password}, timeout=5)
-                            if r.status_code == 200 and r.json().get('success'):
-                                success_login_url = target_login_url
-                                break
-                        except Exception as e: pass
-
-                if not success_login_url: return False, "VIP通道：无法连接到服务器"
-
-                submit_data = self.d.copy()
-                if isinstance(submit_data.get('settings'), dict):
-                    submit_data['settings'] = json.dumps(submit_data['settings'], ensure_ascii=False)
-                if isinstance(submit_data.get('streamSettings'), dict):
-                    submit_data['streamSettings'] = json.dumps(submit_data['streamSettings'], ensure_ascii=False)
-                if isinstance(submit_data.get('sniffing'), dict):
-                    submit_data['sniffing'] = json.dumps(submit_data['sniffing'], ensure_ascii=False)
-
-                action = 'update/' + str(self.d['id']) if self.is_edit else 'add'
-                base_root_url = success_login_url.rsplit('/login', 1)[0]
-                
-                save_candidates = [f"{base_root_url}/inbound/{action}", f"{base_root_url}/xui/inbound/{action}"]
-                
-                final_response = None
-                for save_url in dict.fromkeys(save_candidates): 
-                    try:
-                        r = session.post(save_url, json=submit_data, timeout=8)
-                        if r.status_code != 404:
-                            final_response = r
-                            break
-                    except Exception as e: continue
-                
-                if final_response:
-                    try:
-                        resp = final_response.json()
-                        return (True, resp.get('msg')) if resp.get('success') else (False, resp.get('msg'))
-                    except: return False, f"响应解析失败 (状态码 {final_response.status_code})"
-                else: return False, "保存失败：未找到正确的 API 路径 (404)"
-
-            except Exception as e: return False, f"系统异常: {str(e)}"
-
-        success, msg = await run.io_bound(_do_save_sync)
-        if success: 
-            safe_notify("✅ 保存成功", "positive")
-            dlg.close()
-            if self.cb:
-                res = self.cb()
-                if asyncio.iscoroutine(res): await res
-        else: safe_notify(f"❌ 失败: {msg}", "negative", timeout=6000)
+        except Exception as e:
+            safe_notify(f"❌ 系统异常: {str(e)}", "negative")
 
 async def open_inbound_dialog(mgr, data, cb):
     with ui.dialog() as d: InboundEditor(mgr, data, cb).ui(d); d.open()
-
+    
+# ================= 节点删除逻辑 (修复版：适配 SSH/HTTP 双模式) =================
 async def delete_inbound(mgr, id, cb):
-    def _do_delete_sync():
-        try:
-            session = requests.Session()
-            session.verify = False
-            session.headers.update({'User-Agent': 'Mozilla/5.0', 'Connection': 'close'})
-            raw_base = str(mgr.original_url).strip()
-            base_list = []
-            if '://' not in raw_base:
-                base_list.append(f"http://{raw_base}")
-                base_list.append(f"https://{raw_base}")
-            else:
-                base_list.append(raw_base.rstrip('/'))
-                if raw_base.startswith('http://'):
-                    base_list.append(raw_base.replace('http://', 'https://'))
+    try:
+        success, msg = False, ""
+        
+        # 1. 判断是否是 SSH 管理器 (通过检查是否有 _exec_remote_script 方法)
+        is_ssh_manager = hasattr(mgr, '_exec_remote_script')
+        
+        if is_ssh_manager:
+            # SSH 模式 (我们在 SSHXUIManager 里定义的是 async 方法，直接 await)
+            success, msg = await mgr.delete_inbound(id)
+        else:
+            # HTTP 模式 (XUIManager 里是同步方法，必须放入 io_bound 线程池防止卡顿)
+            success, msg = await run.io_bound(mgr.delete_inbound, id)
+
+        # 2. 处理结果
+        if success:
+            safe_notify(f"✅ {msg}", "positive")
+            # 执行回调刷新 UI (例如刷新列表)
+            if cb:
+                res = cb()
+                if asyncio.iscoroutine(res): await res
+        else:
+            safe_notify(f"❌ 删除失败: {msg}", "negative")
             
-            login_paths = ['/login', '/xui/login', '/panel/login']
-            if mgr.api_prefix:
-                clean_prefix = mgr.api_prefix.strip().rstrip('/')
-                if clean_prefix: login_paths.insert(0, f"{clean_prefix}/login")
-            
-            success_login_url = None
-            for b_url in base_list:
-                if success_login_url: break
-                for path in login_paths:
-                    try:
-                        target = f"{b_url}{path}"
-                        r = session.post(target, data={'username': mgr.username, 'password': mgr.password}, timeout=5)
-                        if r.status_code == 200 and r.json().get('success'):
-                            success_login_url = target
-                            break
-                    except: pass
-            
-            if not success_login_url: return False, "无法连接或登录失败"
-
-            action = f"del/{id}"
-            base_root = success_login_url.rsplit('/login', 1)[0]
-            
-            candidates = [f"{base_root}/inbound/{action}", f"{base_root}/xui/inbound/{action}", f"{base_root}/panel/inbound/{action}"]
-
-            final_response = None
-            for del_url in dict.fromkeys(candidates):
-                try:
-                    r = session.post(del_url, json={}, timeout=5)
-                    if r.status_code != 404:
-                        final_response = r
-                        break
-                except: continue
-
-            if final_response:
-                try:
-                    resp = final_response.json()
-                    if resp.get('success'): return True, resp.get('msg')
-                    else: return False, resp.get('msg')
-                except: return False, f"响应解析失败: {final_response.text[:30]}"
-            else: return False, "删除失败：API 路径未找到 (404)"
-
-        except Exception as e: return False, f"异常: {str(e)}"
-
-    success, msg = await run.io_bound(_do_delete_sync)
-    if success:
-        safe_notify(f"✅ 删除成功", "positive")
-        if cb:
-            res = cb()
-            if asyncio.iscoroutine(res): await res
-    else: safe_notify(f"❌ 删除失败: {msg}", "negative")
+    except Exception as e:
+        safe_notify(f"❌ 系统异常: {str(e)}", "negative")
 
 
 # ================= 带二次确认的删除逻辑 =================
@@ -6428,7 +6686,7 @@ LAST_SYNC_MAP = {} # 🕒 格式: {'TAG::香港::P1': timestamp, 'TAG::香港::P
 PAGE_SIZE = 30
 SYNC_COOLDOWN = 1800 # 30分钟
 
-# ================= 刷新逻辑 (最终版：页级冷却 + 自动更新) =================
+# ================= 刷新逻辑 (智能提示版：区分探针实时与API缓存) =================
 async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name_action=False, page_num=1, manual_client=None):
     # 1. 上下文获取
     client = manual_client
@@ -6448,24 +6706,59 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
         now = time.time()
         last_sync = LAST_SYNC_MAP.get(cache_key, 0)
         
+        # --- 预计算当前页的服务器成分 (用于生成准确的提示语) ---
+        targets = get_targets_by_scope(scope, data)
+        # 模拟分页切片
+        start_idx = (page_num - 1) * PAGE_SIZE
+        end_idx = start_idx + PAGE_SIZE
+        current_page_servers = targets[start_idx:end_idx] if targets else []
+        
+        has_probe = False
+        has_api_only = False
+        
+        for s in current_page_servers:
+            if s.get('probe_installed', False):
+                has_probe = True
+            else:
+                has_api_only = True
+        
         # 2. 🛑 冷却逻辑判断
         # 如果不是按钮强制点击，且在 30分钟内 -> 命中缓存
         if not force_refresh and (now - last_sync < SYNC_COOLDOWN):
             
-            # 即使命中缓存，也要更新一下状态，保证下次翻页逻辑正确
+            # 更新状态
             CURRENT_VIEW_STATE['scope'] = scope
             CURRENT_VIEW_STATE['data'] = data
             CURRENT_VIEW_STATE['page'] = page_num
-            CURRENT_VIEW_STATE['render_token'] = now # 强制重绘
+            CURRENT_VIEW_STATE['render_token'] = now 
             
-            # 渲染 UI (直接显示内存里的旧数据)
+            # 渲染 UI 
             await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
             
-            # 计算剩余分钟数
+            # ✨✨✨ [核心修改] 智能生成提示语 ✨✨✨
             mins_ago = int((now - last_sync) / 60)
-            logger.info(f"❄️ [缓存命中] {cache_key} 上次同步于 {mins_ago} 分钟前，跳过后台。")
-            # 弹个轻提示让您知道
-            safe_notify(f"显示缓存数据 ({mins_ago}分钟前)", "ongoing", timeout=800)
+            
+            notify_msg = ""
+            notify_type = "ongoing"
+            
+            if not current_page_servers:
+                notify_msg = "列表为空"
+            elif has_probe and not has_api_only:
+                # 全是探针：缓存无关紧要，因为数据是实时的
+                notify_msg = "⚡ 实时数据 (探针秒级推送)"
+                notify_type = "positive" # 用绿色提示，表示状态很好
+            elif not has_probe and has_api_only:
+                # 全是 API：确实是旧缓存
+                notify_msg = f"🕒 显示缓存数据 ({mins_ago}分钟前)"
+            else:
+                # 混合模式
+                notify_msg = f"⚡ 探针实时 + 🕒 API缓存 ({mins_ago}分前)"
+            
+            # 只有当确实存在 API 机器且使用了缓存时，才打印日志，探针模式不打扰日志
+            if has_api_only:
+                logger.info(f"❄️ [缓存命中] {cache_key} ({mins_ago}m ago)")
+            
+            safe_notify(notify_msg, notify_type, timeout=1500)
             return
 
         # 3. 锁机制
@@ -6482,42 +6775,42 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
         # 5. 先渲染 UI (显示旧数据占位)
         await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
 
-        # 6. 准备后台同步
-        targets = get_targets_by_scope(scope, data)
-        start_index = (page_num - 1) * PAGE_SIZE
-        end_index = start_index + PAGE_SIZE
-        panel_only_servers = targets[start_index:end_index]
-        
-        if not panel_only_servers: return
+        # 6. 准备后台同步 (仅针对 API 机器)
+        # 注意：fetch_inbounds_safe 内部已经有针对 probe_installed 的过滤逻辑，这里直接传进去即可
+        if not current_page_servers: return
 
         REFRESH_LOCKS.add(lock_key)
 
         async def _background_fetch():
             try:
                 with client:
-                    log_msg = f"正在同步第 {page_num} 页 ({len(panel_only_servers)} 台)..."
-                    logger.info(f"🔄 [分页同步] {log_msg}")
+                    # 统计一下真正需要联网同步的机器数量 (API机器)
+                    real_sync_count = len([s for s in current_page_servers if not s.get('probe_installed', False)])
                     
-                    # 只有强制刷新才弹长提示，自动刷新弹短提示
-                    notify_duration = 1000 if force_refresh else 500
-                    safe_notify(log_msg, "ongoing", timeout=notify_duration)
+                    if real_sync_count > 0:
+                        log_msg = f"正在同步 {real_sync_count} 个 API 节点..."
+                        logger.info(f"🔄 [分页同步] {log_msg}")
+                        safe_notify(log_msg, "ongoing", timeout=1000)
+                    else:
+                        # 全是探针，不用弹窗干扰用户
+                        pass
                     
-                    # 执行同步
-                    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in panel_only_servers]
+                    # 执行同步 (fetch_inbounds_safe 会自动跳过探针机器)
+                    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in current_page_servers]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     
                     try: render_sidebar_content.refresh()
                     except: pass 
                     
-                    # 同步完成，重绘界面显示新流量
+                    # 同步完成，重绘界面
                     await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
                     
-                    # ✅✅✅ 关键：更新该页的时间戳，开启 30分钟 冷却
+                    # 更新时间戳
                     LAST_SYNC_MAP[cache_key] = time.time()
                     
-                    logger.info(f"✅ [分页同步] 第 {page_num} 页同步完成 (下次更新: 30分钟后)")
-                    if force_refresh:
-                        safe_notify(f"第 {page_num} 页同步完成", "positive")
+                    if real_sync_count > 0:
+                        logger.info(f"✅ [分页同步] 完成 (下次更新: 30分钟后)")
+                        if force_refresh: safe_notify(f"同步完成", "positive")
                     
             finally:
                 REFRESH_LOCKS.discard(lock_key)
@@ -6601,7 +6894,7 @@ def render_status_card(label, value_str, sub_text, color_class='text-blue-600', 
 REFRESH_CURRENT_NODES = lambda: None
 
 
-# =================  单服务器视图 (已修复：补回明文复制按钮)  =================
+# =================  单服务器视图 (最终全功能版)  =================
 async def render_single_server_view(server_conf, force_refresh=False):
     global REFRESH_CURRENT_NODES
     
@@ -6611,24 +6904,131 @@ async def render_single_server_view(server_conf, force_refresh=False):
         content_container.classes(remove='overflow-y-auto block', add='h-full overflow-hidden flex flex-col p-4')
     
     with content_container:
-        has_xui_config = (server_conf.get('url') and server_conf.get('user') and server_conf.get('pass'))
+        # 判断是否拥有管理权限 (有账号密码 OR 有探针Root权限)
+        has_manager_access = (server_conf.get('url') and server_conf.get('user') and server_conf.get('pass')) or \
+                             (server_conf.get('probe_installed') and server_conf.get('ssh_host'))
+
+        # 获取管理器
         mgr = None
-        if has_xui_config:
+        if has_manager_access:
             try: mgr = get_manager(server_conf)
             except: pass
 
         @ui.refreshable
-        async def render_node_list(): pass
+        async def render_node_list():
+            # 获取数据：优先走 fetch_inbounds_safe
+            xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False)
+            if xui_nodes is None: xui_nodes = []
+            
+            custom_nodes = server_conf.get('custom_nodes', [])
+            all_nodes = xui_nodes + custom_nodes
+            
+            if not all_nodes:
+                with ui.column().classes('w-full py-12 items-center justify-center opacity-50'):
+                    msg = "暂无节点 (可直接新建)" if has_manager_access else "暂无数据"
+                    ui.icon('inbox', size='4rem').classes('text-gray-300 mb-2')
+                    ui.label(msg).classes('text-gray-400 text-sm')
+            else:
+                for n in all_nodes:
+                    is_custom = n.get('_is_custom', False)
+                    
+                    # ✨✨✨ [修改点 2]：节点标签逻辑修正 ✨✨✨
+                    # 只要开启了探针且有 SSH 主机，就算 Root 模式 (因为后端优先用它)
+                    is_ssh_mode = (not is_custom) and (server_conf.get('probe_installed') and server_conf.get('ssh_host'))
+                    
+                    row_3d_cls = 'grid w-full gap-4 py-3 px-2 mb-2 items-center group bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] active:border-b active:translate-y-[2px] active:shadow-none cursor-default'
+                    
+                    with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
+                        # 1. 备注
+                        ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left pl-2 text-slate-700 text-sm')
+                        
+                        # 2. 来源标签
+                        if is_custom:
+                            ui.label("独立").classes('text-[10px] bg-purple-100 text-purple-700 font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
+                        elif is_ssh_mode:
+                            ui.label("Root").classes('text-[10px] bg-teal-100 text-teal-700 font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
+                        else:
+                            ui.label("API").classes('text-[10px] bg-gray-100 text-gray-600 font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
+                        
+                        # 3. 流量
+                        traffic = format_bytes(n.get('up', 0) + n.get('down', 0)) if not is_custom else "--"
+                        ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono font-bold')
+                        
+                        # 4. 协议
+                        proto = str(n.get('protocol', 'unk')).upper()
+                        ui.label(proto).classes(f'text-[11px] font-extrabold w-full text-center text-slate-500 tracking-wide')
 
+                        # 5. 端口
+                        ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
+                        
+                        # 6. 状态
+                        is_enable = n.get('enable', True)
+                        with ui.row().classes('w-full justify-center items-center gap-1'):
+                            color = "green" if is_enable else "red"; text = "启用" if is_enable else "停止"
+                            ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]')
+                            ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
+                        
+                        # 7. 操作按钮区
+                        with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
+                            btn_props = 'flat dense size=sm round'
+                            
+                            # 复制链接
+                            link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
+                            if link: ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
+                            
+                            # 复制明文配置
+                            async def copy_detail_action(node_item=n):
+                                host = server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
+                                text = generate_detail_config(node_item, host)
+                                if text: await safe_copy_to_clipboard(text)
+                                else: ui.notify('该协议不支持生成明文配置', type='warning')
+                            ui.button(icon='description', on_click=copy_detail_action).props(btn_props).tooltip('复制明文配置').classes('text-gray-600 hover:bg-orange-50 hover:text-orange-600')
+
+                            # 编辑/删除
+                            if is_custom:
+                                ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
+                                ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).classes('text-red-500 hover:bg-red-50')
+                            elif has_manager_access:
+                                async def on_edit_success(): 
+                                    ui.notify('修改成功 (Root模式已重启面板)'); await reload_and_refresh_ui()
+                                ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
+                                
+                                async def on_del_success(): 
+                                    ui.notify('删除成功 (Root模式已重启面板)'); await reload_and_refresh_ui()
+                                ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props(btn_props).classes('text-red-500 hover:bg-red-50')
+                            else:
+                                ui.icon('lock', size='xs').classes('text-gray-300').tooltip('无权限')
+
+        # ================== 刷新 UI 的核心函数 (修复版) ==================
         async def reload_and_refresh_ui():
-            if has_xui_config:
+            # 1. 如果是 SSH/Root 模式，强制主动拉取最新数据 (无视探针被动推送等待)
+            if mgr and hasattr(mgr, '_exec_remote_script'):
+                try:
+                    # 直接调用 SSH 管理器的获取方法，不走 fetch_inbounds_safe 的缓存逻辑
+                    # 这里的 run.io_bound 是为了防止 SSH 网络 IO 阻塞主线程
+                    new_inbounds = await run.io_bound(lambda: asyncio.run(mgr.get_inbounds())) if not asyncio.iscoroutinefunction(mgr.get_inbounds) else await mgr.get_inbounds()
+                    
+                    if new_inbounds is not None:
+                        # 立即更新全局缓存
+                        NODES_DATA[server_conf['url']] = new_inbounds
+                        # 顺便更新一下在线状态
+                        server_conf['_status'] = 'online'
+                        # 触发一次保存，防止重启丢失
+                        await save_nodes_cache()
+                except Exception as e:
+                    logger.error(f"SSH 强制刷新失败: {e}")
+            
+            # 2. 如果是普通 API 模式，走原有逻辑
+            else:
                 try: await fetch_inbounds_safe(server_conf, force_refresh=True)
                 except: pass
+            
+            # 3. 刷新界面列表
             render_node_list.refresh()
 
         REFRESH_CURRENT_NODES = reload_and_refresh_ui
 
-        # --- 辅助功能 ---
+        # ================== 辅助函数 (完整逻辑) ==================
         def open_edit_custom_node(node_data):
             with ui.dialog() as d, ui.card().classes('w-96 p-4'):
                 ui.label('编辑节点备注').classes('text-lg font-bold mb-4')
@@ -6644,25 +7044,19 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui.button('保存', on_click=save).classes('bg-blue-600 text-white')
             d.open()
 
-
         async def uninstall_and_delete(node_data):
             with ui.dialog() as d, ui.card().classes('w-96 p-6'):
                 with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
                     ui.icon('delete_forever', size='md'); ui.label('卸载并清理环境').classes('font-bold text-lg')
-                
                 ui.label(f"节点: {node_data.get('remark')}").classes('text-sm font-bold text-gray-800')
                 ui.label("即将执行以下操作：").classes('text-xs text-gray-500 mt-2')
                 
-                # 分析将要删除的域名
                 domain_to_del = None
                 raw_link = node_data.get('_raw_link', '')
                 if raw_link and '://' in raw_link:
                     try:
                         from urllib.parse import urlparse, parse_qs
-                        # 解析 VLESS 链接中的参数
-                        query = urlparse(raw_link).query
-                        params = parse_qs(query)
-                        # 优先找 sni，其次找 host
+                        query = urlparse(raw_link).query; params = parse_qs(query)
                         if 'sni' in params: domain_to_del = params['sni'][0]
                         elif 'host' in params: domain_to_del = params['host'][0]
                     except: pass
@@ -6672,37 +7066,23 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     ui.label('2. 删除 Xray 配置文件').classes('text-xs text-gray-600')
                     if domain_to_del and ADMIN_CONFIG.get('cf_root_domain') in domain_to_del:
                         ui.label(f'3. 🗑️ 自动删除 CF 解析: {domain_to_del}').classes('text-xs text-red-500 font-bold')
-                    else:
-                        ui.label('3. 跳过 DNS 清理 (非托管域名)').classes('text-xs text-gray-400')
+                    else: ui.label('3. 跳过 DNS 清理 (非托管域名)').classes('text-xs text-gray-400')
 
                 async def start_uninstall():
-                    d.close()
-                    notification = ui.notification(message='正在执行卸载与清理...', timeout=0, spinner=True)
-                    
-                    # 1. 尝试删除 Cloudflare 解析
+                    d.close(); notification = ui.notification(message='正在执行卸载与清理...', timeout=0, spinner=True)
                     if domain_to_del:
                         cf = CloudflareHandler()
-                        # 只有当域名包含我们配置的根域名时才删，防止删错 Visa
                         if cf.token and cf.root_domain and (cf.root_domain in domain_to_del):
                             ok, msg = await cf.delete_record_by_domain(domain_to_del)
                             if ok: safe_notify(f"☁️ {msg}", "positive")
                             else: safe_notify(f"⚠️ DNS 删除失败: {msg}", "warning")
-
-                    # 2. 执行 SSH 卸载脚本
                     success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, XHTTP_UNINSTALL_SCRIPT))
-                    
                     notification.dismiss()
-                    
-                    if success: 
-                        safe_notify('✅ 服务已卸载，进程已清理', 'positive')
-                    else: 
-                        safe_notify(f'⚠️ SSH 卸载可能有残留: {output}', 'warning')
-                    
-                    # 3. 删除本地数据
+                    if success: safe_notify('✅ 服务已卸载，进程已清理', 'positive')
+                    else: safe_notify(f'⚠️ SSH 卸载可能有残留: {output}', 'warning')
                     if 'custom_nodes' in server_conf and node_data in server_conf['custom_nodes']:
                         server_conf['custom_nodes'].remove(node_data)
                         await save_servers()
-                    
                     await reload_and_refresh_ui()
 
                 with ui.row().classes('w-full justify-end mt-6 gap-2'):
@@ -6711,7 +7091,6 @@ async def render_single_server_view(server_conf, force_refresh=False):
             d.open()
 
         # ================= 布局构建 =================
-
         # --- 顶部 ---
         btn_3d_base = 'text-xs font-bold text-white rounded-lg px-4 py-2 border-b-4 active:border-b-0 active:translate-y-[4px] transition-all duration-150 shadow-sm'
         btn_blue = f'bg-blue-600 border-blue-800 hover:bg-blue-500 {btn_3d_base}'
@@ -6729,12 +7108,17 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         ui.label(ip_addr).classes('text-xs font-mono font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded')
                         if server_conf.get('_status') == 'online': ui.badge('Online', color='green').props('rounded outline size=xs')
                         else: ui.badge('Offline', color='grey').props('rounded outline size=xs')
+            
             with ui.row().classes('gap-3'):
                 ui.button('一键部署 XHTTP', icon='rocket_launch', on_click=lambda: open_deploy_xhttp_dialog(server_conf, reload_and_refresh_ui)).props('unelevated').classes(btn_blue)
                 ui.button('一键部署 Hy2', icon='bolt', on_click=lambda: open_deploy_hysteria_dialog(server_conf, reload_and_refresh_ui)).props('unelevated').classes(btn_blue)
-                if has_xui_config:
-                    async def on_add_success(): ui.notify('添加节点成功'); await reload_and_refresh_ui()
+                
+                if has_manager_access:
+                    async def on_add_success(): 
+                        ui.notify('添加节点成功 (Root模式已重启面板)'); await reload_and_refresh_ui()
                     ui.button('新建 XUI 节点', icon='add', on_click=lambda: open_inbound_dialog(mgr, None, on_add_success)).props('unelevated').classes(btn_green)
+                else:
+                    ui.button('探针只读', icon='visibility', on_click=None).props('unelevated disabled').classes('bg-gray-400 border-gray-600 text-white rounded-lg px-4 py-2 border-b-4 text-xs font-bold opacity-70')
 
         ui.element('div').classes('h-4 flex-shrink-0')
 
@@ -6742,72 +7126,26 @@ async def render_single_server_view(server_conf, force_refresh=False):
         with ui.card().classes('w-full flex-grow flex flex-col p-0 rounded-xl border border-gray-200 border-b-[4px] border-b-gray-300 shadow-sm overflow-hidden'):
             with ui.row().classes('w-full items-center justify-between p-3 bg-gray-50 border-b border-gray-200'):
                  ui.label('节点列表').classes('text-sm font-black text-gray-600 uppercase tracking-wide ml-1')
-                 if has_xui_config: ui.badge('X-UI 面板已连接', color='green').props('outline rounded size=xs')
+                 
+                 # ✨✨✨ [修改点 1]：顶部 Badge 逻辑修正 ✨✨✨
+                 # 优先判断是否具备 Root 能力 (探针+SSH)
+                 if server_conf.get('probe_installed') and server_conf.get('ssh_host'):
+                     ui.badge('Root 模式', color='teal').props('outline rounded size=xs')
+                 # 其次才判断是否有 API 账号
+                 elif server_conf.get('user'):
+                     ui.badge('API 托管模式', color='blue').props('outline rounded size=xs')
 
             with ui.element('div').classes('grid w-full gap-4 font-bold text-gray-400 border-b border-gray-200 pb-2 pt-2 px-2 text-xs uppercase tracking-wider bg-white').style(SINGLE_COLS_NO_PING):
                 ui.label('节点名称').classes('text-left pl-2')
                 for h in ['类型', '流量', '协议', '端口', '状态', '操作']: ui.label(h).classes('text-center')
 
             with ui.scroll_area().classes('w-full flex-grow bg-gray-50 p-1'): 
-                @ui.refreshable
-                async def render_node_list():
-                    xui_nodes = await fetch_inbounds_safe(server_conf, force_refresh=False) if has_xui_config else []
-                    custom_nodes = server_conf.get('custom_nodes', [])
-                    all_nodes = xui_nodes + custom_nodes
-                    if not all_nodes:
-                        with ui.column().classes('w-full py-12 items-center justify-center opacity-50'):
-                            ui.icon('inbox', size='4rem').classes('text-gray-300 mb-2'); ui.label('暂无节点数据').classes('text-gray-400 text-sm')
-                    else:
-                        for n in all_nodes:
-                            is_custom = n.get('_is_custom', False)
-                            row_3d_cls = 'grid w-full gap-4 py-3 px-2 mb-2 items-center group bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] active:border-b active:translate-y-[2px] active:shadow-none cursor-default'
-                            with ui.element('div').classes(row_3d_cls).style(SINGLE_COLS_NO_PING):
-                                ui.label(n.get('remark', '未命名')).classes('font-bold truncate w-full text-left text-slate-700 text-sm')
-                                source_tag = "独立" if is_custom else "面板"; source_cls = "bg-purple-100 text-purple-700" if is_custom else "bg-gray-100 text-gray-600"
-                                ui.label(source_tag).classes(f'text-[10px] {source_cls} font-bold px-2 py-0.5 rounded-full w-fit mx-auto shadow-sm')
-                                traffic = format_bytes(n.get('up', 0) + n.get('down', 0)) if not is_custom else "--"
-                                ui.label(traffic).classes('text-xs text-gray-500 w-full text-center font-mono font-bold')
-                                proto = n.get('protocol', 'unk').upper()
-                                ui.label(proto).classes('text-[10px] font-black bg-slate-100 text-slate-500 px-1 rounded w-fit mx-auto')
-                                ui.label(str(n.get('port', 0))).classes('text-blue-600 font-mono w-full text-center font-bold text-xs')
-                                is_enable = n.get('enable', True)
-                                with ui.row().classes('w-full justify-center items-center gap-1'):
-                                    color = "green" if (is_custom or is_enable) else "red"; text = "已安装" if is_custom else ("运行中" if is_enable else "已停止")
-                                    ui.element('div').classes(f'w-2 h-2 rounded-full bg-{color}-500 shadow-[0_0_5px_rgba(0,0,0,0.2)]'); ui.label(text).classes(f'text-[10px] font-bold text-{color}-600')
-                                
-                                # --- 按钮操作区 ---
-                                with ui.row().classes('gap-2 justify-center w-full no-wrap opacity-60 group-hover:opacity-100 transition'):
-                                    link = n.get('_raw_link', '') if is_custom else generate_node_link(n, server_conf['url'])
-                                    btn_props = 'flat dense size=sm round'
-                                    
-                                    # 1. 复制链接
-                                    if link: ui.button(icon='content_copy', on_click=lambda u=link: safe_copy_to_clipboard(u)).props(btn_props).tooltip('复制链接').classes('text-gray-600 hover:bg-blue-50 hover:text-blue-600')
-                                    
-                                    # 2. ✨✨✨ 补回：复制明文配置 (Surge/Loon) ✨✨✨
-                                    async def copy_detail_action(node_item=n):
-                                        host = server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
-                                        # 调用全局辅助函数生成
-                                        text = generate_detail_config(node_item, host)
-                                        if text: await safe_copy_to_clipboard(text)
-                                        else: ui.notify('该协议不支持生成明文配置', type='warning')
-
-                                    ui.button(icon='description', on_click=copy_detail_action).props(btn_props).tooltip('复制明文配置').classes('text-gray-600 hover:bg-orange-50 hover:text-orange-600')
-
-                                    # 3. 编辑/删除按钮
-                                    if is_custom:
-                                        ui.button(icon='edit', on_click=lambda node=n: open_edit_custom_node(node)).props(btn_props).tooltip('编辑备注').classes('text-blue-600 hover:bg-blue-50')
-                                        ui.button(icon='delete', on_click=lambda node=n: uninstall_and_delete(node)).props(btn_props).tooltip('卸载并删除').classes('text-red-500 hover:bg-red-50')
-                                    else:
-                                        async def on_edit_success(): ui.notify('修改成功'); await reload_and_refresh_ui()
-                                        ui.button(icon='edit', on_click=lambda i=n: open_inbound_dialog(mgr, i, on_edit_success)).props(btn_props).classes('text-blue-600 hover:bg-blue-50')
-                                        async def on_del_success(): ui.notify('删除成功'); await reload_and_refresh_ui()
-                                        ui.button(icon='delete', on_click=lambda i=n: delete_inbound_with_confirm(mgr, i['id'], i.get('remark',''), on_del_success)).props(btn_props).classes('text-red-500 hover:bg-red-50')
                 await render_node_list()
-                if has_xui_config: asyncio.create_task(reload_and_refresh_ui())
+                asyncio.create_task(reload_and_refresh_ui())
 
         ui.element('div').classes('h-6 flex-shrink-0') 
 
-        # --- 第三段：SSH 窗口 ---
+        # --- 第三段：SSH 窗口 (完整保留) ---
         with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
             ssh_state = {'active': False, 'instance': None}
 
@@ -6843,21 +7181,10 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     for cmd_obj in commands:
                         cmd_name = cmd_obj.get('name', '未命名')
                         cmd_text = cmd_obj.get('cmd', '')
-                        
-                        # 容器背景：bg-slate-700 (深灰)
                         with ui.element('div').classes('flex items-center bg-slate-700 rounded overflow-hidden border-b-2 border-slate-900 transition-all active:border-b-0 active:translate-y-[2px] hover:bg-slate-600'):
-                            # 左侧按钮：unelevated (去阴影/颜色), bg-transparent (透出容器色), text-slate-300
-                            ui.button(cmd_name, on_click=lambda c=cmd_text: exec_quick_cmd(c)) \
-                                .props('unelevated') \
-                                .classes('bg-transparent text-[11px] font-bold text-slate-300 px-3 py-1.5 hover:text-white rounded-none')
-                            
-                            # 分割线
+                            ui.button(cmd_name, on_click=lambda c=cmd_text: exec_quick_cmd(c)).props('unelevated').classes('bg-transparent text-[11px] font-bold text-slate-300 px-3 py-1.5 hover:text-white rounded-none')
                             ui.element('div').classes('w-[1px] h-4 bg-slate-500 opacity-50')
-                            
-                            # 右侧按钮：齿轮
-                            ui.button(icon='settings', on_click=lambda c=cmd_obj: open_cmd_editor(c)) \
-                                .props('flat dense size=xs') \
-                                .classes('text-slate-400 hover:text-white px-1 py-1.5 rounded-none')
+                            ui.button(icon='settings', on_click=lambda c=cmd_obj: open_cmd_editor(c)).props('flat dense size=xs').classes('text-slate-400 hover:text-white px-1 py-1.5 rounded-none')
 
                     ui.button(icon='add', on_click=lambda: open_cmd_editor(None)).props('flat dense round size=sm color=green').tooltip('添加常用命令')
 
@@ -6885,10 +7212,8 @@ async def render_single_server_view(server_conf, force_refresh=False):
                         ui.label('管理快捷命令').classes('text-lg font-bold text-white')
                         ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
 
-                    name_input = ui.input('按钮名称', value=existing_cmd['name'] if existing_cmd else '') \
-                        .classes('w-full mb-3').props('outlined dense dark bg-color="slate-800"')
-                    cmd_input = ui.textarea('执行命令', value=existing_cmd['cmd'] if existing_cmd else '') \
-                        .classes('w-full mb-4').props('outlined dense dark bg-color="slate-800" rows=4')
+                    name_input = ui.input('按钮名称', value=existing_cmd['name'] if existing_cmd else '').classes('w-full mb-3').props('outlined dense dark bg-color="slate-800"')
+                    cmd_input = ui.textarea('执行命令', value=existing_cmd['cmd'] if existing_cmd else '').classes('w-full mb-4').props('outlined dense dark bg-color="slate-800" rows=4')
                     
                     async def save():
                         name = name_input.value.strip(); cmd = cmd_input.value.strip()
@@ -8893,102 +9218,94 @@ async def job_monitor_status():
 # ✨✨✨ 注册本地静态文件目录 ✨✨✨
 app.add_static_files('/static', 'static')
 
-# ================= 定义流量同步任务 (AI 动态自适应 + 断点续传版) =================
+# ================= 定义流量同步任务 (AI 动态自适应 + 探针跳过版) =================
 async def job_sync_all_traffic():
     logger.info("🕒 [智能同步] 检查同步任务进度...")
     
     # 目标周期：23.5 小时
     TARGET_DURATION = 84600 
     
-    # 1. 读取持久化状态
-    # last_sync_start: 本轮任务的开始时间戳
-    # last_sync_index: 下一台需要处理的索引 (0开始)
     start_ts = ADMIN_CONFIG.get('sync_job_start', 0)
     current_idx = ADMIN_CONFIG.get('sync_job_index', 0)
     now = time.time()
 
-    # 2. 判断是否需要开启新的一轮
-    # 如果记录的时间超过24小时，或者从未运行过，或者索引越界，则重置
+    # 重置逻辑
     if (now - start_ts > 86400) or start_ts == 0 or current_idx >= len(SERVERS_CACHE):
         logger.info("🔄 [智能同步] 启动新一轮 24h 周期任务")
         start_ts = now
         current_idx = 0
-        # 初始化保存
         ADMIN_CONFIG['sync_job_start'] = start_ts
         ADMIN_CONFIG['sync_job_index'] = 0
         await save_admin_config()
     else:
-        # 恢复旧任务
-        logger.info(f"♻️ [智能同步] 发现中断的任务，恢复进度: 第 {current_idx+1} 台 (已运行 {(now - start_ts)/3600:.1f} 小时)")
+        logger.info(f"♻️ [智能同步] 恢复进度: 第 {current_idx+1} 台")
 
-    # 3. 进入循环
-    # 注意：这里不再用 for 0..N，而是直接从 current_idx 开始
     i = current_idx
     
     while True:
-        # 实时获取列表长度
         current_total = len(SERVERS_CACHE)
-        
-        # 结束条件
-        if i >= current_total:
-            break
+        if i >= current_total: break
             
         try:
             server = SERVERS_CACHE[i]
-        except IndexError:
-            break
-
-        loop_step_start = time.time()
-        
-        try:
-            # 4. 执行同步
+            
+            # ✨✨✨ [核心优化]：如果是探针/双模，直接跳过轮询与休眠 ✨✨✨
+            if server.get('probe_installed', False):
+                # 仅在调试时或者是第一台时打印一下，防止日志刷屏
+                # logger.info(f"⏩ [跳过轮询] {server.get('name')} (探针实时推送)")
+                
+                # 依然保存进度，防止重启后回滚
+                i += 1
+                ADMIN_CONFIG['sync_job_index'] = i
+                
+                # 每处理 10 个探针保存一次磁盘，减少 IO
+                if i % 10 == 0: await save_admin_config()
+                
+                # 极速通过，仅做极短休眠防止 CPU 独占
+                await asyncio.sleep(0.05)
+                continue
+            
+            # === 下面是仅针对【纯 API 模式】的逻辑 ===
+            loop_step_start = time.time()
+            
+            # 执行主动拉取
             await fetch_inbounds_safe(server, force_refresh=True, sync_name=False)
             
-            # 计算进度
             progress = (i + 1) / current_total
-            logger.info(f"⏳ [{i+1}/{current_total}] {server.get('name')} 同步完成 ({progress:.1%})")
+            logger.info(f"⏳ [API轮询] {server.get('name')} 同步完成 ({progress:.1%})")
 
-            # 5. 【关键】保存进度到硬盘 (断点续传核心)
-            # 标记下一台的索引
+            # 保存进度
             ADMIN_CONFIG['sync_job_index'] = i + 1
             await save_admin_config()
 
-            # 6. 动态计算休眠
+            # 动态计算休眠 (仅针对需要轮询的机器)
             remaining_items = current_total - (i + 1)
-            
             if remaining_items > 0:
-                # 使用持久化的 start_ts 计算总流逝时间
                 elapsed_time = time.time() - start_ts
                 time_left = TARGET_DURATION - elapsed_time
                 
                 if time_left <= 0:
                     sleep_seconds = 1
-                    logger.warning(f"⚡ 进度落后，开启极速模式 (剩余 {remaining_items} 台)")
                 else:
+                    # 重新计算剩余列表中，可能还有多少个 API 机器？
+                    # 这里简单处理，假设剩下的都是 API 机器来计算间隔，保证 24小时 兜底
                     base_interval = time_left / remaining_items
                     sleep_seconds = base_interval * random.uniform(0.9, 1.1)
-                    
                     cost_time = time.time() - loop_step_start
                     sleep_seconds = max(1, sleep_seconds - cost_time)
 
-                sleep_display = f"{sleep_seconds/60:.1f}分" if sleep_seconds > 60 else f"{int(sleep_seconds)}秒"
-                logger.info(f"💤 动态休眠: {sleep_display} (剩余窗口 {int(time_left/3600)}小时)...")
-                
+                logger.info(f"💤 API 轮询休眠: {int(sleep_seconds)}秒...")
                 await asyncio.sleep(sleep_seconds)
                 
         except Exception as e:
             logger.warning(f"⚠️ 同步异常: {server.get('name')} - {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(10)
 
         i += 1
 
-    # 循环结束（跑完了所有机器）
-    # 此时不要重置 start_ts，让它保持到明天超时自动重置
-    # 但可以将 index 设为超限值或 0 均可，这里保持原样等待下一次调度重置
     await save_nodes_cache()
     await refresh_dashboard_ui()
-    
-    logger.info("✅ [智能同步] 本轮任务全部完成，系统待机中...")
+    logger.info("✅ [智能同步] 本轮任务全部完成")
 
 # 2.================= 定时任务：IP 地理位置检查 & 自动修正名称 =================
 async def job_check_geo_ip():
