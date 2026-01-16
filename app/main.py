@@ -1244,7 +1244,7 @@ def push():
             req = urllib.request.Request(MANAGER_URL, data=js, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r: pass
         except: pass
-        time.sleep(1) # 稍微加快推送频率，因为采集本身耗时1秒
+        time.sleep(4) #  降低推送频率，减轻CPU和流量负载 (总周期约5秒)
 
 if __name__ == "__main__":
     push()
