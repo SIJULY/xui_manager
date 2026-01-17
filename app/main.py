@@ -23,7 +23,7 @@ from nicegui import ui, run, app, Client
 from fastapi import Response, Request
 from fastapi.responses import RedirectResponse
 from collections import Counter
-GLOBAL_UI_VERSION = time.time()
+
 
 
 
@@ -45,6 +45,7 @@ SERVERS_CACHE = []
 SUBS_CACHE = []
 NODES_DATA = {}
 ADMIN_CONFIG = {}
+GLOBAL_UI_VERSION = time.time()
 
 # ================= 定义全局进程池变量  =================
 PROCESS_POOL = None 
