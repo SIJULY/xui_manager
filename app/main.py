@@ -28,23 +28,14 @@ GLOBAL_UI_VERSION = time.time()
 
 
 # ================= 配置区域 (Docker 强制版) =================
-import os
-import sys
-
-# 🛑 强制指定数据路径为 Docker 挂载点
-# 不要改动这里，直接指向容器内的挂载目录
 DATA_DIR = '/app/data'
-
-# 打印调试信息，确保它真的在读这里
 print(f"🔒 [System] 强制锁定数据目录: {DATA_DIR}")
-
 # 定义文件路径
 CONFIG_FILE = os.path.join(DATA_DIR, 'servers.json')
 SUBS_FILE = os.path.join(DATA_DIR, 'subscriptions.json')
 NODES_CACHE_FILE = os.path.join(DATA_DIR, 'nodes_cache.json')
 ADMIN_CONFIG_FILE = os.path.join(DATA_DIR, 'admin_config.json')
 GLOBAL_SSH_KEY_FILE = os.path.join(DATA_DIR, 'global_ssh_key')
-
 # 环境变量
 AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
 ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
