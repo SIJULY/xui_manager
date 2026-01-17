@@ -23,14 +23,40 @@ from nicegui import ui, run, app, Client
 from fastapi import Response, Request
 from fastapi.responses import RedirectResponse
 from collections import Counter
-
-IP_GEO_CACHE = {}
-
-import time
 GLOBAL_UI_VERSION = time.time()
+
+
+
+# ================= 配置区域 (Docker 强制版) =================
+import os
+import sys
+
+# 🛑 强制指定数据路径为 Docker 挂载点
+# 不要改动这里，直接指向容器内的挂载目录
+DATA_DIR = '/app/data'
+
+# 打印调试信息，确保它真的在读这里
+print(f"🔒 [System] 强制锁定数据目录: {DATA_DIR}")
+
+# 定义文件路径
+CONFIG_FILE = os.path.join(DATA_DIR, 'servers.json')
+SUBS_FILE = os.path.join(DATA_DIR, 'subscriptions.json')
+NODES_CACHE_FILE = os.path.join(DATA_DIR, 'nodes_cache.json')
+ADMIN_CONFIG_FILE = os.path.join(DATA_DIR, 'admin_config.json')
+GLOBAL_SSH_KEY_FILE = os.path.join(DATA_DIR, 'global_ssh_key')
+
+# 环境变量
+AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
+ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
+ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
+
+SERVERS_CACHE = []
+SUBS_CACHE = []
+NODES_DATA = {}
+ADMIN_CONFIG = {}
+
 # ================= 定义全局进程池变量  =================
 PROCESS_POOL = None 
-
 
 # ================= 全局 同步 Ping 函数 =================
 def sync_ping_worker(host, port):
@@ -203,7 +229,7 @@ DASHBOARD_REFS = {
 
 # ================= 全局 DNS 缓存  ======================
 DNS_CACHE = {}
-DNS_WAITING_LABELS = {} # ✨ 新增：存储等待 DNS 结果的 UI 标签引用
+DNS_WAITING_LABELS = {} # 
 
 async def _resolve_dns_bg(host):
     """后台线程池解析 DNS，解析完自动刷新所有绑定的 UI 标签"""
@@ -212,7 +238,7 @@ async def _resolve_dns_bg(host):
         ip = await run.io_bound(socket.gethostbyname, host)
         DNS_CACHE[host] = ip
         
-        # ✨✨✨ 核心逻辑：解析完成了，通知前台变身！ ✨✨✨
+        #  核心逻辑：解析完成了，通知前台变身！
         if host in DNS_WAITING_LABELS:
             for label in DNS_WAITING_LABELS[host]:
                 try:
@@ -281,7 +307,7 @@ def get_flag_for_country(country_name):
         if k.upper() == country_name.upper() or k in country_name:
             return v 
     
-    # 2. ✨✨✨ 反向匹配：检查 Value (解决中文匹配问题) ✨✨✨
+    # 2. 反向匹配：检查 Value (解决中文匹配问题) 
     # API返回 '新加坡'，虽然 Key 里没有，但 Value '🇸🇬 新加坡' 里包含它！
     for v in AUTO_COUNTRY_MAP.values():
         if country_name in v:
@@ -290,7 +316,7 @@ def get_flag_for_country(country_name):
     # 3. 实在找不到，返回白旗
     return f"🏳️ {country_name}"
 
-# ✨✨✨自动给名称添加国旗 ✨✨✨
+# 自动给名称添加国旗
 async def auto_prepend_flag(name, url):
     """
     检查名字是否已经包含任意已知国旗。
@@ -325,7 +351,7 @@ async def auto_prepend_flag(name, url):
     except Exception as e:
         return name
 
-# ✨✨✨ 智能命名核心逻辑 ✨✨✨
+#  智能命名核心逻辑
 async def generate_smart_name(server_conf):
     """尝试获取面板节点名，获取不到则用 GeoIP+序号"""
     # 1. 尝试连接面板获取节点名
@@ -341,7 +367,7 @@ async def generate_smart_name(server_conf):
                     return node['remark'] 
     except: pass
 
-    # 2. 尝试 GeoIP 命名 (如果面板连不上)
+    # 2. 尝试 GeoIP 命名 
     try:
         geo_info = await run.io_bound(fetch_geo_from_ip, server_conf['url'])
         if geo_info:
@@ -421,7 +447,7 @@ def open_global_settings_dialog():
 
 
 
-# ================= [V76 终极稳定版] XHTTP-Reality 部署脚本 =================
+# ================= XHTTP-Reality 部署脚本 =================
 # 改进点：使用 Here-Doc 处理 JSON，增加换行符清洗，增加 DNS 检查
 XHTTP_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
@@ -623,7 +649,7 @@ def parse_vless_link_to_node(link, remark_override=None):
             host = host_port
             port = 443
 
-        # ================= 核心修复：更新原始链接中的备注 =================
+        # ================= 更新原始链接中的备注 =================
         final_link = link
         if remark_override:
             # 1. 如果原链接里有 #，先去掉旧的
@@ -668,7 +694,7 @@ def parse_vless_link_to_node(link, remark_override=None):
         print(f"[Error] 解析 VLESS 链接失败: {e}")
         return None
 
-# ================= [V76 智能交互版] 部署弹窗逻辑 =================
+# ================= 部署弹窗逻辑 =================
 async def open_deploy_xhttp_dialog(server_conf, callback):
     # 1. 获取 IP
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
@@ -721,7 +747,6 @@ async def open_deploy_xhttp_dialog(server_conf, callback):
                     
                     log_area.push(f"🚀 [SSH] 开始执行 V76 部署脚本...")
                     
-                    # 注入 V76 脚本内容
                     deploy_cmd = f"""
 cat > /tmp/install_xhttp.sh << 'EOF_SCRIPT'
 {XHTTP_INSTALL_SCRIPT_TEMPLATE}
@@ -826,7 +851,7 @@ bash /tmp/install_xhttp.sh "{target_domain}"
 
     d.open()
 
-# SSH 执行辅助函数 (放在外面避免闭包问题)
+# SSH 执行辅助函数 
 def _ssh_exec_wrapper(server_conf, cmd):
     client, msg = get_ssh_client_sync(server_conf)
     if not client: return False, msg
@@ -859,7 +884,7 @@ echo "Xray Service Uninstalled (Binary kept safe)"
 """
 
 
-# ================= Hysteria 2 安装脚本 (纯净版 - 适配 Surge) =================
+# ================= Hysteria 2 安装脚本 =================
 HYSTERIA_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 # 1. 接收参数
@@ -935,7 +960,7 @@ else
     echo "HYSTERIA_DEPLOY_FAILED"
 fi
 """
-# ================= 一键部署 Hysteria 2 (纯净版部署逻辑) =================
+# ================= 一键部署 Hysteria 2  =================
 async def open_deploy_hysteria_dialog(server_conf, callback):
     # --- 1. IP 获取逻辑 ---
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
@@ -958,7 +983,6 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
             name_input = ui.input('节点名称 (可选)', placeholder='例如: 狮城 Hy2').props('outlined dense').classes('w-full')
             sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense').classes('w-full')
             
-            # ⚠️ 删除了混淆密码输入框，因为我们要部署纯净版
             
             enable_hopping = ui.checkbox('启用端口跳跃', value=True).classes('text-sm font-bold text-gray-600')
             with ui.row().classes('w-full items-center gap-2'):
@@ -1040,7 +1064,7 @@ def record_ping_history(url, pings_dict):
     if url not in PING_TREND_CACHE: 
         PING_TREND_CACHE[url] = []
     
-    # 2. ✨✨✨ 核心防抖逻辑 ✨✨✨
+    # 2.  核心防抖逻辑 
     # 如果该服务器已有数据，且最后一条数据的时间距离现在不足 60 秒，则跳过不录
     if PING_TREND_CACHE[url]:
         last_record = PING_TREND_CACHE[url][-1]
@@ -1105,10 +1129,6 @@ ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
 ssl_ctx.verify_mode = ssl.CERT_NONE
 
-# ... (省略原有的 CPU/内存/系统信息获取函数，保持不变，为节省篇幅未重复列出，请保留原脚本中的 get_cpu_model 等函数) ...
-# 注意：实际替换时，请保留 get_cpu_model, get_os_distro, get_network_bytes 等辅助函数！
-# 这里为了展示核心逻辑，我直接写新增的 X-UI 读取函数。
-
 def get_cpu_model():
     model = "Unknown"
     try:
@@ -1172,7 +1192,7 @@ def get_network_bytes():
     except: pass
     return r, t
 
-# ✨✨✨ 新增：读取 X-UI 数据库 ✨✨✨
+# 读取 X-UI 数据库 
 def get_xui_rows():
     db_path = "/etc/x-ui/x-ui.db"
     if not os.path.exists(db_path): return None
@@ -1269,8 +1289,7 @@ def get_info():
 
         data["pings"] = {k: get_ping(v) for k, v in PING_TARGETS.items()}
         
-        # ✨✨✨ 获取 X-UI 本地数据并随包推送 ✨✨✨
-        # 只要读到了数据，就放进去。如果没装面板，这里是 None
+        #  获取 X-UI 本地数据并随包推送 
         xui = get_xui_rows()
         if xui is not None:
             data["xui_data"] = xui
@@ -1339,35 +1358,6 @@ SYNC_SEMAPHORE = asyncio.Semaphore(50)
 
 LAST_AUTO_SYNC_TIME = 0
 SYNC_COOLDOWN_SECONDS = 300  # 冷却时间：300秒（5分钟）
-
-# ================= 配置区域 (Docker 强制版) =================
-import os
-import sys
-
-# 🛑 强制指定数据路径为 Docker 挂载点
-# 不要改动这里，直接指向容器内的挂载目录
-DATA_DIR = '/app/data'
-
-# 打印调试信息，确保它真的在读这里
-print(f"🔒 [System] 强制锁定数据目录: {DATA_DIR}")
-
-# 定义文件路径
-CONFIG_FILE = os.path.join(DATA_DIR, 'servers.json')
-SUBS_FILE = os.path.join(DATA_DIR, 'subscriptions.json')
-NODES_CACHE_FILE = os.path.join(DATA_DIR, 'nodes_cache.json')
-ADMIN_CONFIG_FILE = os.path.join(DATA_DIR, 'admin_config.json')
-GLOBAL_SSH_KEY_FILE = os.path.join(DATA_DIR, 'global_ssh_key')
-
-# 环境变量
-AUTO_REGISTER_SECRET = os.getenv('XUI_SECRET_KEY', 'sijuly_secret_key_default')
-ADMIN_USER = os.getenv('XUI_USERNAME', 'admin')
-ADMIN_PASS = os.getenv('XUI_PASSWORD', 'admin')
-
-SERVERS_CACHE = []
-SUBS_CACHE = []
-NODES_DATA = {}
-ADMIN_CONFIG = {}
-
 
 # ================= 智能分组配置 (增强版) =================
 AUTO_COUNTRY_MAP = {
@@ -1514,7 +1504,7 @@ GLOBE_STRUCTURE = r"""
 </div>
 """
 
-# ================= 2D 平面地图：JS 逻辑 (仪表盘专用 - 已修复 Win 国旗显示) =================
+# ================= 2D 平面地图：JS 逻辑 =================
 GLOBE_JS_LOGIC = r"""
 (function() {
     // 1. 获取仪表盘专用容器
@@ -1734,7 +1724,7 @@ def prepare_map_data():
         region_stats = {} 
         active_regions_for_highlight = set()
 
-        # 1. 国旗 -> 标准地图名映射 (保持不变)
+        # 1. 国旗 -> 标准地图名映射 
         FLAG_TO_MAP_NAME = {
             '🇨🇳': 'China', '🇭🇰': 'China', '🇲🇴': 'China', '🇹🇼': 'China',
             '🇺🇸': 'United States', '🇨🇦': 'Canada', '🇲🇽': 'Mexico',
@@ -1751,7 +1741,7 @@ def prepare_map_data():
             '🇨🇴': 'Colombia', '🇵🇪': 'Peru'
         }
 
-        # 2. 地图名别名库 (保持不变)
+        # 2. 地图名别名库
         MAP_NAME_ALIASES = {
             'United States': ['United States of America', 'USA'],
             'United Kingdom': ['United Kingdom', 'UK', 'Great Britain'],
@@ -1761,7 +1751,7 @@ def prepare_map_data():
             'Vietnam': ['Viet Nam']
         }
 
-        # 3. 中心点坐标库 (保持不变)
+        # 3. 中心点坐标库
         COUNTRY_CENTROIDS = {
             'China': [104.19, 35.86], 'United States': [-95.71, 37.09], 'United Kingdom': [-3.43, 55.37],
             'Germany': [10.45, 51.16], 'France': [2.21, 46.22], 'Netherlands': [5.29, 52.13],
@@ -1849,7 +1839,7 @@ def prepare_map_data():
                 rs = temp_stats_storage[map_name_standard]
                 rs['total'] += 1
                 
-                # 🛑 [修复]：优先检查探针缓存是否在线
+                # 🛑 优先检查探针缓存是否在线
                 is_on = False
                 
                 # 1. 检查探针缓存
@@ -2414,7 +2404,7 @@ def _exec(server_data, cmd, log_area):
         log_area.push(f"系统错误: {repr(e)}") # 使用 repr 显示详细错误类型
     finally:
         client.close()
-# ================= [升级版] Cloudflare API 工具类 (含删除功能) =================
+# ================= Cloudflare API 工具类 =================
 class CloudflareHandler:
     def __init__(self):
         self.token = ADMIN_CONFIG.get('cf_api_token', '')
@@ -2459,7 +2449,6 @@ class CloudflareHandler:
         except Exception as e: return False, str(e)
 
     async def auto_configure(self, ip, sub_prefix):
-        """新增解析"""
         if not self.token: return False, "未配置 API Token"
         def _task():
             zone_id, err = self.get_zone_id()
@@ -2478,7 +2467,7 @@ class CloudflareHandler:
             
         return await run.io_bound(_task)
 
-    # ✨✨✨ [新增] 删除指定域名的解析记录 ✨✨✨
+    #删除指定域名的解析记录
     async def delete_record_by_domain(self, domain_to_delete):
         if not self.token: return False, "未配置 Cloudflare Token"
         if not domain_to_delete: return False, "域名为空"
@@ -2648,7 +2637,7 @@ def get_manager(server_conf):
     # --- 兜底 ---
     raise Exception("无法创建管理器：未配置 SSH 且缺少 X-UI 账号信息")
 
-# ================== 核心扩展：SSH 数据库直连管理器 (V4 缩进修复版) ==================
+# ================== 核心扩展：SSH 数据库直连管理器 ==================
 class SSHXUIManager:
     """
     通过 SSH 直接操作远程 X-UI 数据库。
@@ -2881,7 +2870,7 @@ async def run_in_bg_executor(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(BG_EXECUTOR, func, *args)
 
-# 2. 单个服务器同步逻辑 (修改版：增加 sync_name 开关)
+# 2. 单个服务器同步逻辑 
 async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False):
     url = server_conf['url']
     
@@ -2967,13 +2956,7 @@ async def silent_refresh_all(is_auto_trigger=False):
         elif current_time - last_time < SYNC_COOLDOWN_SECONDS:
             remaining = int(SYNC_COOLDOWN_SECONDS - (current_time - last_time))
             logger.info(f"⏳ [防抖生效] 距离上次同步不足 {SYNC_COOLDOWN_SECONDS}秒，跳过 (剩余: {remaining}s)")
-            
-            # ❌❌❌ [修复] 这里不要强制刷新页面，否则会导致 UI 闪烁或死循环 ❌❌❌
-            # try: 
-            #     render_sidebar_content.refresh()
-            #     await load_dashboard_stats()
-            # except: pass
-            
+                      
             return
 
     # 2. 执行同步流程
@@ -3185,20 +3168,15 @@ def generate_converted_link(raw_link, target, domain_prefix):
     
     converter_base = f"{domain_prefix}/convert"
     encoded_url = quote(raw_link)
-    
-    # ✨✨✨ 核心修改 ✨✨✨
-    # 1. 移除了 config=... (去掉了强制的分流规则模板)
-    # 2. 增加了 list=true  (只输出节点部分)
-    # 3. 增加了 udp=true   (默认开启 UDP 转发支持)
-    # 4. 增加了 scv=true   (关闭 TLS 证书校验，防止自签证书报错)
+
     params = f"target={target}&url={encoded_url}&insert=false&list=true&ver=4&udp=true&scv=true"
     
     return f"{converter_base}?{params}"
 
-# ================= 生成节点链接 (已修复：自动清洗 IP 和 端口) =================
+# ================= 生成节点链接 =================
 def generate_node_link(node, server_host):
     try:
-        # ✨✨✨ 核心修复：清洗 server_host，只保留纯 IP/域名 ✨✨✨
+        # 清洗 server_host，只保留纯 IP/域名 
         clean_host = server_host
         # 1. 去掉协议头 (http:// 或 https://)
         if '://' in clean_host:
@@ -3258,7 +3236,7 @@ def generate_node_link(node, server_host):
         return ""
     return ""
 
-# ================= 生成 Surge/Loon 格式明文配置 (修复 Host/SNI 冲突版) =================
+# ================= 生成 Surge/Loon 格式明文配置  =================
 def generate_detail_config(node, server_host):
     try:
         # 1. 基础信息清洗
@@ -3404,7 +3382,7 @@ async def batch_ping_nodes(nodes, raw_host):
     if tasks:
         await asyncio.gather(*tasks)
 
-# ================= 探针数据被动接收接口 (最终修复版：防双重国旗) =================
+# ================= 探针数据被动接收接口 =================
 @app.post('/api/probe/push')
 async def probe_push_data(request: Request):
     try:
@@ -3458,7 +3436,7 @@ async def probe_push_data(request: Request):
                 NODES_DATA[target_server['url']] = parsed_nodes
                 target_server['_status'] = 'online'
 
-                # 🟢 [新增补充]：自动同步名称逻辑 (当端口不通时依赖此逻辑)
+                # 🟢自动同步名称逻辑 (当端口不通时依赖此逻辑)
                 # 只有当有节点，且当前名字看起来像默认IP时，才尝试修改
                 if parsed_nodes:
                     first_remark = parsed_nodes[0].get('remark', '').strip()
@@ -3467,7 +3445,7 @@ async def probe_push_data(request: Request):
                     # 简单的判断：如果名字里没有这个备注
                     if first_remark and (first_remark not in current_name):
                         
-                        # ✨✨✨ [修复]：先检查备注里是否自带了国旗 ✨✨✨
+                        # ：先检查备注里是否自带了国旗 
                         has_own_flag = False
                         # 遍历全局配置中的所有已知国旗
                         for v in AUTO_COUNTRY_MAP.values():
@@ -5156,7 +5134,7 @@ def open_group_sort_dialog():
     d.open()
 import traceback # 引入用于打印报错堆栈
 
-# ================= 探针自定义分组一体化管理器 (修复版：全选/新建逻辑重构) =================
+# ================= 探针自定义分组一体化管理器 =================
 def open_unified_group_manager(mode='manage'):
     # 1. 数据准备
     if 'probe_custom_groups' not in ADMIN_CONFIG: 
@@ -5799,7 +5777,7 @@ async def render_probe_page():
                             ui.label(str(probe)).classes('font-bold text-xl text-purple-600')
                            
     
-# ================= 订阅管理视图 (已增强：增加节点管理按钮) =================
+# ================= 订阅管理视图 ================
 async def load_subs_view():
     # 标记当前视图
     global CURRENT_VIEW_STATE
@@ -5975,7 +5953,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
         try: render_sidebar_content.refresh()
         except: pass
 
-    # ================= ✨✨✨ 右侧主视图同步逻辑 (关键修改) ✨✨✨ =================
+    # =================  右侧主视图同步逻辑 =================
     current_scope = CURRENT_VIEW_STATE.get('scope')
     current_data = CURRENT_VIEW_STATE.get('data')
     
@@ -6001,7 +5979,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
         try: await refresh_dashboard_ui()
         except: pass
 
-    # ================= ✨ 后台任务 (GeoIP / 探针安装) ✨ =================
+    # =================  后台任务 (GeoIP / 探针安装)  =================
     asyncio.create_task(fast_resolve_single_server(server_data))
     
     if ADMIN_CONFIG.get('probe_enabled', False) and server_data.get('probe_installed', False):
@@ -6014,7 +5992,7 @@ async def save_server_config(server_data, is_add=True, idx=None):
 
 
                         
-# ================= 小巧卡片式弹窗 (修复版：删除同步优化) =================
+# ================= 小巧卡片式弹窗  =================
 async def open_server_dialog(idx=None):
     is_edit = idx is not None
     original_data = SERVERS_CACHE[idx] if is_edit else {}
@@ -6067,7 +6045,7 @@ async def open_server_dialog(idx=None):
             await save_servers()
             render_sidebar_content.refresh()
             
-            # ✨ 基础信息修改同步刷新右侧
+            # 基础信息修改同步刷新右侧
             current_scope = CURRENT_VIEW_STATE.get('scope')
             if current_scope == 'SINGLE' and CURRENT_VIEW_STATE.get('data') == SERVERS_CACHE[idx]:
                 try: await refresh_content('SINGLE', SERVERS_CACHE[idx])
@@ -6162,7 +6140,7 @@ async def open_server_dialog(idx=None):
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
 
-            # ... (通用名称生成逻辑保持不变) ...
+
             if not final_name:
                 safe_notify("正在生成名称...", "ongoing")
                 final_name = await generate_smart_name(new_server_data)
@@ -6278,7 +6256,7 @@ async def open_server_dialog(idx=None):
             with ui.tab_panel(t_xui).classes('p-0 flex flex-col gap-3'):
                 render_xui_panel()
 
-        # ================= 5. 全局删除逻辑 (修复版：解决通知卡死) =================
+        # ================= 5. 全局删除逻辑  =================
         if is_edit:
             with ui.row().classes('w-full justify-start mt-4 pt-2 border-t border-gray-100'):
                 async def open_delete_confirm():
@@ -6317,7 +6295,7 @@ async def open_server_dialog(idx=None):
                             
                             is_full_delete = False
 
-                            # ✨✨✨ 修复核心：使用 notification + try/finally ✨✨✨
+                            # 使用 notification + try/finally 
                             if will_uninstall:
                                 # 1. 开启转圈通知
                                 loading_notify = ui.notification('正在尝试连接并卸载探针...', timeout=None, spinner=True)
@@ -6386,7 +6364,7 @@ async def open_server_dialog(idx=None):
                 ui.button('删除 / 卸载配置', icon='delete', on_click=open_delete_confirm).props('flat').classes(btn_keycap_delete)
     d.open()
     
-# =================  数据备份/恢复 (已修复记忆功能)  =================
+# =================  数据备份/恢复  =================
 async def open_data_mgmt_dialog():
     with ui.dialog() as d, ui.card().classes('w-full max-w-2xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden'):
         
@@ -6495,7 +6473,7 @@ async def open_data_mgmt_dialog():
                             chk_xui = ui.checkbox('添加 X-UI 面板', value=True).classes('font-bold text-blue-700')
                             chk_probe = ui.checkbox('启用 Root 探针 (自动安装)', value=False).classes('font-bold text-slate-700')
 
-                        # ✨✨✨ 主处理函数 (合并了保存逻辑) ✨✨✨
+                        #  主处理函数 (合并了保存逻辑) 
                         async def run_batch_import():
                             # 1. 先保存用户的偏好设置到 ADMIN_CONFIG
                             ADMIN_CONFIG['pref_ssh_user'] = def_ssh_user.value
@@ -6756,7 +6734,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
             # 渲染 UI 
             await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
             
-            # ✨✨✨ [核心修改] 智能生成提示语 ✨✨✨
+            # 智能生成提示语 
             mins_ago = int((now - last_sync) / 60)
             
             notify_msg = ""
@@ -6838,7 +6816,7 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
             
         asyncio.create_task(_background_fetch())
 
-# --- 辅助函数 (保持不变) ---
+# --- 辅助函数  ---
 async def _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client):
     if content_container:
         content_container.clear()
@@ -6953,8 +6931,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                 for n in all_nodes:
                     is_custom = n.get('_is_custom', False)
                     
-                    # ✨✨✨ [修改点 2]：节点标签逻辑修正 ✨✨✨
-                    # 只要开启了探针且有 SSH 主机，就算 Root 模式 (因为后端优先用它)
+                    # 只要开启了探针且有 SSH 主机，就算 Root 模式 
                     is_ssh_mode = (not is_custom) and (server_conf.get('probe_installed') and server_conf.get('ssh_host'))
                     
                     row_3d_cls = 'grid w-full gap-4 py-3 px-2 mb-2 items-center group bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[2px] active:border-b active:translate-y-[2px] active:shadow-none cursor-default'
@@ -7020,7 +6997,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
                             else:
                                 ui.icon('lock', size='xs').classes('text-gray-300').tooltip('无权限')
 
-        # ================== 刷新 UI 的核心函数 (修复版) ==================
+        # ================== 刷新 UI 的核心函数  ==================
         async def reload_and_refresh_ui():
             # 1. 如果是 SSH/Root 模式，强制主动拉取最新数据 (无视探针被动推送等待)
             if mgr and hasattr(mgr, '_exec_remote_script'):
@@ -7165,7 +7142,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
 
         ui.element('div').classes('h-6 flex-shrink-0') 
 
-        # --- 第三段：SSH 窗口 (完整保留) ---
+        # --- 第三段：SSH 窗口  ---
         with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
             ssh_state = {'active': False, 'instance': None}
 
@@ -7269,7 +7246,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
             ssh_wrapper = ui.column().classes('w-full h-full p-0 gap-0')
             render_card_content()
 
-# ================= SSH 窗口 (修复 SyntaxError) =================
+# ================= SSH 窗口 =================
 def render_ssh_window_full(server_conf):
     with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
         ssh_state = {'active': False, 'instance': None}
@@ -7396,7 +7373,7 @@ def show_custom_node_info(node):
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
     
-# ================= 聚合视图渲染 (最终完整版：翻页=自然浏览) =================
+# ================= 聚合视图渲染  =================
 async def render_aggregated_view(server_list, show_ping=False, token=None, initial_page=1):
     
     # 1. 🟢 [关键]：捕获当前的 Client 上下文 (用于解决后台任务丢失 UI 上下文的问题)
@@ -7508,7 +7485,7 @@ async def render_aggregated_view(server_list, show_ping=False, token=None, initi
     # 初次渲染
     render_page(initial_page)
     
-# --- 辅助函数：绘制单行 (保持原样，含复制修复) ---
+# --- 辅助函数：绘制单行  ---
 def draw_row(srv, node, css_style, use_special_mode, is_first=True):
     card_cls = 'grid w-full gap-4 py-3 px-4 items-center group relative bg-white rounded-xl border border-gray-200 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-300 hover:-translate-y-[1px] mb-2'
     
@@ -7614,7 +7591,7 @@ def get_dashboard_live_data():
     return data if data else {"error": "Calculation failed"}
 
 
-# ================= 辅助：统一数据计算逻辑 (修改版：优先探针数据) =================
+# ================= 辅助：统一数据计算逻辑  =================
 def calculate_dashboard_data():
     """
     计算并返回当前所有面板数据。
@@ -7722,7 +7699,7 @@ def calculate_dashboard_data():
         import traceback; traceback.print_exc()
         return None
 
-# ================= 核心：静默刷新 UI 数据 (修改版：统一调用计算逻辑) =================
+# ================= 核心：静默刷新 UI 数据  =================
 async def refresh_dashboard_ui():
     try:
         # 如果仪表盘还没打开（引用是空的），直接跳过
@@ -7749,7 +7726,7 @@ async def refresh_dashboard_ui():
             DASHBOARD_REFS['pie_chart'].options['series'][0]['data'] = data['pie_chart']
             DASHBOARD_REFS['pie_chart'].update()
 
-        # --- 更新地图数据 (保持原逻辑) ---
+        # --- 更新地图数据 ---
         globe_data_list = []
         seen_locations = set()
         for s in SERVERS_CACHE:
@@ -7778,7 +7755,7 @@ async def refresh_dashboard_ui():
     except Exception as e:
         logger.error(f"UI 更新失败: {e}")
         
-# ================= 核心：仪表盘主视图渲染 (最终稳定版：切断 JS 关联) =================
+# ================= 核心：仪表盘主视图渲染  =================
 async def load_dashboard_stats():
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'DASHBOARD'
@@ -7789,8 +7766,6 @@ async def load_dashboard_stats():
     content_container.classes(remove='justify-center items-center overflow-hidden p-6', add='overflow-y-auto p-4 pl-6 justify-start')
     
     # 1. 计算初始统计数据
-    # 这里就算 calculate_dashboard_data 返回的是协议数据也没关系
-    # 因为我们在下一步会马上覆盖它
     init_data = calculate_dashboard_data()
     if not init_data:
         init_data = {
@@ -7798,7 +7773,7 @@ async def load_dashboard_stats():
             "bar_chart": {"names": [], "values": []}, "pie_chart": []
         }
 
-    # ✨✨✨ [Python端]：强制重算区域数据 (Top 5 + 其他) ✨✨✨
+    # 强制重算区域数据 (Top 5 + 其他)
     # 这是页面加载时显示的正确数据
     group_buckets = {}
     for s in SERVERS_CACHE:
@@ -7827,8 +7802,6 @@ async def load_dashboard_stats():
     init_data['pie_chart'] = pie_data_final
 
     with content_container:
-        # ✨✨✨ [关键修改]：JS 脚本中删除了更新 Pie Chart 的代码 ✨✨✨
-        # 这样即使后台 API 返回了旧的协议数据，前端也不会接收，从而彻底阻断“变身”
         ui.run_javascript("""
         if (window.dashInterval) clearInterval(window.dashInterval);
         window.dashInterval = setInterval(async () => {
@@ -7888,7 +7861,7 @@ async def load_dashboard_stats():
 
         # === B. 图表区域 ===
         with ui.row().classes('w-full gap-4 mb-6 flex-wrap xl:flex-nowrap items-stretch'):
-            # 流量排行 (保持原样)
+            # 流量排行
             with ui.card().classes('w-full xl:w-2/3 p-4 shadow-md border-none rounded-xl bg-white flex flex-col'):
                 with ui.row().classes('w-full justify-between items-center mb-2'):
                     ui.label('📊 服务器流量排行 (GB)').classes('text-base font-bold text-slate-700')
@@ -7927,7 +7900,7 @@ async def load_dashboard_stats():
                     }]
                 }).classes('w-full h-56').props('id=chart-pie') # ⚠️ 注意：ID 还在，但 JS 不会再操作它了
 
-        # === C. 底部地图区域 (保持原样) ===
+        # === C. 底部地图区域 ===
         with ui.row().classes('w-full gap-6 mb-6'):
             with ui.card().classes('w-full p-0 shadow-md border-none rounded-xl bg-slate-900 overflow-hidden relative'):
                 with ui.row().classes('w-full px-6 py-3 bg-slate-800/50 border-b border-gray-700 justify-between items-center z-10 relative'):
@@ -8060,7 +8033,7 @@ class BulkEditor:
                         with ui.dialog() as sub_d, ui.card().classes('w-80'):
                             ui.label('移动到分组').classes('font-bold mb-2')
                             
-                            # ✨✨✨ 修复点：函数名修正 get_all_groups_set -> get_all_groups ✨✨✨
+                            # ：函数名修正 get_all_groups_set -> get_all_groups 
                             groups = get_all_groups()
                             
                             # 允许用户手打新分组
@@ -8096,7 +8069,7 @@ class BulkEditor:
                     ui.button('移动分组', icon='folder_open', on_click=move_group).props('flat dense color=blue')
 
                     # =========================================================
-                    # ✨✨✨批量修改 SSH 设置 (用户名/认证方式) ✨✨✨
+                    # 批量修改 SSH 设置 (用户名/认证方式) 
                     # =========================================================
                     async def batch_ssh_config():
                         if not self.selected_urls: return safe_notify('未选择服务器', 'warning')
@@ -8423,7 +8396,7 @@ def open_combined_group_management(group_name):
                 ui.label('分组名称').classes('text-xs font-bold text-gray-500 mb-[-5px]')
                 name_input = ui.input(value=group_name).props('outlined dense').classes('w-full')
                 
-                # ✨✨✨ 新增：搜索框 ✨✨✨
+                #  新增：搜索框 
                 ui.label('搜索筛选').classes('text-xs font-bold text-gray-500 mb-[-5px]')
                 search_input = ui.input(placeholder='🔍 搜名称 / IP...').props('outlined dense clearable').classes('w-full')
                 
@@ -8495,14 +8468,14 @@ def open_combined_group_management(group_name):
                                     ui.label(real_region).classes('text-xs font-mono text-gray-400')
                                 except: pass
                             
-                            # ✨ 存入 UI 字典供搜索使用
+                            #  存入 UI 字典供搜索使用
                             ui_rows[s['url']] = {
                                 'row': row,
                                 'chk': chk,
                                 'search_text': search_key
                             }
 
-                # ✨✨✨ 智能全选/清空函数 ✨✨✨
+                #  智能全选/清空函数
                 def toggle_visible(state):
                     count = 0
                     for item in ui_rows.values():
@@ -8516,7 +8489,7 @@ def open_combined_group_management(group_name):
         # 3. 底部按钮栏
         with ui.row().classes('w-full p-4 border-t bg-gray-50 justify-between items-center flex-shrink-0'):
             
-            # === 删除分组 (核心修改：防闪白) ===
+            # === 删除分组 ===
             async def delete_group():
                 with ui.dialog() as confirm_d, ui.card():
                     ui.label(f'确定永久删除分组 "{group_name}"?').classes('font-bold text-red-600')
@@ -8538,7 +8511,7 @@ def open_combined_group_management(group_name):
                             await save_servers()
                             confirm_d.close(); d.close()
                             
-                            # ✨✨✨ [关键修改] 只刷新侧边栏，不刷新内容 ✨✨✨
+                            # 只刷新侧边栏，不刷新内容 
                             render_sidebar_content.refresh()
                             
                             # 只有当前正在看这个组时，才跳回首页
@@ -8635,7 +8608,7 @@ SIDEBAR_UI_REFS = {
     'rows': {}         # 存储格式: {'http://1.2.3.4': ui_row_element, ...}
 }
 
-# ✨✨✨ [新增] 侧边栏点击防抖处理函数 (核心修复：保护 SSH 连接) ✨✨✨
+#侧边栏点击防抖处理函数
 async def on_server_click_handler(server):
     # 1. 获取当前视图状态
     current_scope = CURRENT_VIEW_STATE.get('scope')
@@ -8665,7 +8638,7 @@ async def on_server_click_handler(server):
     await refresh_content('SINGLE', server)
 
 
-# ================= 提取出来的单行渲染函数 (修改版) =================
+# ================= 提取出来的单行渲染函数  =================
 def render_single_sidebar_row(s):
     # 样式定义 (与之前保持一致)
     btn_keycap_base = 'bg-white border-t border-x border-gray-200 border-b-[3px] border-b-gray-300 rounded-lg transition-all duration-100 active:border-b-0 active:border-t-[3px] active:translate-y-[3px]'
@@ -8674,7 +8647,7 @@ def render_single_sidebar_row(s):
 
     # 创建行容器
     with ui.row().classes('w-full gap-2 no-wrap items-stretch') as row:
-        # 1. 服务器名字按钮 (✨ 修改点：绑定新的防抖处理函数 ✨)
+        # 1. 服务器名字按钮
         # 原代码是直接 lambda: refresh_content(...)，现在改为 lambda: on_server_click_handler(...)
         ui.button(on_click=lambda _, s=s: on_server_click_handler(s)) \
             .bind_text_from(s, 'name') \
@@ -8689,7 +8662,7 @@ def render_single_sidebar_row(s):
     # 注册到全局索引
     SIDEBAR_UI_REFS['rows'][s['url']] = row
     return row
-# ================= 侧边栏渲染 (最终版：绑定模式，修改名字0闪烁) =================
+# ================= 侧边栏渲染  =================
 _current_dragged_group = None 
 
 @ui.refreshable
@@ -8763,7 +8736,7 @@ def render_sidebar_content():
                                     ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-4').classes('hover:text-gray-700').tooltip('管理分组')
                                     ui.badge(str(len(tag_servers)), color='orange' if not tag_servers else 'grey').props('rounded outline')
                         
-                        # ✨✨✨ 注册分组容器 ✨✨✨
+                        # 注册分组容器 
                         with ui.column().classes('w-full gap-2 p-2 bg-gray-50/50') as col:
                             SIDEBAR_UI_REFS['groups'][tag_group] = col
                             for s in tag_servers:
@@ -8841,7 +8814,7 @@ def render_sidebar_content():
         ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes(bottom_btn_3d)
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes(bottom_btn_3d)
         
-# ================== 登录与 MFA 逻辑 (修正版) ==================
+# ================== 登录与 MFA 逻辑  ==================
 @ui.page('/login')
 def login_page(request: Request): 
     # 容器：用于切换登录步骤 (账号密码 -> MFA)
@@ -8938,7 +8911,6 @@ def login_page(request: Request):
             ui.button('验证登录', on_click=verify).classes('w-full bg-slate-900 text-white h-10')
             ui.button('返回', on_click=render_step1).props('flat dense').classes('w-full mt-2 text-gray-400 text-xs')
 
-    # ✨✨✨ [核心修复] finish 函数 ✨✨✨
     def finish():
         # 1. 基础认证标记
         app.storage.user['authenticated'] = True
@@ -8959,7 +8931,7 @@ def login_page(request: Request):
 
     render_step1()
 
-# ================= 0. 认证检查辅助函数 (升级版：支持版本控制) =================
+# ================= 0. 认证检查辅助函数 =================
 def check_auth(request: Request):
     """
     检查用户是否已登录，且会话版本是否有效
@@ -8983,13 +8955,13 @@ def check_auth(request: Request):
 # ================= [本地化版] 主页入口 (含 IP 检测与强制下线) =================
 @ui.page('/')
 def main_page(request: Request):
-    # ================= 1. 注入全局资源与样式 (修复国旗显示) =================
+    # ================= 1. 注入全局资源与样式 =================
     ui.add_head_html('<link rel="stylesheet" href="/static/xterm.css" />')
     ui.add_head_html('<script src="/static/xterm.js"></script>')
     ui.add_head_html('<script src="/static/xterm-addon-fit.js"></script>')
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     
-    # ✨✨✨ 核心修复：引入 Twemoji 字体 polyfill ✨✨✨
+    # 引入 Twemoji 字体 polyfill 
     ui.add_head_html('''
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
@@ -9027,7 +8999,7 @@ def main_page(request: Request):
     # 立即更新存储为当前 IP (为下一次检测做准备)
     app.storage.user['last_known_ip'] = current_ip
     
-    # ✨✨✨ 核心逻辑：强制下线 (重置密钥) ✨✨✨
+    # 核心逻辑：强制下线 (重置密钥)
     async def reset_global_session(dialog_ref=None):
         # 1. 生成新的随机版本号 (例如 "v2")
         new_ver = str(uuid.uuid4())[:8]
@@ -9044,7 +9016,7 @@ def main_page(request: Request):
         app.storage.user.clear()
         ui.navigate.to('/login')
 
-    # ✨✨✨ 弹窗逻辑：如果 IP 变了，弹出提示框 ✨✨✨
+    # 弹窗逻辑：如果 IP 变了，弹出提示框 
     if last_ip and last_ip != current_ip:
         def open_ip_alert():
             with ui.dialog() as d, ui.card().classes('w-96 p-5 border-t-4 border-red-500 shadow-2xl'):
@@ -9092,7 +9064,7 @@ def main_page(request: Request):
             # 右侧按钮区
             with ui.row().classes('items-center gap-2 mr-2'):
                 
-                # ✨✨✨ [新增] 主动重置密钥按钮 (盾牌图标) ✨✨✨
+                #  主动重置密钥按钮 (盾牌图标) 
                 with ui.button(icon='gpp_bad', color='red', on_click=lambda: reset_global_session(None)).props('flat dense round').tooltip('安全重置：强制所有已登录用户下线'):
                      ui.badge('Reset', color='orange').props('floating rounded')
 
@@ -9203,7 +9175,7 @@ async def job_monitor_status():
     current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
     async def _check_single_server(srv):
-        # 🛑 [核心修改]：如果未安装探针，直接跳过所有监控逻辑
+        # 🛑 如果未安装探针，直接跳过所有监控逻辑
         # 这样后台就不会去尝试获取这些机器的状态，也不会记录历史或报警
         if not srv.get('probe_installed', False):
             return
@@ -9265,7 +9237,7 @@ async def job_monitor_status():
     # 创建所有任务并执行
     tasks = [_check_single_server(s) for s in SERVERS_CACHE]
     await asyncio.gather(*tasks)
-# ✨✨✨ 注册本地静态文件目录 ✨✨✨
+# 注册本地静态文件目录 
 app.add_static_files('/static', 'static')
 
 # ================= 定义流量同步任务 (AI 动态自适应 + 探针跳过版) =================
@@ -9299,7 +9271,7 @@ async def job_sync_all_traffic():
         try:
             server = SERVERS_CACHE[i]
             
-            # ✨✨✨ [核心优化]：如果是探针/双模，直接跳过轮询与休眠 ✨✨✨
+            # 如果是探针/双模，直接跳过轮询与休眠 
             if server.get('probe_installed', False):
                 # 仅在调试时或者是第一台时打印一下，防止日志刷屏
                 # logger.info(f"⏩ [跳过轮询] {server.get('name')} (探针实时推送)")
@@ -9362,7 +9334,7 @@ async def job_check_geo_ip():
     logger.info("🌍 [定时任务] 开始全量 IP 归属地检测与名称修正...")
     data_changed = False
     
-    # 1. ✨ 动态生成所有已知国旗列表 (防止漏判)
+    # 1.  动态生成所有已知国旗列表 (防止漏判)
     known_flags = []
     for val in AUTO_COUNTRY_MAP.values():
         icon = val.split(' ')[0] # 提取 "🇺🇸", "🇯🇵" 等
@@ -9373,7 +9345,7 @@ async def job_check_geo_ip():
         old_name = s.get('name', '')
         new_name = old_name
 
-        # --- 🧹 步骤 A: 强力清洗白旗 (修复之前的 Bug) ---
+        # --- 🧹 步骤 A: 强力清洗白旗  ---
         # 如果名字以 "🏳️ " 开头，且后面还有内容，直接把白旗切掉
         if new_name.startswith('🏳️ ') or new_name.startswith('🏳️'):
             # 只有当名字里除了白旗还有别的东西时才删，防止名字被删空
@@ -9455,10 +9427,10 @@ app.on_shutdown(lambda: PROCESS_POOL.shutdown(wait=False) if PROCESS_POOL else N
 
 
 # ==========================================
-# ✨✨✨飞线优化+定位+高亮地图✨✨✨
+#飞线优化+定位+高亮地图
 # ==========================================
 
-# 1. 全局地图名称映射表 (✨严格清洗版：移除 AR/US 等易误判短词✨)
+# 1. 全局地图名称映射表
 MATCH_MAP = {
     # --- 南美 ---
     '🇨🇱': 'Chile', 'CHILE': 'Chile',
@@ -9546,7 +9518,7 @@ def open_mobile_server_detail(server_conf):
             .detail-scroll-area .q-scrollarea__content { width: 100% !important; max-width: 100% !important; }
             .q-dialog__inner--minimized > div { max-width: 95vw !important; }
             
-            /* ✨ 修复：卡片样式 (无缩放，仅变色) */
+            /* 卡片样式 (无缩放，仅变色) */
             .ping-card-base { border-width: 2px; border-style: solid; transition: all 0.3s; }
             .ping-card-inactive { border-color: transparent !important; opacity: 0.4; filter: grayscale(100%); }
         </style>
@@ -9751,7 +9723,7 @@ def open_mobile_server_detail(server_conf):
     except Exception as e:
         print(f"Mobile Detail error: {e}")
         
-# ================= [电脑端] 详情弹窗 (完美修复CPU数值显示) =================
+# ================= [电脑端] 详情弹窗 =================
 def open_pc_server_detail(server_conf):
     try:
         # 1. 获取当前主题状态
@@ -10094,7 +10066,7 @@ async def status_page_router(request: Request):
 import asyncio 
 import traceback
 
-# ================= 核心：/status 电脑端大屏显示 (最终完美版：分页+缓存回显+Win修复+详细地图悬浮窗) =================
+# ================= 核心：/status 电脑端大屏显示 =================
 async def render_desktop_status_page():
     global CURRENT_PROBE_TAB
     
@@ -10108,7 +10080,7 @@ async def render_desktop_status_page():
     ui.add_head_html('<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>')
     ui.add_head_html('<link href="https://use.fontawesome.com/releases/v6.4.0/css/all.css" rel="stylesheet">')
     
-    # ✨✨✨ [CSS 样式注入] 集成 Twemoji 字体修复 Win 系统国旗显示 ✨✨✨
+    # [CSS 样式注入] 集成 Twemoji 字体修复 Win 系统国旗显示 
     ui.add_head_html('''
         <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
         <style>
@@ -10299,7 +10271,7 @@ async def render_desktop_status_page():
         colored_up = re.sub(r'(\d+)(\s*(?:days?|天))', r'<span class="text-green-500 font-bold text-sm">\1</span>\2', up, flags=re.IGNORECASE)
         refs['uptime'].set_content(colored_up)
 
-# 2. 自动更新循环 (彻底修正版：非探针机器直接退出，不轮询)
+# 2. 自动更新循环 
     async def card_autoupdate_loop(url):
         # 获取服务器配置
         current_server = next((s for s in SERVERS_CACHE if s['url'] == url), None)
@@ -10308,7 +10280,7 @@ async def render_desktop_status_page():
         # 判断是否安装了探针
         is_probe = current_server.get('probe_installed', False)
 
-        # 🛑 核心修改：如果没有安装探针，直接结束此协程！
+        # 🛑 如果没有安装探针，直接结束此协程！
         # 这样前端卡片就不会每分钟去骚扰后台了
         if not is_probe:
             return 
@@ -10427,7 +10399,7 @@ async def render_desktop_status_page():
         page_state['page'] = new_page
         render_grid_page()
 
-    # ================= ✨✨✨ 核心：分页渲染逻辑 ✨✨✨ =================
+    # ================= 核心：分页渲染逻辑  =================
     def render_grid_page():
         grid_container.clear()
         pagination_ref.clear()
@@ -10461,7 +10433,6 @@ async def render_desktop_status_page():
 
         if total_pages > 1:
             with pagination_ref:
-                # ✨✨✨ 修改：max-pages=7 ✨✨✨
                 p = ui.pagination(1, total_pages, direction_links=True).props('dense color=blue outline rounded text-color=white active-color=blue active-text-color=white max-pages=7')
                 p.value = page_state['page']
                 p.on('update:model-value', lambda e: change_page(e.args))
@@ -10470,7 +10441,7 @@ async def render_desktop_status_page():
     render_tabs()
     render_grid_page()
     
-    # ✨✨✨ [JS 逻辑注入] 地图渲染 + 修复字体样式 + 调整悬浮窗宽度 + 区域高亮修复 ✨✨✨
+    # [JS 逻辑注入] 地图渲染 + 修复字体样式 + 调整悬浮窗宽度 + 区域高亮修复 
     ui.run_javascript(f'''
     (function() {{
         var mapData = {chart_data}; 
@@ -10659,11 +10630,11 @@ async def render_desktop_status_page():
         checkAndRender();
     }})();
     ''')
-    # ================= 循环更新逻辑 (修复版：统计探针心跳) =================
+    # ================= 循环更新逻辑  =================
     async def loop_update():
         nonlocal local_ui_version
         try:
-            # 1. 检查版本号，如果变动则重绘架构 (保持不变)
+            # 1. 检查版本号，如果变动则重绘架构 
             if GLOBAL_UI_VERSION != local_ui_version:
                 local_ui_version = GLOBAL_UI_VERSION
                 render_tabs(); render_grid_page() 
@@ -10672,7 +10643,7 @@ async def render_desktop_status_page():
                 if header_refs.get('region_count'): header_refs['region_count'].set_text(f'分布区域: {new_cnt}')
                 ui.run_javascript(f'''if(window.updatePublicMap){{ window.regionStats = {new_stats}; window.countryCentroids = {new_centroids}; window.updatePublicMap({new_map}); }}''')
             
-            # 2. ✨✨✨ [核心修复]：实时统计在线数量 ✨✨✨
+            # 2.实时统计在线数量
             real_online_count = 0
             now_ts = time.time()
             
