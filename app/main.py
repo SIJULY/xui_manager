@@ -10847,7 +10847,7 @@ async def render_mobile_status_page():
         await render_list(val)
 
     await render_list(CURRENT_PROBE_TAB)
-    ui.timer(2.0, mobile_sync_loop)
+    ui.timer(5.0, mobile_sync_loop)
     
 if __name__ in {"__main__", "__mp_main__"}:
     logger.info("🚀 系统正在初始化...")
