@@ -886,12 +886,20 @@ ENABLE_PORT_HOPPING="{enable_hopping}"
 PORT_RANGE_START="{port_range_start}"
 PORT_RANGE_END="{port_range_end}"
 
-# 2. 环境清理与安装
+# 2. 环境清理与依赖安装 (修复核心：同时安装 iptables 和 net-tools)
+if [ -f /etc/debian_version ]; then
+    apt-get update -y
+    # net-tools 包含 netstat，iptables 用于端口跳跃
+    apt-get install -y iptables net-tools
+elif [ -f /etc/redhat-release ]; then
+    yum install -y iptables net-tools
+fi
+
 systemctl stop hysteria-server.service 2>/dev/null
 rm -rf /etc/hysteria
 bash <(curl -fsSL https://get.hy2.sh/)
 
-# 3. 证书生成 (自签证书 - 对应教程 skip-cert-verify=true)
+# 3. 证书生成 (自签)
 mkdir -p /etc/hysteria
 openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
   -keyout /etc/hysteria/server.key \
@@ -901,14 +909,14 @@ openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
 chown hysteria /etc/hysteria/server.key
 chown hysteria /etc/hysteria/server.crt
 
-# 4. 端口检测
+# 4. 端口检测 (现在有了 net-tools，这里就不会报错了)
 HY2_PORT=443
 if netstat -ulpn | grep -q ":443 "; then
     echo "⚠️ UDP 443 占用，切换至 8443"
     HY2_PORT=8443
 fi
 
-# 5. 写入配置 (无混淆，纯净模式)
+# 5. 写入配置
 cat << EOF > /etc/hysteria/config.yaml
 listen: :$HY2_PORT
 tls:
@@ -922,7 +930,6 @@ masquerade:
   proxy:
     url: https://$SNI
     rewriteHost: true
-# 优化参数 (参考教程)
 quic:
   initStreamReceiveWindow: 26843545
   maxStreamReceiveWindow: 26843545
@@ -930,34 +937,52 @@ quic:
   maxConnReceiveWindow: 67108864
 EOF
 
-# 6. 端口跳跃
+# 6. 端口跳跃 (iptables 转发)
 if [ "$ENABLE_PORT_HOPPING" == "true" ]; then
-    IFACE=$(ip route get 8.8.8.8 | awk '{{print $5; exit}}')
-    iptables -t nat -D PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
-    iptables -t nat -A PREROUTING -i $IFACE -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT
+    # 清理旧规则
+    iptables -t nat -D PREROUTING -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT 2>/dev/null || true
+    # 添加新规则 (不限制网卡，强制生效)
+    iptables -t nat -A PREROUTING -p udp --dport $PORT_RANGE_START:$PORT_RANGE_END -j REDIRECT --to-ports $HY2_PORT
+    
     mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4
+    if command -v iptables-save >/dev/null; then
+        iptables-save > /etc/iptables/rules.v4
+    fi
 fi
 
 # 7. 启动
 systemctl enable --now hysteria-server.service
 sleep 2
 
-# 8. 输出链接 (标准格式，无 obfs 参数)
+# 8. 输出链接
 if systemctl is-active --quiet hysteria-server.service; then
     PUBLIC_IP=$(curl -s https://api.ipify.org)
-    LINK="hy2://$PASSWORD@$PUBLIC_IP:$HY2_PORT?peer=$SNI&insecure=1&sni=$SNI#Hy2-Node"
+    
+    CLIENT_PORT=$HY2_PORT
+    MPORT_PARAM=""
+    
+    if [ "$ENABLE_PORT_HOPPING" == "true" ]; then
+        if command -v shuf > /dev/null; then
+            CLIENT_PORT=$(shuf -i $PORT_RANGE_START-$PORT_RANGE_END -n 1)
+        else
+            RANGE=$(($PORT_RANGE_END - $PORT_RANGE_START + 1))
+            CLIENT_PORT=$(($PORT_RANGE_START + $RANDOM % $RANGE))
+        fi
+        MPORT_PARAM="&mport=$PORT_RANGE_START-$PORT_RANGE_END"
+    fi
+
+    LINK="hy2://$PASSWORD@$PUBLIC_IP:$CLIENT_PORT?peer=$SNI&insecure=1&sni=$SNI$MPORT_PARAM#Hy2-Node"
     echo "HYSTERIA_DEPLOY_SUCCESS_LINK: $LINK"
 else
     echo "HYSTERIA_DEPLOY_FAILED"
 fi
 """
-# ================= 一键部署 Hysteria 2  =================
+# ================= 一键部署 Hysteria 2 (纯净版部署逻辑 - 适配端口范围) =================
 async def open_deploy_hysteria_dialog(server_conf, callback):
     # --- 1. IP 获取逻辑 ---
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
     real_ip = target_host
-    import re, socket, urllib.parse
+    import re, socket, urllib.parse, uuid, asyncio
     
     if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", target_host):
         try: real_ip = await run.io_bound(socket.gethostbyname, target_host)
@@ -974,7 +999,6 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
         with ui.column().classes('w-full p-6 gap-4'):
             name_input = ui.input('节点名称 (可选)', placeholder='例如: 狮城 Hy2').props('outlined dense').classes('w-full')
             sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense').classes('w-full')
-            
             
             enable_hopping = ui.checkbox('启用端口跳跃', value=True).classes('text-sm font-bold text-gray-600')
             with ui.row().classes('w-full items-center gap-2'):
@@ -998,7 +1022,7 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                         "port_range_start": int(hop_start.value),
                         "port_range_end": int(hop_end.value)
                     }
-                    # 注入脚本
+                    
                     script_content = HYSTERIA_INSTALL_SCRIPT_TEMPLATE.format(**params)
                     deploy_cmd = f"cat > /tmp/install_hy2.sh << 'EOF_SCRIPT'\n{script_content}\nEOF_SCRIPT\nbash /tmp/install_hy2.sh"
                     
@@ -1006,7 +1030,6 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                     success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, deploy_cmd))
                     
                     if success:
-                        import re
                         match = re.search(r'HYSTERIA_DEPLOY_SUCCESS_LINK: (hy2://.*)', output)
                         if match:
                             link = match.group(1).strip()
@@ -1015,13 +1038,29 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                             custom_name = name_input.value.strip()
                             node_name = custom_name if custom_name else f"Hy2-{real_ip[-3:]}"
                             
-                            # 替换链接中的备注
+                            # --- 关键修改点开始: 强制使用端口范围字符串 ---
+                            if enable_hopping.value:
+                                # 存入 "20000-50000" 字符串，Surge 生成配置时会用到
+                                final_port_display = f"{int(hop_start.value)}-{int(hop_end.value)}"
+                            else:
+                                try: final_port_display = int(link.split('@')[1].split(':')[1].split('?')[0])
+                                except: final_port_display = 443
+
+                            # 处理 Raw Link (保持 hy2:// 格式供 Shadowrocket 使用)
                             if '#' in link: link = link.split('#')[0]
-                            final_link = f"{link}#{urllib.parse.quote(node_name)}"
+                            final_raw_link = f"{link}#{urllib.parse.quote(node_name)}"
+                            # --- 关键修改点结束 ---
 
                             new_node = {
-                                "id": str(uuid.uuid4()), "remark": node_name, "port": 443, "protocol": "hysteria2",
-                                "settings": {}, "streamSettings": {}, "enable": True, "_is_custom": True, "_raw_link": final_link
+                                "id": str(uuid.uuid4()), 
+                                "remark": node_name, 
+                                "port": final_port_display, # 这里存的是范围字符串 "20000-50000"
+                                "protocol": "hysteria2",
+                                "settings": {}, 
+                                "streamSettings": {}, 
+                                "enable": True, 
+                                "_is_custom": True, 
+                                "_raw_link": final_raw_link 
                             }
                             if 'custom_nodes' not in server_conf: server_conf['custom_nodes'] = []
                             server_conf['custom_nodes'].append(new_node)
@@ -1030,10 +1069,14 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                             safe_notify(f"✅ 节点 {node_name} 已添加", "positive")
                             await asyncio.sleep(1); d.close()
                             if callback: await callback()
-                        else: log_area.push("❌ 未捕获链接"); log_area.push(output[-500:])
-                    else: log_area.push(f"❌ SSH 失败: {output}")
-                except Exception as e: log_area.push(f"❌ 异常: {e}")
-                btn_cancel.enable(); btn_deploy.props(remove='loading')
+                        else: 
+                            log_area.push("❌ 未捕获链接"); log_area.push(output[-500:])
+                    else: 
+                        log_area.push(f"❌ SSH 失败: {output}")
+                except Exception as e: 
+                    log_area.push(f"❌ 异常: {e}"); print(e)
+                finally:
+                    btn_cancel.enable(); btn_deploy.props(remove='loading')
 
             btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
     d.open()
@@ -3227,8 +3270,7 @@ def generate_node_link(node, server_host):
         # print(f"Generate Link Error: {e}")
         return ""
     return ""
-
-# ================= 生成 Surge/Loon 格式明文配置  =================
+# ================= 生成 Surge/Loon 格式明文配置 =================
 def generate_detail_config(node, server_host):
     try:
         # 1. 基础信息清洗
@@ -3238,7 +3280,7 @@ def generate_detail_config(node, server_host):
 
         remark = node.get('remark', 'Unnamed').replace(',', '_').replace('=', '_').strip()
         address = node.get('listen') or clean_host
-        port = node['port']
+        port = node['port'] # 数据库里存的是 "20000-50000"
         
         # === A. 自定义节点 (Hy2) ===
         if node.get('_is_custom'):
@@ -3248,7 +3290,15 @@ def generate_detail_config(node, server_host):
                 parsed = urlparse(raw_link)
                 password = parsed.username
                 h_host = parsed.hostname or address 
-                h_port = parsed.port or port
+                
+                # ✨✨✨ 修复核心：优先使用范围字符串 ✨✨✨
+                # 如果 port 字段包含 '-'，说明是范围，直接用它
+                if str(port) and '-' in str(port):
+                    h_port = port
+                else:
+                    # 否则才用链接里的单端口
+                    h_port = parsed.port or port
+                
                 params = parse_qs(parsed.query)
                 sni = params.get('sni', [''])[0] or params.get('peer', [''])[0]
                 
@@ -3260,67 +3310,40 @@ def generate_detail_config(node, server_host):
                  return f"// Surge 暂未原生支持 XHTTP: {remark}"
 
         # === B. 面板标准节点 (VMess / Trojan) ===
-        protocol = node['protocol']
+        # ... (以下部分保持你原代码不变，省略以节省空间) ...
+        # 请保留原函数中 VMess 和 Trojan 的处理逻辑
         
-        # 解析 JSON 配置
+        # 为了完整性，这里补全剩余逻辑，你可以直接覆盖整个函数：
+        protocol = node['protocol']
         settings = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
         stream = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
-        
         net = stream.get('network', 'tcp')
         security = stream.get('security', 'none')
         tls = (security == 'tls') or (security == 'reality')
         
-        # --- VMess ---
         if protocol == 'vmess':
             uuid = settings['clients'][0]['id']
             line = f"{remark} = vmess, {address}, {port}, username={uuid}"
-            
-            # WebSocket 处理
             if net == 'ws':
                 ws_set = stream.get('wsSettings', {})
                 path = ws_set.get('path', '/')
-                
-                # 获取面板里的 Host
                 panel_host = ws_set.get('headers', {}).get('Host', '')
-                
-                # 获取 TLS SNI
                 sni = ""
                 if tls:
                     tls_set = stream.get('tlsSettings', {})
                     sni = tls_set.get('serverName', '')
-
                 line += f", ws=true, ws-path={path}"
-                
-                # ✨✨✨ 核心修复逻辑 ✨✨✨
-                # 如果开启了 TLS 且有 SNI，我们忽略面板里可能错误的 Host，
-                # 除非你确定需要 Domain Fronting。对于你的情况，SNI 和 Host 不一致会导致连不上。
-                # Surge 在 TLS 模式下，如果不写 ws-headers，默认会把 Host 设为 SNI，这是最稳妥的。
-                
-                final_host = panel_host
-                
-                # 如果有 SNI，且面板 Host 看起来像那个残留的 "ltetp.tv189.com"，或者为了稳妥起见
-                # 我们强制不写入 ws-headers，让 Surge 自动使用 SNI 作为 Host
-                if tls and sni:
-                    # 策略：只要有 SNI，就不写 ws-headers (让 Surge 自动处理 Host)
-                    # 这样就过滤掉了面板里填错的 ltetp.tv189.com
-                    pass 
-                elif panel_host:
-                    # 没有 TLS 或者没有 SNI 时，才写入面板的 Host
-                    line += f", ws-headers=Host:{panel_host}"
-                
-            # TLS 处理
+                if tls and sni: pass 
+                elif panel_host: line += f", ws-headers=Host:{panel_host}"
             if tls:
                 line += ", tls=true"
                 tls_set = stream.get('tlsSettings', {})
                 sni = tls_set.get('serverName', '')
                 if sni: line += f", sni={sni}"
-                # 增加跳过证书验证，提高自签证书成功率
                 line += ", skip-cert-verify=true"
-            
             line += ", tfo=true, udp-relay=true"
             return line
 
-        # --- Trojan ---
         elif protocol == 'trojan':
             password = settings['clients'][0]['password']
             line = f"{remark} = trojan, {address}, {port}, password={password}"
