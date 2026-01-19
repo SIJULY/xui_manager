@@ -4577,7 +4577,6 @@ class AdvancedSubEditor:
                 with ui.row().classes('items-center gap-2'):
                     ui.icon('tune', color='primary').classes('text-xl')
                     ui.label('订阅高级管理').classes('text-lg font-bold')
-                    ui.badge('购物车模式', color='orange').props('outline size=xs')
                 ui.button(icon='close', on_click=dlg.close).props('flat round dense color=grey')
 
             # --- 内容区 ---
