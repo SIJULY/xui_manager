@@ -3,30 +3,35 @@ version: '3.8'
 services:
   # 1. 主面板服务
   x-fusion-panel:
-    image: sijuly0713/x-fusion-panel:latest
+    build: .
     container_name: x-fusion-panel
     restart: always
+    # 仅监听本地端口，通过 Caddy 容器转发
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
       - ./data:/app/data
+      - ./app/main.py:/app/main.py
+      # ✨ 关键：挂载静态资源目录 (包含 world.json 和 x-install.sh)
+      - ./static:/app/static
     environment:
       - TZ=Asia/Shanghai
       - XUI_USERNAME=${XUI_USERNAME:-admin}
       - XUI_PASSWORD=${XUI_PASSWORD:-admin}
       - XUI_SECRET_KEY=${XUI_SECRET_KEY:-sijuly_secret_key}
 
-  # 2. 订阅转换服务 
+  # 2. 订阅转换服务
   subconverter:
     image: tindy2013/subconverter:latest
     container_name: subconverter
     restart: always
+    # 在 Docker 网络内部暴露端口 (给 Caddy 用)，不暴露到宿主机
     expose:
       - "25500"
     environment:
       - TZ=Asia/Shanghai
 
-  # 3. 反向代理服务 
+  # 3. 反向代理服务
   caddy:
     image: caddy:latest
     container_name: caddy
@@ -37,6 +42,7 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./caddy_data:/data
+    # 依赖关系：确保后端服务启动后再启动网关
     depends_on:
       - x-fusion-panel
       - subconverter
