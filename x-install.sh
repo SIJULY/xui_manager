@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# X-Fusion Panel 单机安装脚本 (v3.8 独立版)
+# X-Fusion Panel 单机安装脚本 (v3.9 修复版)
 # ==========================================
 
 # 1. 获取参数
@@ -24,7 +24,7 @@ fi
 # 例如: https://.../api/probe/register -> https://.../api/probe/push
 PUSH_API="${REGISTER_API/register/push}"
 
-echo "🚀 开始安装 X-Fusion 全能探针 (v3.8)..."
+echo "🚀 开始安装 X-Fusion 全能探针 (v3.9)..."
 echo "🔑 Token: $TOKEN"
 echo "📡 注册地址: $REGISTER_API"
 echo "📡 推送地址: $PUSH_API"
@@ -32,8 +32,9 @@ echo "🎯 测速目标: $PING_CT / $PING_CU / $PING_CM"
 
 # 4. 向面板发起注册请求 (主动注册)
 echo "☁️ 正在向面板注册服务器..."
-REG_RESPONSE=$(curl -s -X POST -H "Content-Type: application/json" -d "{\"token\":\"$TOKEN\"}" "$REGISTER_API")
-echo "   服务端响应: $REG_RESPONSE"
+# 注意：这里使用 -k 允许非受信任证书（防止自签证书报错），-L 跟随重定向
+REG_RESPONSE=$(curl -sk -L -X POST -H "Content-Type: application/json" -d "{\"token\":\"$TOKEN\"}" "$REGISTER_API")
+echo "    服务端响应: $REG_RESPONSE"
 echo ""
 
 # 5. 安装系统依赖
@@ -47,7 +48,7 @@ elif [ -f /etc/alpine-release ]; then
     apk add python3 iputils util-linux >/dev/null 2>&1
 fi
 
-# 6. 写入 Python 探针脚本 (v3.8 核心逻辑)
+# 6. 写入 Python 探针脚本
 # 使用 "PYTHON_EOF" (双引号) 防止 Shell 变量在 cat 阶段被提前展开
 cat > /root/x_fusion_agent.py << "PYTHON_EOF"
 import time, json, os, socket, sys, subprocess, re, platform
@@ -137,6 +138,7 @@ def get_info():
     global SERVER_URL
     data = {"token": TOKEN, "static": STATIC_CACHE}
     
+    # 如果 SERVER_URL 为空，自动获取公网 IP
     if not SERVER_URL:
         try:
             with urllib.request.urlopen("http://checkip.amazonaws.com", timeout=5, context=ssl_ctx) as r:
@@ -206,7 +208,7 @@ def push():
             req = urllib.request.Request(MANAGER_URL, data=js, headers={"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as r: pass
         except: pass
-        time.sleep(1)
+        time.sleep(5) # 上报间隔
 
 if __name__ == "__main__":
     push()
@@ -216,6 +218,10 @@ PYTHON_EOF
 echo "🔧 配置 Agent 参数..."
 sed -i "s|__MANAGER_URL__|$PUSH_API|g" /root/x_fusion_agent.py
 sed -i "s|__TOKEN__|$TOKEN|g" /root/x_fusion_agent.py
+
+# ✨✨✨ [修复关键点]：将占位符替换为空，触发自动 IP 获取逻辑 ✨✨✨
+sed -i "s|__SERVER_URL__||g" /root/x_fusion_agent.py
+
 # 注入测速点
 sed -i "s|__PING_CT__|$PING_CT|g" /root/x_fusion_agent.py
 sed -i "s|__PING_CU__|$PING_CU|g" /root/x_fusion_agent.py
