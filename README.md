@@ -20,6 +20,12 @@
 
 无论您是拥有大量 VPS 的集群管理者，还是追求极致效率的极客，X-Fusion 都能通过一个优雅的 Web 界面，为您提供 全景实时监控、WebSSH 批量运维、节点自动化管理 的一站式体验。
 
+
+***一键安装***
+
+```bash
+wget -O install.sh https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main/install.sh && chmod +x install.sh && ./install.sh
+```
 ---
 
 # ✨ 核心架构：混合双轨制 (Hybrid Monitor)
