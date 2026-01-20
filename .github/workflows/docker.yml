@@ -1,0 +1,40 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ "main" ]
+    # 意思是：只要 main 分支有代码提交，就触发这个任务
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 下载你的代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 安装 QEMU (为了能构建 ARM 架构镜像)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 3. 安装 Docker Buildx (构建工具)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 4. 登录 Docker Hub
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 5. 构建并推送 (这是最核心的一步)
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # 自动同时构建 AMD64 和 ARM64 两个版本
+          platforms: linux/amd64,linux/arm64
+          # 镜像名和标签
+          tags: sijuly0713/x-fusion-panel:latest
