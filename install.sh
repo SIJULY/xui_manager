@@ -7,6 +7,7 @@
 # --- 全局变量 ---
 PROJECT_NAME="x-fusion-panel"
 INSTALL_DIR="/root/${PROJECT_NAME}"
+# 请确保这是您正确的 GitHub 仓库 raw 地址
 REPO_URL="https://raw.githubusercontent.com/SIJULY/x-fusion-panel/main"
 
 # Caddy 配置标记
@@ -69,32 +70,41 @@ check_docker() {
 
 # 📥 [开发者模式专属] 下载源码到本地
 download_source_code() {
-    print_info "正在下载源代码（开发者模式）..."
+    print_info "正在下载源代码及静态资源（开发者模式）..."
     
+    # 1. 创建完整的文件夹结构
     mkdir -p ${INSTALL_DIR}/app
     mkdir -p ${INSTALL_DIR}/static
-
-    # 下载核心文件
-    curl -sS -o ${INSTALL_DIR}/Dockerfile ${REPO_URL}/Dockerfile
-    curl -sS -o ${INSTALL_DIR}/requirements.txt ${REPO_URL}/requirements.txt
-    curl -sS -o ${INSTALL_DIR}/app/main.py ${REPO_URL}/app/main.py
+    mkdir -p ${INSTALL_DIR}/data
     
-    # 下载静态资源 (示例，根据你仓库实际情况调整)
+    # 2. 下载核心代码 (Dockerfile, requirements, main.py)
+    # 使用 -H 'Cache-Control: no-cache' 确保下载最新版
+    curl -sS -H 'Cache-Control: no-cache' -o ${INSTALL_DIR}/Dockerfile ${REPO_URL}/Dockerfile
+    curl -sS -H 'Cache-Control: no-cache' -o ${INSTALL_DIR}/requirements.txt ${REPO_URL}/requirements.txt
+    curl -sS -H 'Cache-Control: no-cache' -o ${INSTALL_DIR}/app/main.py ${REPO_URL}/app/main.py
+    
+    # 3. 下载静态资源 (Static Files)
+    print_info "正在补全静态资源..."
+    # 您的自定义安装脚本
+    curl -sS -o ${INSTALL_DIR}/static/x-install.sh "${REPO_URL}/static/x-install.sh"
+    
+    # 第三方依赖 (xterm, echarts map等)
     curl -sS -o ${INSTALL_DIR}/static/xterm.css "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css"
     curl -sS -o ${INSTALL_DIR}/static/xterm.js "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"
     curl -sS -o ${INSTALL_DIR}/static/xterm-addon-fit.js "https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"
+    curl -sS -o ${INSTALL_DIR}/static/world.json "https://cdn.jsdelivr.net/npm/echarts@4.9.0/map/json/world.json"
     
-    # 简单的完整性检查
+    # 4. 简单检查
     if [ ! -f "${INSTALL_DIR}/app/main.py" ]; then
-        print_error "源码下载失败，请检查网络或仓库地址。"
+        print_error "源码下载失败！请检查您的 GitHub 仓库地址是否正确，或网络是否通畅。"
     fi
-    print_success "源码下载完成！你可以在 ${INSTALL_DIR}/app 中直接修改代码。"
+    print_success "源码下载完成！"
 }
 
 init_directories() {
     mkdir -p ${INSTALL_DIR}/data
     cd ${INSTALL_DIR}
-    # 初始化空数据文件
+    # 初始化空数据文件 (防止 Docker 自动创建目录)
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
     if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
@@ -120,13 +130,13 @@ EOF
     if [ "$MODE" == "dev" ]; then
         # === 开发者模式配置 ===
         cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
-    # 🛠️ [开发者模式] 使用本地构建 + 源码挂载
+    # 🛠️ [开发者模式] 本地构建 + 源码挂载
     build: .
     image: x-fusion-panel:dev
     volumes:
       - ./data:/app/data
-      # 🔥 核心：将宿主机当前目录挂载到容器 /app
-      # 这样你在宿主机修改 app/main.py，容器内立即生效
+      # 🔥 核心魔法：将宿主机当前目录挂载到容器 /app
+      # 这样你在 VPS 修改 app/main.py，重启容器即生效
       - ./:/app
 EOF
     else
@@ -186,8 +196,10 @@ configure_caddy_docker() {
     local DOMAIN=$1
     local DOCKER_CADDY_FILE="${INSTALL_DIR}/Caddyfile"
     
+    # 清理旧标记
     sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$DOCKER_CADDY_FILE"
     
+    # 追加新配置
     cat >> "$DOCKER_CADDY_FILE" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
@@ -210,10 +222,10 @@ install_panel() {
     check_docker
     init_directories
 
-    # 1. 选择模式
+    # 1. 选择安装模式
     echo "------------------------------------------------"
     echo "请选择安装模式："
-    echo -e "  1) ${GREEN}标准模式 (Standard)${PLAIN} - 推荐，使用官方镜像，稳定纯净"
+    echo -e "  1) ${GREEN}标准模式 (Standard)${PLAIN} - 推荐，直接拉取镜像，稳定纯净"
     echo -e "  2) ${YELLOW}开发者模式 (Developer)${PLAIN} - 下载源码到本地，修改代码重启即生效"
     echo "------------------------------------------------"
     read -p "选择模式 [1]: " mode_choice
@@ -222,7 +234,7 @@ install_panel() {
     local MODE_TAG="standard"
     if [ "$mode_choice" == "2" ]; then
         MODE_TAG="dev"
-        # 如果是开发者模式，必须先下载源码
+        # 开发者模式必选动作：下载源码
         download_source_code
     fi
 
@@ -248,50 +260,53 @@ install_panel() {
     read -p "选项 [2]: " net_choice
     net_choice=${net_choice:-2}
 
-    local port=8081
-    local bind="127.0.0.1"
-    local caddy="false"
-
     if [ "$net_choice" == "1" ]; then
         read -p "开放端口 [8081]: " port
         port=${port:-8081}
-        bind="0.0.0.0"
-        generate_compose "$bind" "$port" "$admin_user" "$admin_pass" "$secret_key" "false" "$MODE_TAG"
+        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key" "false" "$MODE_TAG"
+        
+        print_info "正在启动容器..."
+        # 开发模式需要构建，标准模式不需要
+        if [ "$MODE_TAG" == "dev" ]; then
+            cd ${INSTALL_DIR} && docker compose up -d --build
+        else
+            cd ${INSTALL_DIR} && docker compose up -d
+        fi
+        
+        local ip_addr=$(curl -s ifconfig.me)
+        print_success "安装成功！http://${ip_addr}:${port}"
 
     elif [ "$net_choice" == "3" ]; then
         read -p "内部端口 [8081]: " port
         port=${port:-8081}
         generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "false" "$MODE_TAG"
-        print_info "共存模式配置生成完毕。"
+        
+        print_info "正在启动容器..."
+        if [ "$MODE_TAG" == "dev" ]; then
+            cd ${INSTALL_DIR} && docker compose up -d --build
+        else
+            cd ${INSTALL_DIR} && docker compose up -d
+        fi
+        print_success "安装成功 (共存模式)。请手动反代 127.0.0.1:${port}"
 
     else
         read -p "输入域名: " domain
         if [ -z "$domain" ]; then print_error "域名不能为空"; fi
+        
         configure_caddy_docker "$domain"
         generate_compose "127.0.0.1" "8081" "$admin_user" "$admin_pass" "$secret_key" "true" "$MODE_TAG"
+        
+        print_info "正在启动容器..."
+        if [ "$MODE_TAG" == "dev" ]; then
+            cd ${INSTALL_DIR} && docker compose up -d --build
+        else
+            cd ${INSTALL_DIR} && docker compose up -d
+        fi
+        print_success "安装成功！https://${domain}"
     fi
 
-    # 4. 启动
-    print_info "正在启动容器..."
     if [ "$MODE_TAG" == "dev" ]; then
-        print_info "开发者模式：正在构建镜像..."
-        cd ${INSTALL_DIR} && docker compose up -d --build
-    else
-        print_info "标准模式：正在拉取镜像..."
-        cd ${INSTALL_DIR} && docker compose up -d
-    fi
-    
-    local ip_addr=$(curl -s ifconfig.me)
-    if [ "$net_choice" == "1" ]; then
-        print_success "安装成功！http://${ip_addr}:${port}"
-    elif [ "$net_choice" == "2" ]; then
-        print_success "安装成功！https://${domain}"
-    else
-        print_success "安装成功！请配置反代指向 127.0.0.1:${port}"
-    fi
-    
-    if [ "$MODE_TAG" == "dev" ]; then
-        echo -e "${YELLOW}提示：代码位于 ${INSTALL_DIR}/app，修改后执行 docker compose restart 即可生效。${PLAIN}"
+        echo -e "${YELLOW}提示：代码位于 ${INSTALL_DIR}，修改后执行 docker compose restart 即可生效。${PLAIN}"
     fi
 }
 
@@ -319,9 +334,7 @@ update_panel() {
         print_info "检测到当前为【标准模式】"
     fi
 
-    # 提取端口和 Caddy 状态 (逻辑同上，省略部分重复细节以保持脚本整洁)
-    # ... (此处复用你原来的提取端口逻辑，为节省篇幅未展开，实际使用需保留) ...
-    # 简易提取逻辑：
+    # 提取端口和 Caddy 状态
     if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
         BIND_IP="127.0.0.1"
         OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*127.0.0.1:([0-9]+):8080.*/\1/' | tr -d ' "-')
@@ -338,21 +351,24 @@ update_panel() {
 
     # 根据模式执行更新
     if [ "$IS_DEV" == "true" ]; then
-        # 开发者模式：询问是否覆盖代码
-        read -p "是否从仓库拉取最新代码覆盖本地修改？(y/n) [n]: " pull_code
+        echo -e "${YELLOW}您处于开发者模式。${PLAIN}"
+        read -p "是否强制从 GitHub 拉取最新代码覆盖本地修改？(y/n) [n]: " pull_code
         if [ "$pull_code" == "y" ]; then
             download_source_code
-            print_success "代码已更新。"
+            print_success "代码已更新（本地修改已覆盖）。"
         else
-            print_info "跳过代码更新，保留本地修改。"
+            print_info "跳过代码更新，保留本地文件。"
         fi
-        # 重新生成配置
+        
+        # 重新生成配置 (保持开发者模式)
         generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY" "dev"
         print_info "正在重新构建..."
         docker compose up -d --build
     else
-        # 标准模式：清理旧代码文件
+        # 标准模式：清理旧代码文件 (保持整洁)
         rm -rf app/ static/ Dockerfile requirements.txt
+        
+        # 重新生成配置 (保持标准模式)
         generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY" "standard"
         print_info "正在拉取最新镜像..."
         docker compose pull
