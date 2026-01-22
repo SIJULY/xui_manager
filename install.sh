@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# X-Fusion Panel 一键安装/管理脚本 (Docker Hub 发行版 + 智能清理)
+# X-Fusion Panel 一键安装/管理脚本 (支持开发调试模式)
 # ==============================================================================
 
 # --- 全局变量 ---
@@ -68,14 +68,12 @@ check_docker() {
 # --- 核心功能 ---
 
 migrate_old_data() {
-    # 迁移旧版目录结构（如果有）
     if [ -d "$OLD_INSTALL_DIR" ] && [ ! -d "$INSTALL_DIR" ]; then
         print_warning "正在迁移旧版数据..."
         cd "$OLD_INSTALL_DIR"
         docker compose down 2>/dev/null
         cd /root
         mv "$OLD_INSTALL_DIR" "$INSTALL_DIR"
-        # 重命名旧的 compose 文件以防冲突
         if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
             mv "$INSTALL_DIR/docker-compose.yml" "$INSTALL_DIR/docker-compose.yml.bak"
         fi
@@ -83,15 +81,35 @@ migrate_old_data() {
 }
 
 init_directories() {
-    # 只创建必要的配置目录，不下载代码
     mkdir -p ${INSTALL_DIR}/data
     cd ${INSTALL_DIR}
 
-    # 初始化空数据文件，防止 Docker 自动创建为文件夹导致报错
     if [ ! -f "data/servers.json" ]; then echo "[]" > data/servers.json; fi
     if [ ! -f "data/subscriptions.json" ]; then echo "[]" > data/subscriptions.json; fi
     if [ ! -f "data/admin_config.json" ]; then echo "{}" > data/admin_config.json; fi
     if [ ! -f "Caddyfile" ]; then touch Caddyfile; fi
+}
+
+# 🔥 新增功能：如果本地没有代码，从镜像里“抠”出来
+ensure_source_code() {
+    if [ ! -d "app" ] || [ ! -f "requirements.txt" ]; then
+        print_warning "本地未检测到源码，正在从 Docker 镜像中提取..."
+        
+        # 确保有镜像
+        docker pull sijuly0713/x-fusion-panel:latest
+        
+        # 创建临时容器并拷贝文件
+        local TEMP_ID=$(docker create sijuly0713/x-fusion-panel:latest)
+        
+        # 将容器内的 /app 目录下的所有内容拷贝到当前目录 (.)
+        # 注意：容器内 WORKDIR 是 /app，所以我们要拷 /app/. 到主机
+        docker cp ${TEMP_ID}:/app/. .
+        
+        docker rm -v ${TEMP_ID} >/dev/null
+        print_success "源码提取完成！现在你可以直接修改当前目录下的文件了。"
+    else
+        print_info "检测到本地已有源码，跳过提取。"
+    fi
 }
 
 generate_compose() {
@@ -100,27 +118,49 @@ generate_compose() {
     local USER=$3
     local PASS=$4
     local SECRET=$5 
-    local ENABLE_CADDY=$6 
+    local ENABLE_CADDY=$6
+    local IS_DEV_MODE=$7  # 新增参数：是否为开发模式
 
-    # 生成 docker-compose.yml
+    # 开始生成 compose
     cat > ${INSTALL_DIR}/docker-compose.yml << EOF
 version: '3.8'
 services:
   x-fusion-panel:
-    # 🔥 核心：直接使用 Docker Hub 镜像 (无需本地构建)
     image: sijuly0713/x-fusion-panel:latest
     container_name: x-fusion-panel
     restart: always
     ports:
       - "${BIND_IP}:${PORT}:8080"
     volumes:
-      # 🔥 核心：只挂载数据，不挂载代码
       - ./data:/app/data
+EOF
+
+    # 🔥 核心修改：如果是开发模式，挂载当前目录到容器
+    if [ "$IS_DEV_MODE" == "true" ]; then
+        cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
+      # --- 开发模式挂载 ---
+      - ./:/app
+EOF
+    fi
+
+    # 继续写入环境变量
+    cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
     environment:
       - TZ=Asia/Shanghai
       - XUI_USERNAME=${USER}
       - XUI_PASSWORD=${PASS}
       - XUI_SECRET_KEY=${SECRET}
+EOF
+
+    # 如果是开发模式，开启调试环境变量 (可选)
+    if [ "$IS_DEV_MODE" == "true" ]; then
+        cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
+      - DEBUG=true
+EOF
+    fi
+
+    # 写入 subconverter 服务
+    cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
 
   subconverter:
     image: tindy2013/subconverter:latest
@@ -132,7 +172,7 @@ services:
       - TZ=Asia/Shanghai
 EOF
 
-    # 如果启用 Caddy，追加配置
+    # 写入 Caddy 服务
     if [ "$ENABLE_CADDY" == "true" ]; then
         cat >> ${INSTALL_DIR}/docker-compose.yml << EOF
 
@@ -157,10 +197,8 @@ configure_caddy_docker() {
     local DOMAIN=$1
     local DOCKER_CADDY_FILE="${INSTALL_DIR}/Caddyfile"
     
-    # 清理旧标记
     sed -i "/${CADDY_MARK_START}/,/${CADDY_MARK_END}/d" "$DOCKER_CADDY_FILE"
     
-    # 写入新配置
     cat >> "$DOCKER_CADDY_FILE" << EOF
 ${CADDY_MARK_START}
 ${DOMAIN} {
@@ -183,6 +221,21 @@ install_panel() {
     check_docker
     migrate_old_data
     init_directories
+
+    # --- 模式选择 ---
+    echo "------------------------------------------------"
+    echo "请选择安装模式："
+    echo "  1) 标准模式 (推荐，代码封装在镜像内，自动清理源码)"
+    echo "  2) 开发者模式 (源码保留在VPS，修改文件后重启生效)"
+    read -p "选项 [1]: " install_mode
+    install_mode=${install_mode:-1}
+    
+    local is_dev="false"
+    if [ "$install_mode" == "2" ]; then
+        is_dev="true"
+        # 确保本地有代码
+        ensure_source_code
+    fi
 
     # 默认值
     local def_user="admin"
@@ -208,21 +261,33 @@ install_panel() {
     if [ "$net_choice" == "1" ]; then
         read -p "开放端口 [8081]: " port
         port=${port:-8081}
-        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key" "false"
+        generate_compose "0.0.0.0" "$port" "$admin_user" "$admin_pass" "$secret_key" "false" "$is_dev"
         
-        print_info "正在拉取镜像并启动..."
+        print_info "正在启动..."
         docker compose up -d
         ip_addr=$(curl -s ifconfig.me)
         print_success "安装成功！http://${ip_addr}:${port}"
+        if [ "$is_dev" == "true" ]; then
+            print_warning "当前为【开发者模式】，源码位于: ${INSTALL_DIR}"
+            print_warning "修改源码后，请运行 'docker compose restart x-fusion-panel' 生效。"
+        else
+            # 标准模式清理源码
+            rm -rf app/ static/ requirements.txt Dockerfile
+        fi
 
     elif [ "$net_choice" == "3" ]; then
         read -p "内部端口 [8081]: " port
         port=${port:-8081}
-        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "false"
+        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "false" "$is_dev"
         
-        print_info "正在拉取镜像并启动..."
+        print_info "正在启动..."
         docker compose up -d
         print_success "容器已启动 (共存模式)。请手动配置宿主机 Nginx 反代 127.0.0.1:${port}"
+        if [ "$is_dev" == "true" ]; then
+             print_warning "当前为【开发者模式】，源码位于: ${INSTALL_DIR}"
+        else
+             rm -rf app/ static/ requirements.txt Dockerfile
+        fi
 
     else
         read -p "输入域名: " domain
@@ -230,11 +295,16 @@ install_panel() {
         port=8081
         
         configure_caddy_docker "$domain"
-        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "true"
+        generate_compose "127.0.0.1" "$port" "$admin_user" "$admin_pass" "$secret_key" "true" "$is_dev"
         
-        print_info "正在拉取镜像并启动..."
+        print_info "正在启动..."
         docker compose up -d
         print_success "安装成功！https://${domain}"
+        if [ "$is_dev" == "true" ]; then
+             print_warning "当前为【开发者模式】，源码位于: ${INSTALL_DIR}"
+        else
+             rm -rf app/ static/ requirements.txt Dockerfile
+        fi
     fi
 }
 
@@ -242,7 +312,6 @@ update_panel() {
     if [ ! -d "${INSTALL_DIR}" ]; then print_error "未检测到安装目录。"; fi
     cd ${INSTALL_DIR}
     
-    # 备份当前配置
     if [ -f "docker-compose.yml" ]; then
         cp docker-compose.yml docker-compose.yml.bak
     fi
@@ -252,13 +321,19 @@ update_panel() {
     print_info "正在提取旧配置..."
     CONFIG_FILE="docker-compose.yml.bak"
 
-    # 1. 提取旧参数
     OLD_USER=$(grep "XUI_USERNAME=" $CONFIG_FILE | cut -d= -f2)
     OLD_PASS=$(grep "XUI_PASSWORD=" $CONFIG_FILE | cut -d= -f2)
     OLD_KEY=$(grep "XUI_SECRET_KEY=" $CONFIG_FILE | cut -d= -f2)
     PORT_LINE=$(grep ":8080" $CONFIG_FILE | head -n 1)
     
-    # 2. 判断网络模式
+    # 检查旧配置是否包含挂载 (判断之前是不是开发模式)
+    if grep -q "\./:/app" $CONFIG_FILE; then
+        PREV_DEV_MODE="true"
+        print_info "检测到之前是【开发者模式】。"
+    else
+        PREV_DEV_MODE="false"
+    fi
+
     if [[ $PORT_LINE == *"127.0.0.1"* ]]; then
         BIND_IP="127.0.0.1"
         OLD_PORT=$(echo "$PORT_LINE" | sed -E 's/.*127.0.0.1:([0-9]+):8080.*/\1/' | tr -d ' "-')
@@ -274,28 +349,37 @@ update_panel() {
         ENABLE_CADDY="false"
     fi
 
-    # 3. 停止并清理旧容器
+    # --- 询问是否保留/切换开发模式 ---
+    echo "------------------------------------------------"
+    echo "请选择更新模式："
+    echo "  1) 标准模式 (重置为官方镜像，清理多余文件)"
+    echo "  2) 开发者模式 (保留/提取源码，用于调试)"
+    read -p "选项 [1]: " update_mode
+    update_mode=${update_mode:-1}
+
+    local is_dev="false"
+    if [ "$update_mode" == "2" ]; then
+        is_dev="true"
+    fi
+
     print_info "停止旧容器..."
     docker compose down
-    if docker ps -a | grep -q "xui_manager"; then docker rm -f xui_manager 2>/dev/null; fi
 
-    # =======================================================
-    # ✨✨✨ 自动清理：删除旧版遗留的源码文件 ✨✨✨
-    # =======================================================
-    print_info "正在清理旧版冗余源码文件..."
-    rm -rf app/
-    rm -rf static/
-    rm -f Dockerfile requirements.txt x_fusion_agent.py
-    # 绝对保留 data/ 和 Caddyfile
-    # =======================================================
+    # --- 关键逻辑：清理 vs 提取 ---
+    if [ "$is_dev" == "true" ]; then
+        # 即使之前不是开发模式，现在选了开发模式，也要把代码弄出来
+        ensure_source_code
+    else
+        # 选了标准模式，清理掉源码，保持整洁
+        print_info "正在清理旧版冗余源码文件..."
+        rm -rf app/ static/ templates/
+        rm -f Dockerfile requirements.txt x_fusion_agent.py
+    fi
 
-    # 4. 重新初始化目录 (确保 data 存在)
     init_directories
 
-    # 5. 重新生成配置
-    generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY"
+    generate_compose "$BIND_IP" "$OLD_PORT" "$OLD_USER" "$OLD_PASS" "$OLD_KEY" "$ENABLE_CADDY" "$is_dev"
 
-    # 如果是 Caddy 模式，恢复 Caddyfile 配置
     if [ "$ENABLE_CADDY" == "true" ] && [ -f "Caddyfile" ]; then
           EXISTING_DOMAIN=$(grep " {" Caddyfile | head -n 1 | awk '{print $1}')
           if [ -n "$EXISTING_DOMAIN" ]; then
@@ -303,15 +387,19 @@ update_panel() {
           fi
     fi
 
-    # 6. 拉取最新镜像并启动
-    print_info "正在拉取最新 Docker 镜像..."
+    print_info "正在拉取最新镜像..."
     docker compose pull
     print_info "正在重启容器..."
     docker compose up -d
     
-    # 清理无用的旧镜像
     docker image prune -f
-    print_success "更新完成！旧版冗余文件已清理。"
+    
+    if [ "$is_dev" == "true" ]; then
+        print_success "更新完成！目前处于【开发者模式】。"
+        print_info "你可以直接修改 ${INSTALL_DIR}/app 下的文件，修改后重启容器生效。"
+    else
+        print_success "更新完成！目前处于【标准模式】。"
+    fi
 }
 
 uninstall_panel() {
@@ -331,10 +419,10 @@ uninstall_panel() {
 check_root
 clear
 echo -e "${GREEN}=========================================${PLAIN}"
-echo -e "${GREEN}   X-Fusion Panel 一键管理 (Docker Hub版)   ${PLAIN}"
+echo -e "${GREEN}   X-Fusion Panel 一键管理 (支持Dev模式)   ${PLAIN}"
 echo -e "${GREEN}=========================================${PLAIN}"
 echo -e "  1. 安装面板"
-echo -e "  2. 更新面板 (自动清理旧文件)"
+echo -e "  2. 更新面板"
 echo -e "  3. 卸载面板"
 echo -e "  0. 退出"
 echo -e ""
