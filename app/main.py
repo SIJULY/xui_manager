@@ -8477,7 +8477,7 @@ def render_sidebar_content():
 
         def on_drag_start(e, name): global _current_dragged_group; _current_dragged_group = name
 
-        # --- B. 自定义分组 ---
+        # --- B. 自定义分组  ---
         final_tags = ADMIN_CONFIG.get('custom_groups', [])
         async def on_tag_drop(e, target_name):
             global _current_dragged_group
@@ -8500,28 +8500,26 @@ def render_sidebar_content():
                 is_open = tag_group in EXPANDED_GROUPS
                 
                 with ui.element('div').classes('w-full').on('dragover.prevent', lambda _: None).on('drop', lambda e, n=tag_group: on_tag_drop(e, n)):
-                    # 分组面板：样式与区域分组保持完全一致
+                    # 分组面板
                     with ui.expansion('', icon=None, value=is_open).classes('w-full border border-slate-700 rounded-xl mb-2 bg-[#0f172a] shadow-sm transition-all').props('expand-icon-toggle header-class="bg-[#0f172a] hover:bg-[#172033]"').on_value_change(lambda e, g=tag_group: EXPANDED_GROUPS.add(g) if e.value else EXPANDED_GROUPS.discard(g)) as exp:
                         
-                        # ✨✨✨ 核心修复：Header 布局重写 ✨✨✨
+                        # Header 布局
                         with exp.add_slot('header'):
-                            # 外层容器：强制不换行 (no-wrap)，垂直居中 (items-center)
                             with ui.row().classes('w-full h-full items-center justify-between no-wrap py-2 cursor-pointer group/header transition-all').on('click', lambda _, g=tag_group: refresh_content('TAG', g)):
                                 
-                                # 左侧区域：拖拽图标 + 文件夹图标 + 分组名称
+                                # 左侧区域
                                 with ui.row().classes('items-center gap-3 flex-grow overflow-hidden no-wrap'):
                                     # 1. 拖拽手柄
                                     ui.icon('drag_indicator').props('draggable="true"').classes('cursor-move text-slate-600 hover:text-slate-400 p-1 rounded transition-colors group-hover/header:text-slate-400').on('dragstart', lambda e, n=tag_group: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
                                     
-                                    # 2. 图标与名称的容器 (确保紧凑对齐)
+                                    # 2. 组名 (已移除图标)
                                     with ui.row().classes('items-center gap-2 flex-grow overflow-hidden no-wrap'):
-                                        ui.icon('folder', color='yellow').classes('opacity-80 text-lg flex-shrink-0')
+                                        # 🗑️ 已删除: ui.icon('folder', color='yellow')...
                                         ui.label(tag_group).classes('font-bold text-slate-300 truncate group-hover/header:text-white text-sm')
 
-                                # 右侧区域：设置按钮 + 数量角标
+                                # 右侧区域：设置按钮 + 数量
                                 with ui.row().classes('items-center gap-2 pr-2 flex-shrink-0').on('mousedown.stop').on('click.stop'):
                                     ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').classes('hover:text-white').tooltip('管理分组')
-                                    # 数量角标 (灰色风格，与区域分组的绿色区分开，也可改为 green-9/green-4 保持一致)
                                     ui.badge(str(len(tag_servers)), color='grey-9').props('rounded outline text-color=grey-4')
                         
                         # 注册分组容器
