@@ -5004,7 +5004,7 @@ def open_quick_group_create_dialog(callback=None):
             ui.button('创建并保存', on_click=save).classes('bg-blue-600 text-white shadow-md')
     d.open()
 
-# ================= 1.探针视图(分组)排序弹窗 =================
+# ================= 1.探针视图(分组)排序弹窗 (深色适配版) =================
 def open_group_sort_dialog():
     # 读取当前分组
     current_groups = ADMIN_CONFIG.get('probe_custom_groups', [])
@@ -5015,39 +5015,47 @@ def open_group_sort_dialog():
     # 临时列表用于编辑
     temp_list = list(current_groups)
 
-    with ui.dialog() as d, ui.card().style('width: 400px; max-width: 95vw; height: 60vh; display: flex; flex-direction: column; padding: 0; gap: 0;'):
+    # 弹窗容器：深色背景 + 边框
+    with ui.dialog() as d, ui.card().classes('w-[400px] max-w-[95vw] h-[60vh] flex flex-col p-0 gap-0 bg-[#1e293b] border border-slate-700 shadow-2xl'):
         
-        # 顶部
-        with ui.row().classes('w-full p-4 border-b justify-between items-center bg-gray-50'):
-            ui.label('自定义排序 (点击箭头移动)').classes('font-bold text-gray-700')
+        # --- 顶部标题 (bg-[#0f172a]) ---
+        with ui.row().classes('w-full p-4 border-b border-slate-700 justify-between items-center bg-[#0f172a] flex-shrink-0'):
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('sort', color='blue').classes('text-lg')
+                ui.label('视图排序').classes('font-bold text-slate-200 text-base')
             ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
         
-        # 列表容器
-        list_container = ui.element('div').classes('w-full bg-slate-50 p-2 gap-2').style('flex-grow: 1; overflow-y: auto; display: flex; flex-direction: column;')
+        # --- 列表容器 (bg-[#1e293b]) ---
+        with ui.scroll_area().classes('w-full flex-grow p-3'):
+            list_container = ui.column().classes('w-full gap-2')
 
         def render_list():
             list_container.clear()
             with list_container:
                 for i, name in enumerate(temp_list):
-                    with ui.card().classes('w-full p-3 flex-row items-center gap-3 border border-gray-200 shadow-sm'):
+                    # 列表项：深色卡片风格
+                    with ui.row().classes('w-full p-3 items-center gap-3 border border-slate-700 rounded-lg bg-[#0f172a] shadow-sm transition-all hover:border-blue-500'):
                         # 序号
-                        ui.label(str(i+1)).classes('text-xs text-gray-400 w-4')
+                        ui.label(str(i+1)).classes('text-xs text-slate-500 font-mono w-4 text-center font-bold')
+                        
                         # 组名
-                        ui.label(name).classes('font-bold text-gray-700 flex-grow text-sm')
+                        ui.label(name).classes('font-bold text-slate-300 flex-grow text-sm truncate')
                         
                         # 移动按钮
                         with ui.row().classes('gap-1'):
                             # 上移
                             if i > 0:
-                                ui.button(icon='arrow_upward', on_click=lambda _, idx=i: move_item(idx, -1)).props('flat dense round size=sm color=blue')
+                                ui.button(icon='arrow_upward', on_click=lambda _, idx=i: move_item(idx, -1)) \
+                                    .props('flat dense round size=xs color=blue-4').classes('hover:bg-slate-700')
                             else:
-                                ui.element('div').classes('w-8') # 占位
+                                ui.element('div').classes('w-6') # 占位
                             
                             # 下移
                             if i < len(temp_list) - 1:
-                                ui.button(icon='arrow_downward', on_click=lambda _, idx=i: move_item(idx, 1)).props('flat dense round size=sm color=blue')
+                                ui.button(icon='arrow_downward', on_click=lambda _, idx=i: move_item(idx, 1)) \
+                                    .props('flat dense round size=xs color=blue-4').classes('hover:bg-slate-700')
                             else:
-                                ui.element('div').classes('w-8')
+                                ui.element('div').classes('w-6')
 
         def move_item(index, direction):
             target = index + direction
@@ -5057,15 +5065,18 @@ def open_group_sort_dialog():
 
         render_list()
 
-        # 底部保存
+        # --- 底部保存 (bg-[#0f172a]) ---
         async def save():
             ADMIN_CONFIG['probe_custom_groups'] = temp_list
             await save_admin_config()
             safe_notify("✅ 分组顺序已更新", "positive")
             d.close()
+            # 尝试刷新探针设置页面的视图列表
+            try: await render_probe_page()
+            except: pass
 
-        with ui.row().classes('w-full p-4 border-t bg-white'):
-            ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-slate-900 text-white shadow-lg')
+        with ui.row().classes('w-full p-4 border-t border-slate-700 bg-[#0f172a] flex-shrink-0'):
+            ui.button('保存顺序', icon='save', on_click=save).classes('w-full bg-blue-600 text-white shadow-lg hover:bg-blue-500')
     
     d.open()
 import traceback # 引入用于打印报错堆栈
