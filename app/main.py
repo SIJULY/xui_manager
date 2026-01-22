@@ -6443,7 +6443,7 @@ COLS_ALL_SERVERS = 'grid-template-columns: 2fr 2fr 1.5fr 1fr 0.8fr 0.8fr 1.5fr; 
 
 # 5. 区域分组专用布局  ✨✨✨
 # 格式: 服务器(150) 备注(200) 在线状态(1fr) 流量(100) 协议(80) 端口(80) 操作(150)
-COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2.5fr 1.5fr 1.5fr 1fr 0.8fr 0.8fr 1.5fr; align-items: center;'
+COLS_SPECIAL_WITH_PING = 'grid-template-columns: 2fr 2fr 1.5fr 1fr 0.8fr 0.8fr 1.5fr; align-items: center;'
 
 # 6. 单服务器专用布局 (移除延迟列 90px，格式与 All Servers 一致) ✨✨✨
 # 格式: 备注(200) 所在组(1fr) 流量(100) 协议(80) 端口(80) 状态(100) 操作(150)
@@ -8509,18 +8509,18 @@ def render_sidebar_content():
                                 
                                 # 左侧区域
                                 with ui.row().classes('items-center gap-3 flex-grow overflow-hidden no-wrap'):
-                                    # 1. 拖拽手柄
+                                    # 拖拽手柄
                                     ui.icon('drag_indicator').props('draggable="true"').classes('cursor-move text-slate-600 hover:text-slate-400 p-1 rounded transition-colors group-hover/header:text-slate-400').on('dragstart', lambda e, n=tag_group: on_drag_start(e, n)).on('click.stop').tooltip('按住拖拽')
                                     
-                                    # 2. 组名 (已移除图标)
+                                    # 组名
                                     with ui.row().classes('items-center gap-2 flex-grow overflow-hidden no-wrap'):
-                                        # 🗑️ 已删除: ui.icon('folder', color='yellow')...
                                         ui.label(tag_group).classes('font-bold text-slate-300 truncate group-hover/header:text-white text-sm')
 
                                 # 右侧区域：设置按钮 + 数量
                                 with ui.row().classes('items-center gap-2 pr-2 flex-shrink-0').on('mousedown.stop').on('click.stop'):
                                     ui.button(icon='settings', on_click=lambda _, g=tag_group: open_combined_group_management(g)).props('flat dense round size=xs color=grey-6').classes('hover:text-white').tooltip('管理分组')
-                                    ui.badge(str(len(tag_servers)), color='grey-9').props('rounded outline text-color=grey-4')
+                                    
+                                    ui.badge(str(len(tag_servers)), color='green-9').props('rounded outline text-color=green-4')
                         
                         # 注册分组容器
                         with ui.column().classes('w-full gap-2 p-2 bg-[#172033] border-t border-slate-800') as col:
@@ -8837,7 +8837,7 @@ def main_page(request: Request):
     # ================= 4. UI 构建 (深色布局核心) =================
     
     # ✨ 修改点：左侧抽屉背景色
-    with ui.left_drawer(value=True, fixed=True).classes('bg-[#1e293b] border-r border-slate-700').props('width=320 bordered') as drawer:
+    with ui.left_drawer(value=True, fixed=True).classes('bg-[#1e293b] border-r border-slate-700').props('width=360 bordered') as drawer:
         render_sidebar_content()
 
     # ✨ 修改点：顶部导航栏背景色
