@@ -2550,8 +2550,9 @@ class XUIManager:
         target_url = f"{self.url}{path}"
         for attempt in range(2):
             try:
-                if method == 'POST': return self.session.post(target_url, timeout=5, allow_redirects=False, **kwargs)
-                else: return self.session.get(target_url, timeout=5, allow_redirects=False, **kwargs)
+                # ✨ 终极修复 1：将超时时间延长到 30 秒，彻底治愈甲骨文 AMD 卡顿
+                if method == 'POST': return self.session.post(target_url, timeout=30, allow_redirects=False, **kwargs)
+                else: return self.session.get(target_url, timeout=30, allow_redirects=False, **kwargs)
             except Exception as e:
                 if attempt == 1: return None
 
@@ -2626,19 +2627,59 @@ class XUIManager:
     def delete_inbound(self, iid): return self._action(f'/del/{iid}', {})
     
     def _action(self, suffix, data):
-        if not self.login(): return False, "登录失败"
-        base = self.login_path.replace('/login', '/inbound')
+        if not self.login(): 
+            logger.error("❌ [API] 未登录，无法执行操作")
+            return False, "登录失败"
+            
+        # ✨ 终极修复：如果是在根目录登录的，节点管理的真实路径应该在 /xui/inbound 下
+        if self.login_path == '/login':
+            base = '/xui/inbound'
+        else:
+            base = self.login_path.replace('/login', '/inbound')
         path = f"{base}{suffix}"
         
-        # print(f"🔵 [用户操作] 正在提交: {self.url}{path}", flush=True)
-        r = self._request('POST', path, json=data)
-        if r: 
-            try: 
+        # ✨ 1. 深度清洗并转换数据 (修复 Python/Go 布尔值与 JSON 兼容陷阱)
+        import json
+        payload = {}
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                payload[k] = json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, bool):
+                payload[k] = "true" if v else "false" # Go 语言只认小写 true
+            else:
+                payload[k] = str(v)
+
+        # ✨ 2. 极限调试日志
+        target_url = f"{self.url}{path}"
+        logger.info(f"🔍 [API Debug] 发送目标: {target_url}")
+        logger.info(f"📦 [API Debug] 原始数据: {data}")
+        logger.info(f"🚀 [API Debug] 序列化后: {payload}")
+
+        try:
+            logger.info("⏳ [API Debug] 等待 X-UI 后端响应 (最长30秒)...")
+            
+            # 强制指定 Accept 接受 JSON
+            headers = {'Accept': 'application/json'}
+            r = self.session.post(target_url, data=payload, headers=headers, timeout=30, allow_redirects=False)
+            
+            # ✨ 3. 打印极详尽的响应结果
+            logger.info(f"✅ [API Debug] 响应状态码: {r.status_code}")
+            logger.info(f"📄 [API Debug] 原始返回内容: {r.text[:1000]}") 
+            
+            if r.status_code == 200:
                 resp = r.json()
-                if resp.get('success'): return True, resp.get('msg')
-                else: return False, f"后端拒绝: {resp.get('msg')}"
-            except Exception as e: return False, f"解析失败 ({r.status_code})"
-        return False, "请求无响应 (超时)"
+                if resp.get('success'): 
+                    return True, resp.get('msg')
+                else: 
+                    return False, f"后端拒绝: {resp.get('msg')}"
+            else:
+                return False, f"HTTP错误: {r.status_code}"
+                
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ [API Debug] 网络底层错误: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False, f"请求异常: {str(e)}"
 
 def get_manager(server_conf):
     # --- 优先级 1：SSH / Root 探针模式 (上帝模式) ---
@@ -2903,11 +2944,9 @@ async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False)
     # ✨✨✨ 核心守门员逻辑 ✨✨✨
     # 如果已安装探针，且不是初次加载（即缓存里有数据），直接信任推送的数据
     # 这意味着后台任务不会再尝试登录该服务器的 API
-    if server_conf.get('probe_installed', False):
-        # 只要缓存里有数据，就认为同步成功，直接返回缓存
-        # 这样就实现了：探针机器 -> 被动接收；普通机器 -> 主动拉取
+    # 如果已安装探针，且当前不是人类触发的强制刷新，才使用缓存
+    if server_conf.get('probe_installed', False) and not force_refresh:
         return NODES_DATA.get(url, [])
-
     # --- 以下是针对普通机器 (无探针) 的原有主动拉取逻辑 ---
     name = server_conf.get('name', '未命名')
     
