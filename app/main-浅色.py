@@ -2555,15 +2555,6 @@ class XUIManager:
         self.session.verify = False 
         self.login_path = None
 
-    def _request(self, method, path, **kwargs):
-        target_url = f"{self.url}{path}"
-        for attempt in range(2):
-            try:
-                if method == 'POST': return self.session.post(target_url, timeout=5, allow_redirects=False, **kwargs)
-                else: return self.session.get(target_url, timeout=5, allow_redirects=False, **kwargs)
-            except Exception as e:
-                if attempt == 1: return None
-
     def login(self):
         if self.login_path:
             if self._try_login_at(self.login_path): return True
@@ -2606,23 +2597,17 @@ class XUIManager:
                 except: pass
         return None
 
-
     def get_server_status(self):
         """获取服务器系统状态 (CPU, 内存, 硬盘, Uptime)"""
         if not self.login(): return None
-        
-        # 适配不同版本的 X-UI API 路径
         candidates = []
         if self.login_path: candidates.append(self.login_path.replace('login', 'server/status'))
         defaults = ['/xui/server/status', '/panel/server/status', '/server/status']
         if self.api_prefix: defaults.insert(0, f"{self.api_prefix}/server/status")
-        
         for d in defaults: 
             if d not in candidates: candidates.append(d)
-            
         for path in candidates:
             try:
-                # server/status 通常是 POST 请求
                 r = self._request('POST', path)
                 if r and r.status_code == 200:
                     res = r.json()
@@ -2633,14 +2618,41 @@ class XUIManager:
     def add_inbound(self, data): return self._action('/add', data)
     def update_inbound(self, iid, data): return self._action(f'/update/{iid}', data)
     def delete_inbound(self, iid): return self._action(f'/del/{iid}', {})
-    
+
+    # ✨ 修正：这里开始往下的缩进必须保持在 XUIManager 类里面
+    def _request(self, method, path, **kwargs):
+        target_url = f"{self.url}{path}"
+        for attempt in range(2):
+            try:
+                # ✨ 终极修复 1：将超时时间延长到 30 秒，彻底治愈甲骨文 AMD 卡顿
+                if method == 'POST': return self.session.post(target_url, timeout=30, allow_redirects=False, **kwargs)
+                else: return self.session.get(target_url, timeout=30, allow_redirects=False, **kwargs)
+            except Exception as e:
+                if attempt == 1: return None
+
     def _action(self, suffix, data):
         if not self.login(): return False, "登录失败"
-        base = self.login_path.replace('/login', '/inbound')
+        
+        # ✨ 终极修复 2：智能修正 API 路径
+        if self.login_path == '/login':
+            base = '/xui/inbound'
+        else:
+            base = self.login_path.replace('/login', '/inbound')
         path = f"{base}{suffix}"
         
-        # print(f"🔵 [用户操作] 正在提交: {self.url}{path}", flush=True)
-        r = self._request('POST', path, json=data)
+        # ✨ 终极修复 3：补全布尔值转换，彻底治好 X-UI 的洁癖
+        import json
+        payload = {}
+        for k, v in data.items():
+            if isinstance(v, (dict, list)):
+                payload[k] = json.dumps(v, ensure_ascii=False)
+            elif isinstance(v, bool):
+                payload[k] = "true" if v else "false" # <--- 之前漏掉的关键修正
+            else:
+                payload[k] = str(v)
+
+        # ✨ 终极修复 4：使用 data=payload 强制表单提交
+        r = self._request('POST', path, data=payload)
         if r: 
             try: 
                 resp = r.json()
@@ -2648,7 +2660,7 @@ class XUIManager:
                 else: return False, f"后端拒绝: {resp.get('msg')}"
             except Exception as e: return False, f"解析失败 ({r.status_code})"
         return False, "请求无响应 (超时)"
-
+        
 def get_manager(server_conf):
     # --- 优先级 1：SSH / Root 探针模式 (上帝模式) ---
     # 只要检测到安装了探针且配置了 SSH Host，无论有没有 API 账号，都优先走 SSH 通道。
@@ -3973,7 +3985,7 @@ async def smart_detect_ssh_user_task(server_conf):
     """
     # 待测试的用户名列表 (优先尝试 ubuntu，失败则尝试 root)
     # 你可以在这里添加更多，比如 'ec2-user', 'debian', 'opc'
-    candidates = ['ubuntu', 'root'] 
+    candidates = ['root', 'ubuntu']
     
     ip = server_conf['url'].split('://')[-1].split(':')[0]
     original_user = server_conf.get('ssh_user', '')
@@ -4278,25 +4290,33 @@ class InboundEditor:
         if 'sniffing' not in self.d: 
             self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
 
-        # 2. ✨✨✨ 核心修复：自动判断是 SSH 还是 HTTP ✨✨✨
+        # 2. ✨✨✨ 核心修复：自动判断是 SSH 还是 HTTP，HTTP需转字符串 ✨✨✨
         try:
             success, msg = False, ""
             
-            # 判断是否是 SSH 管理器 (通过检查是否有 _exec_remote_script 方法)
+            # 判断是否是 SSH 管理器
             is_ssh_manager = hasattr(self.mgr, '_exec_remote_script')
             
+            # ✨ 专为 X-UI HTTP API 准备的数据载荷 (将字典转为 JSON 字符串)
+            api_payload = self.d.copy()
+            if not is_ssh_manager:
+                import json
+                for k in ['settings', 'streamSettings', 'sniffing']:
+                    if k in api_payload and isinstance(api_payload[k], dict):
+                        api_payload[k] = json.dumps(api_payload[k])
+            
             if is_ssh_manager:
-                # SSH 模式 (异步调用)
+                # SSH 模式 (异步调用，内部已处理 dumps)
                 if self.is_edit:
                     success, msg = await self.mgr.update_inbound(self.d['id'], self.d)
                 else:
                     success, msg = await self.mgr.add_inbound(self.d)
             else:
-                # HTTP 模式 (同步调用，需要 run.io_bound)
+                # HTTP 模式 (使用转换后的 api_payload)
                 if self.is_edit:
-                    success, msg = await run.io_bound(self.mgr.update_inbound, self.d['id'], self.d)
+                    success, msg = await run.io_bound(self.mgr.update_inbound, api_payload['id'], api_payload)
                 else:
-                    success, msg = await run.io_bound(self.mgr.add_inbound, self.d)
+                    success, msg = await run.io_bound(self.mgr.add_inbound, api_payload)
 
             if success:
                 safe_notify(f"✅ {msg}", "positive")
@@ -6104,7 +6124,7 @@ async def open_server_dialog(idx=None):
 
                 new_server_data.update({
                     'ssh_host': s_host,
-                    'ssh_port': inputs['ssh_port'].value.strip(),
+                    'ssh_port': str(inputs['ssh_port'].value).strip(),
                     'ssh_user': inputs['ssh_user'].value.strip(),
                     'ssh_auth_type': inputs['auth_type'].value,
                     'ssh_password': inputs['ssh_pwd'].value if inputs['ssh_pwd'] else '',
