@@ -3964,7 +3964,7 @@ async def smart_detect_ssh_user_task(server_conf):
     """
     # 待测试的用户名列表 (优先尝试 ubuntu，失败则尝试 root)
     # 你可以在这里添加更多，比如 'ec2-user', 'debian', 'opc'
-    candidates = ['ubuntu', 'root'] 
+    candidates = ['root', 'ubuntu']
     
     ip = server_conf['url'].split('://')[-1].split(':')[0]
     original_user = server_conf.get('ssh_user', '')
@@ -4269,25 +4269,33 @@ class InboundEditor:
         if 'sniffing' not in self.d: 
             self.d['sniffing'] = {"enabled": True, "destOverride": ["http", "tls"]}
 
-        # 2. ✨✨✨ 核心修复：自动判断是 SSH 还是 HTTP ✨✨✨
+        # 2. ✨✨✨ 核心修复：自动判断是 SSH 还是 HTTP，HTTP需转字符串 ✨✨✨
         try:
             success, msg = False, ""
             
-            # 判断是否是 SSH 管理器 (通过检查是否有 _exec_remote_script 方法)
+            # 判断是否是 SSH 管理器
             is_ssh_manager = hasattr(self.mgr, '_exec_remote_script')
             
+            # ✨ 专为 X-UI HTTP API 准备的数据载荷 (将字典转为 JSON 字符串)
+            api_payload = self.d.copy()
+            if not is_ssh_manager:
+                import json
+                for k in ['settings', 'streamSettings', 'sniffing']:
+                    if k in api_payload and isinstance(api_payload[k], dict):
+                        api_payload[k] = json.dumps(api_payload[k])
+            
             if is_ssh_manager:
-                # SSH 模式 (异步调用)
+                # SSH 模式 (异步调用，内部已处理 dumps)
                 if self.is_edit:
                     success, msg = await self.mgr.update_inbound(self.d['id'], self.d)
                 else:
                     success, msg = await self.mgr.add_inbound(self.d)
             else:
-                # HTTP 模式 (同步调用，需要 run.io_bound)
+                # HTTP 模式 (使用转换后的 api_payload)
                 if self.is_edit:
-                    success, msg = await run.io_bound(self.mgr.update_inbound, self.d['id'], self.d)
+                    success, msg = await run.io_bound(self.mgr.update_inbound, api_payload['id'], api_payload)
                 else:
-                    success, msg = await run.io_bound(self.mgr.add_inbound, self.d)
+                    success, msg = await run.io_bound(self.mgr.add_inbound, api_payload)
 
             if success:
                 safe_notify(f"✅ {msg}", "positive")
@@ -5961,7 +5969,7 @@ async def open_server_dialog(idx=None):
 
                 new_server_data.update({
                     'ssh_host': s_host,
-                    'ssh_port': inputs['ssh_port'].value.strip(),
+                    'ssh_port': str(inputs['ssh_port'].value).strip(),
                     'ssh_user': inputs['ssh_user'].value.strip(),
                     'ssh_auth_type': inputs['auth_type'].value,
                     'ssh_password': inputs['ssh_pwd'].value if inputs['ssh_pwd'] else '',
