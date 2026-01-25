@@ -150,6 +150,41 @@ async def force_geoip_naming_task(server_conf, max_retries=10):
 
     logger.warning(f"⚠️ [强制修正] 最终失败: 达到最大重试次数，保持原名 {server_conf.get('name')}")
 
+# ================= 智能域名自适应侦测核心 =================
+def get_dynamic_origin():
+    """
+    智能侦测当前面板的真实访问地址（适配开源分发）。
+    侦测优先级：
+    1. 用户在后台手动设置的 `manager_base_url`
+    2. Cloudflare / Nginx 传递的真实协议和域名 (X-Forwarded-Proto / Host)
+    3. 默认的 Request Host
+    """
+    # 1. 优先读取数据库里的配置（如果有）
+    saved_url = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
+    if saved_url and not ('127.0.0.1' in saved_url or 'localhost' in saved_url):
+        # 顺便排除一下旧的硬编码域名，防止残留
+        if 'sijuly.nyc.mn' not in saved_url:
+            return saved_url
+
+    # 2. 从当前 HTTP 请求中动态提取 (穿透反代)
+    try:
+        from nicegui import ui
+        # 获取当前客户端的原始请求
+        req = ui.context.client.request
+        
+        # 尝试获取经过 Nginx/CF 转发的真实域名和协议
+        real_host = req.headers.get('X-Forwarded-Host') or req.headers.get('host')
+        real_proto = req.headers.get('X-Forwarded-Proto') or req.url.scheme
+        
+        if real_host:
+            # 自动构建当前网址
+            detected_url = f"{real_proto}://{real_host}"
+            return detected_url
+    except Exception:
+        pass
+
+    # 3. 终极兜底（提示性占位，绝对不使用特定域名）
+    return "http://{YOUR-DOMAIN-OR-IP}"
 
 # ================= 全局辅助：超级坐标库 =================
 LOCATION_COORDS = {
@@ -968,7 +1003,7 @@ else
     echo "HYSTERIA_DEPLOY_FAILED"
 fi
 """
-# ================= 一键部署 Hysteria 2 (纯净版部署逻辑 - 适配端口范围) =================
+# ================= 一键部署 Hysteria 2 (深色适配版 - Surge 兼容) =================
 async def open_deploy_hysteria_dialog(server_conf, callback):
     # --- 1. IP 获取逻辑 ---
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
@@ -979,27 +1014,34 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
         try: real_ip = await run.io_bound(socket.gethostbyname, target_host)
         except: safe_notify(f"❌ 无法解析 IP: {target_host}", "negative"); return
 
-    # --- 2. 构建 UI ---
-    with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl'):
-        with ui.column().classes('w-full bg-slate-900 p-6 gap-2'):
+    # --- 2. 构建 UI (全深色适配) ---
+    # 主卡片：bg-[#1e293b] border-slate-700
+    with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl bg-[#1e293b] border border-slate-700 shadow-2xl'):
+        
+        # 顶部标题栏：bg-[#0f172a] border-b border-slate-700
+        with ui.column().classes('w-full bg-[#0f172a] border-b border-slate-700 p-6 gap-2'):
             with ui.row().classes('items-center gap-2 text-white'):
-                ui.icon('bolt', size='md')
+                ui.icon('bolt', size='md').classes('text-blue-400')
                 ui.label('部署 Hysteria 2 (Surge 兼容版)').classes('text-lg font-bold')
             ui.label(f"服务器 IP: {real_ip}").classes('text-xs text-gray-400 font-mono')
 
+        # 内容区
         with ui.column().classes('w-full p-6 gap-4'):
-            name_input = ui.input('节点名称 (可选)', placeholder='例如: 狮城 Hy2').props('outlined dense').classes('w-full')
-            sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense').classes('w-full')
+            name_input = ui.input('节点备注 (可选)', placeholder='例如: 狮城 Hy2').props('outlined dense dark').classes('w-full')
+            sni_input = ui.input('伪装域名 (SNI)', value='www.bing.com').props('outlined dense dark').classes('w-full')
             
-            enable_hopping = ui.checkbox('启用端口跳跃', value=True).classes('text-sm font-bold text-gray-600')
+            # 复选框和数字输入框增加 dark 属性和浅色文字
+            enable_hopping = ui.checkbox('启用端口跳跃', value=True).props('dark').classes('text-sm font-bold text-slate-300')
             with ui.row().classes('w-full items-center gap-2'):
-                hop_start = ui.number('起始端口', value=20000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
-                ui.label('-').bind_visibility_from(enable_hopping, 'value')
-                hop_end = ui.number('结束端口', value=50000, format='%.0f').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
+                hop_start = ui.number('起始端口', value=20000, format='%.0f').props('outlined dense dark').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
+                ui.label('-').classes('text-slate-400').bind_visibility_from(enable_hopping, 'value')
+                hop_end = ui.number('结束端口', value=50000, format='%.0f').props('outlined dense dark').classes('flex-1').bind_visibility_from(enable_hopping, 'value')
 
-            log_area = ui.log().classes('w-full h-48 bg-gray-900 text-green-400 text-[11px] font-mono p-3 rounded border border-gray-700 hidden transition-all')
+            # 日志区：纯黑背景更显眼
+            log_area = ui.log().classes('w-full h-48 bg-black text-green-400 text-[11px] font-mono p-3 rounded border border-slate-700 hidden transition-all')
 
-        with ui.row().classes('w-full p-4 bg-gray-50 border-t border-gray-200 justify-end gap-3'):
+        # 底部操作栏：bg-[#0f172a] border-t border-slate-700
+        with ui.row().classes('w-full p-4 bg-[#0f172a] border-t border-slate-700 justify-end gap-3'):
             btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
             
             async def start_process():
@@ -1029,23 +1071,21 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                             custom_name = name_input.value.strip()
                             node_name = custom_name if custom_name else f"Hy2-{real_ip[-3:]}"
                             
-                            # --- 关键修改点开始: 强制使用端口范围字符串 ---
+                            # --- 强制使用端口范围字符串 ---
                             if enable_hopping.value:
-                                # 存入 "20000-50000" 字符串，Surge 生成配置时会用到
                                 final_port_display = f"{int(hop_start.value)}-{int(hop_end.value)}"
                             else:
                                 try: final_port_display = int(link.split('@')[1].split(':')[1].split('?')[0])
                                 except: final_port_display = 443
 
-                            # 处理 Raw Link (保持 hy2:// 格式供 Shadowrocket 使用)
+                            # 处理 Raw Link
                             if '#' in link: link = link.split('#')[0]
                             final_raw_link = f"{link}#{urllib.parse.quote(node_name)}"
-                            # --- 关键修改点结束 ---
 
                             new_node = {
                                 "id": str(uuid.uuid4()), 
                                 "remark": node_name, 
-                                "port": final_port_display, # 这里存的是范围字符串 "20000-50000"
+                                "port": final_port_display, 
                                 "protocol": "hysteria2",
                                 "settings": {}, 
                                 "streamSettings": {}, 
@@ -1069,8 +1109,183 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
                 finally:
                     btn_cancel.enable(); btn_deploy.props(remove='loading')
 
-            btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-purple-600 text-white')
+            btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-blue-600 text-white')
     d.open()
+
+# ================= Snell v5 安装脚本模板 (版本修复 + 防火墙自适应版) =================
+SNELL_INSTALL_SCRIPT_TEMPLATE = r"""
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+
+# 接收参数
+PORT="{port}"
+PSK="{psk}"
+
+# 1. 安装基础依赖
+if [ -f /etc/debian_version ]; then
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y wget unzip iptables >/dev/null 2>&1
+elif [ -f /etc/redhat-release ]; then
+    yum install -y wget unzip iptables >/dev/null 2>&1
+fi
+
+# 2. 检测系统架构 (双花括号是为防止 Python 误解析)
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) S_ARCH="amd64" ;;
+    aarch64|arm64) S_ARCH="aarch64" ;;
+    *) echo "不支持的架构: $ARCH"; exit 1 ;;
+esac
+
+# 3. 停止旧服务并清理环境
+systemctl stop snell 2>/dev/null
+rm -rf /usr/local/bin/snell-server
+
+# 4. 下载 v5.0.1 版本二进制文件 (已修复官方 5.0.2 不存在的问题)
+DOWNLOAD_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-${{S_ARCH}}.zip"
+
+wget -O /tmp/snell.zip "$DOWNLOAD_URL"
+if [ ! -f /tmp/snell.zip ]; then echo "下载失败，请检查网络或版本链接"; exit 1; fi
+
+unzip -o /tmp/snell.zip -d /usr/local/bin/
+chmod +x /usr/local/bin/snell-server
+rm -f /tmp/snell.zip
+
+# 5. 生成配置文件
+mkdir -p /etc/snell
+cat > /etc/snell/snell-server.conf << EOF
+[snell-server]
+listen = 0.0.0.0:$PORT
+psk = $PSK
+ipv6 = false
+EOF
+
+# 6. 核心机制：自动放行防火墙端口 (适配甲骨文云等)
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow $PORT/tcp >/dev/null 2>&1
+    ufw allow $PORT/udp >/dev/null 2>&1
+fi
+if command -v iptables >/dev/null 2>&1; then
+    iptables -I INPUT -p tcp --dport $PORT -j ACCEPT
+    iptables -I INPUT -p udp --dport $PORT -j ACCEPT
+    # 尝试保存规则以防重启失效
+    netfilter-persistent save >/dev/null 2>&1 || service iptables save >/dev/null 2>&1
+fi
+
+# 7. 配置 Systemd 守护进程
+cat > /etc/systemd/system/snell.service << EOF
+[Unit]
+Description=Snell Proxy Service
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=32768
+ExecStart=/usr/local/bin/snell-server -c /etc/snell/snell-server.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 8. 启动服务
+systemctl daemon-reload
+systemctl enable --now snell >/dev/null 2>&1
+
+# 9. 输出结果供 Python 后端捕获 (固定 version=5)
+IP=$(curl -s https://api.ipify.org)
+echo "SNELL_DEPLOY_SUCCESS_LINK: snell://$PSK@$IP:$PORT?version=5#Snell-Node"
+"""
+
+# ================= 一键部署 Snell (Surge 专用 - V5 纯净深色版) =================
+async def open_deploy_snell_dialog(server_conf, callback):
+    target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
+    import random, string, uuid, urllib.parse
+
+    # 主卡片适配深色：bg-[#1e293b] border border-slate-700
+    with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl bg-[#1e293b] border border-slate-700 shadow-2xl'):
+        # 顶部标题栏
+        with ui.column().classes('w-full bg-[#0f172a] border-b border-slate-700 p-6 gap-2'):
+            with ui.row().classes('items-center gap-2 text-white'):
+                ui.icon('security', size='md').classes('text-blue-400')
+                ui.label('部署 Snell 节点 (v5 最新版)').classes('text-lg font-bold')
+            ui.label(f"目标服务器: {target_host}").classes('text-xs text-gray-400 font-mono')
+
+        # 内容区
+        with ui.column().classes('w-full p-6 gap-4'):
+            name_input = ui.input('节点备注', placeholder='例如: HK-Snell-v5').props('outlined dense dark').classes('w-full')
+            
+            with ui.row().classes('w-full gap-2 items-center'):
+                rand_port = random.randint(30000, 60000)
+                rand_psk = ''.join(random.choices(string.ascii_letters + string.digits, k=20))
+                
+                port_input = ui.number('端口', value=rand_port, format='%.0f').props('outlined dense dark').classes('w-1/3')
+                psk_input = ui.input('密钥 (PSK)', value=rand_psk).props('outlined dense dark').classes('flex-grow')
+                
+            # 日志区 (纯黑背景更显眼)
+            log_area = ui.log().classes('w-full h-48 bg-black text-green-400 text-[11px] font-mono p-3 rounded border border-slate-700 hidden transition-all')
+
+        # 底部操作栏 (适配深色：bg-[#0f172a] border-slate-700)
+        with ui.row().classes('w-full p-4 bg-[#0f172a] border-t border-slate-700 justify-end gap-3'):
+            btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
+            
+            async def start_process():
+                btn_cancel.disable(); btn_deploy.props('loading'); log_area.classes(remove='hidden')
+                try:
+                    params = {
+                        "port": int(port_input.value),
+                        "psk": psk_input.value
+                    }
+                    # ✨✨✨ 这里修复了之前的语法错误 ✨✨✨
+                    script_content = SNELL_INSTALL_SCRIPT_TEMPLATE.format(**params)
+                    deploy_cmd = f"cat > /tmp/install_snell.sh << 'EOF_SCRIPT'\n{script_content}\nEOF_SCRIPT\nbash /tmp/install_snell.sh"
+                    
+                    log_area.push(f"🚀 [SSH] 开始在 {target_host} 安装 Snell v5 ...")
+                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, deploy_cmd))
+                    
+                    if success:
+                        import re
+                        match = re.search(r'SNELL_DEPLOY_SUCCESS_LINK: (snell://.*)', output)
+                        if match:
+                            link = match.group(1).strip()
+                            log_area.push("🎉 Snell v5 部署成功！")
+                            
+                            custom_name = name_input.value.strip() or f"Snell-v5-{target_host[-3:]}"
+                            
+                            # 组装节点数据
+                            if '#' in link: link = link.split('#')[0]
+                            final_raw_link = f"{link}#{urllib.parse.quote(custom_name)}"
+                            
+                            new_node = {
+                                "id": str(uuid.uuid4()), 
+                                "remark": custom_name, 
+                                "port": params['port'], 
+                                "protocol": "snell",
+                                "settings": {}, 
+                                "streamSettings": {}, 
+                                "enable": True, 
+                                "_is_custom": True, 
+                                "_raw_link": final_raw_link 
+                            }
+                            if 'custom_nodes' not in server_conf: server_conf['custom_nodes'] = []
+                            server_conf['custom_nodes'].append(new_node)
+                            await save_servers()
+                            
+                            safe_notify(f"✅ 节点 {custom_name} 已添加", "positive")
+                            await asyncio.sleep(1); d.close()
+                            if callback: await callback()
+                        else: 
+                            log_area.push("❌ 未捕获链接"); log_area.push(output[-500:])
+                    else: 
+                        log_area.push(f"❌ SSH 失败: {output}")
+                finally:
+                    btn_cancel.enable(); btn_deploy.props(remove='loading')
+
+            btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-blue-600 text-white')
+    d.open()
+
+
+
  
 # ================= 全局变量区 (缓存) =================
 PROBE_DATA_CACHE = {} 
@@ -2941,61 +3156,37 @@ async def run_in_bg_executor(func, *args):
 async def fetch_inbounds_safe(server_conf, force_refresh=False, sync_name=False):
     url = server_conf['url']
     
-    # ✨✨✨ 核心守门员逻辑 ✨✨✨
-    # 如果已安装探针，且不是初次加载（即缓存里有数据），直接信任推送的数据
-    # 这意味着后台任务不会再尝试登录该服务器的 API
-    # 如果已安装探针，且当前不是人类触发的强制刷新，才使用缓存
+    # 探针机器处理：除非强制刷新，否则直接信任推送的缓存
     if server_conf.get('probe_installed', False) and not force_refresh:
         return NODES_DATA.get(url, [])
-    # --- 以下是针对普通机器 (无探针) 的原有主动拉取逻辑 ---
-    name = server_conf.get('name', '未命名')
     
-    # 如果不是强制刷新，且缓存里有数据，返回缓存
-    if not force_refresh and url in NODES_DATA: return NODES_DATA[url]
+    # 如果不是强制刷新且已有数据，直接返回
+    if not force_refresh and url in NODES_DATA and NODES_DATA[url]: 
+        return NODES_DATA[url]
     
     async with SYNC_SEMAPHORE:
         try:
             mgr = get_manager(server_conf)
-            inbounds = await run_in_bg_executor(mgr.get_inbounds)
-            if inbounds is None:
-                # 重试
-                mgr = managers[server_conf['url']] = XUIManager(server_conf['url'], server_conf['user'], server_conf['pass'], server_conf.get('prefix')) 
-                inbounds = await run_in_bg_executor(mgr.get_inbounds)
+            # 增加超时判断
+            inbounds = await asyncio.wait_for(run_in_bg_executor(mgr.get_inbounds), timeout=15)
             
             if inbounds is not None:
                 NODES_DATA[url] = inbounds
-                server_conf['_status'] = 'online' 
-                
-                # 名称同步逻辑 (仅普通机器需要，探针机器由 Agent 名字决定或手动改)
-                if sync_name: 
-                    try:
-                        if len(inbounds) > 0:
-                            remote_name = inbounds[0].get('remark', '').strip()
-                            if remote_name:
-                                current_full_name = server_conf.get('name', '')
-                                if ' ' in current_full_name:
-                                    parts = current_full_name.split(' ', 1)
-                                    current_flag = parts[0]; current_text = parts[1].strip()
-                                else:
-                                    current_flag = ""; current_text = current_full_name
-                                if current_text != remote_name:
-                                    if current_flag: new_name = f"{current_flag} {remote_name}"
-                                    else: new_name = await auto_prepend_flag(remote_name, url)
-                                    server_conf['name'] = new_name
-                                    asyncio.create_task(save_servers())
-                    except: pass
-                
+                server_conf['_status'] = 'online'
+                # ... (保持原有的同步名称逻辑)
                 return inbounds
             
-            # 失败处理
-            NODES_DATA[url] = [] 
-            server_conf['_status'] = 'offline'
-            return []
+            # --- 关键修复：同步失败时，不要设置为空列表，保留之前的缓存 ---
+            # 仅在完全没有旧数据时才标记离线
+            if url not in NODES_DATA:
+                NODES_DATA[url] = []
+                server_conf['_status'] = 'offline'
+            return NODES_DATA.get(url, [])
             
-        except Exception as e: 
-            NODES_DATA[url] = [] 
-            server_conf['_status'] = 'error'
-            return []
+        except Exception as e:
+            logger.warning(f"⚠️ {server_conf.get('name')} 同步跳过: {e}")
+            # 发生异常时保留现场，不更新 _status 为 offline，防止误报
+            return NODES_DATA.get(url, [])
 
 # 3. 批量静默刷新逻辑 (防抖 + 空缓存穿透)
 async def silent_refresh_all(is_auto_trigger=False):
@@ -4191,15 +4382,20 @@ async def safe_copy_to_clipboard(text):
         else: safe_notify('复制失败', 'negative')
     except: safe_notify('复制功能不可用', 'negative')
 
-# =================  支持格式转换的分组复制 =================
+# =================  支持格式转换的分组复制 (自适应版) =================
 async def copy_group_link(group_name, target=None):
     try:
-        origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
-        if not origin: origin = "https://xui-manager.sijuly.nyc.mn"
+        # 1. 智能获取当前面板域名
+        origin = get_dynamic_origin()
+        
+        # 2. 如果 Python 获取失败（极少数情况），尝试用 JS 补救
+        if "YOUR-DOMAIN" in origin:
+            try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
+            except: pass
+            
         encoded_name = safe_base64(group_name)
         
         if target:
-            # ✨路径 /get/group/...
             final_link = f"{origin}/get/group/{target}/{encoded_name}"
             msg_prefix = "Surge" if target == 'surge' else "Clash"
         else:
@@ -5693,18 +5889,48 @@ async def render_probe_page():
                         stat_row('当前在线', online_count, 'text-green-400')
                         stat_row('已装探针', probe_count, 'text-purple-400')
     
-# ================= 订阅管理视图 (✅ 链接栏深色修复版) ================
+# ================= 订阅管理视图 (全自动自适应终极修复版) ================
 async def load_subs_view():
-    # 标记当前视图
     global CURRENT_VIEW_STATE
     CURRENT_VIEW_STATE['scope'] = 'SUBS'
     CURRENT_VIEW_STATE['data'] = None
     
     show_loading(content_container)
     
-    try: origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
-    except: origin = ""
-    if not origin: origin = "https://xui-manager.sijuly.nyc.mn"
+    # ✨✨✨ 终极域名获取逻辑：三层防线，绝不输出乱码 ✨✨✨
+    origin = ""
+    
+    # [防线1] 优先读取数据库配置
+    db_url = ADMIN_CONFIG.get('manager_base_url', '').strip().rstrip('/')
+    if db_url and not ('127.0.0.1' in db_url or 'localhost' in db_url):
+        origin = db_url
+
+    # [防线2] 数据库没有？问浏览器拿最真实的地址 (JS)
+    if not origin:
+        try: 
+            origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
+        except: 
+            pass # JS 超时也不怕，进入防线3
+
+    # [防线3] JS 超时了？直接在 Python 后端扒 Nginx/Cloudflare 的请求头
+    if not origin or origin == 'null':
+        try:
+            req = ui.context.client.request
+            real_host = req.headers.get('X-Forwarded-Host') or req.headers.get('host')
+            real_proto = req.headers.get('X-Forwarded-Proto') or req.url.scheme
+            if real_host:
+                origin = f"{real_proto}://{real_host}"
+        except:
+            pass
+            
+    # 绝对保底 (如果前三层全军覆没，使用标准 URL 格式防止崩溃)
+    if not origin: origin = "http://x-fusion-panel" 
+
+    # 将获取到的正确域名顺手存入数据库，下次秒开
+    if origin and "x-fusion-panel" not in origin:
+        if ADMIN_CONFIG.get('manager_base_url') != origin:
+            ADMIN_CONFIG['manager_base_url'] = origin
+            asyncio.create_task(save_admin_config())
 
     content_container.clear()
     
@@ -5774,7 +6000,7 @@ async def load_subs_view():
                 path = f"/sub/{sub['token']}"
                 raw_url = f"{origin}{path}"
                 
-                # ✨✨✨ 终极修复：bg-[#0b1121] (纯黑背景) + text-green-400 ✨✨✨
+                # bg-[#0b1121] (纯黑背景) + text-green-400
                 with ui.row().classes('w-full items-center gap-2 bg-[#0b1121] p-2.5 rounded-lg justify-between border border-slate-700'):
                     with ui.row().classes('items-center gap-3 flex-grow overflow-hidden'):
                         ui.icon('link').classes('text-blue-500 text-sm')
@@ -5783,7 +6009,6 @@ async def load_subs_view():
                     
                     with ui.row().classes('gap-1'):
                         def btn_copy(icon, color, text, func):
-                            # 按钮悬浮底色适配深色
                             ui.button(icon=icon, on_click=func).props(f'flat dense round size=xs text-color={color}').tooltip(text).classes('hover:bg-slate-800')
 
                         btn_copy('content_copy', 'grey-4', '复制原始链接', lambda u=raw_url: safe_copy_to_clipboard(u))
@@ -5793,7 +6018,7 @@ async def load_subs_view():
                         
                         clash_short = f"{origin}/get/sub/clash/{sub['token']}"
                         btn_copy('cloud_queue', 'green', '复制 Clash 订阅', lambda u=clash_short: safe_copy_to_clipboard(u))
-
+                        
 # ================= 通用服务器保存函数 (UI 操控版：修改后强制刷新 + 重置冷却) =================
 async def save_server_config(server_data, is_add=True, idx=None):
     # 1. 基础校验
@@ -6025,7 +6250,6 @@ async def open_server_dialog(idx=None):
                 if not new_server_data.get('url'): new_server_data['url'] = f"http://{s_host}:22"
 
             elif panel_type == 'xui':
-                # ... (X-UI 部分保持原样) ...
                 if not inputs.get('xui_url'): return
                 x_url_raw = inputs['xui_url'].value.strip()
                 x_user = inputs['xui_user'].value.strip()
@@ -6327,7 +6551,9 @@ async def open_data_mgmt_dialog():
                             try:
                                 raw = import_text.value.strip(); data = json.loads(raw)
                                 new_servers = data.get('servers', []) if isinstance(data, dict) else data
-                                # ... (原有恢复逻辑保持不变) ...
+                                new_subs = data.get('subscriptions', []); new_config = data.get('admin_config', {})
+                                new_ssh_key = data.get('global_ssh_key', ''); new_cache = data.get('cache', {})
+                                
                                 added=0; updated=0
                                 existing_map = {s['url']: i for i, s in enumerate(SERVERS_CACHE)}
                                 for item in new_servers:
@@ -6372,14 +6598,94 @@ async def open_data_mgmt_dialog():
                             chk_probe = ui.checkbox('启用 Root 探针', value=False).props('dark dense').classes('text-green-400 font-bold')
 
                         # 执行
-                        async def do_batch():
-                            # ... (逻辑保持不变，省略以节省篇幅，请复制原函数的逻辑块) ...
-                            # 核心是保存偏好 + 解析文本 + append SERVERS_CACHE
-                            # ...
-                            await save_servers(); render_sidebar_content.refresh(); d.close()
-                            safe_notify("批量添加完成", "positive")
+                        async def run_batch_import():
+                            # 1. 先保存用户的偏好设置到 ADMIN_CONFIG
+                            ADMIN_CONFIG['pref_ssh_user'] = def_ssh_user.value
+                            ADMIN_CONFIG['pref_ssh_port'] = def_ssh_port.value
+                            ADMIN_CONFIG['pref_xui_port'] = def_xui_port.value
+                            ADMIN_CONFIG['pref_xui_user'] = def_xui_user.value
+                            ADMIN_CONFIG['pref_xui_pass'] = def_xui_pass.value
+                            await save_admin_config() # 立即写入磁盘
+                            
+                            # 2. 开始处理添加逻辑
+                            raw_text = url_area.value.strip()
+                            if not raw_text: safe_notify("请输入内容", "warning"); return
+                            
+                            lines = [l.strip() for l in raw_text.split('\n') if l.strip()]
+                            count = 0
+                            existing_urls = {s['url'] for s in SERVERS_CACHE}
+                            post_tasks = []
+                            
+                            should_add_xui = chk_xui.value
+                            should_add_probe = chk_probe.value
 
-                        ui.button('确认批量添加', icon='add_box', on_click=do_batch).classes('w-full bg-blue-600 text-white')
+                            for line in lines:
+                                target_ssh_port = def_ssh_port.value
+                                target_xui_port = def_xui_port.value
+                                
+                                if '://' in line:
+                                    final_url = line
+                                    try: 
+                                        parsed = urlparse(line)
+                                        name = parsed.hostname or line
+                                    except: name = line
+                                else:
+                                    if ':' in line and not line.startswith('['): 
+                                        parts = line.split(':')
+                                        host_ip = parts[0]
+                                        target_xui_port = parts[1] 
+                                    else: 
+                                        host_ip = line
+                                        target_xui_port = def_xui_port.value
+                                    
+                                    final_url = f"http://{host_ip}:{target_xui_port}"
+                                    name = host_ip
+
+                                if final_url in existing_urls: continue
+                                
+                                # 根据开关决定是否填入账号密码
+                                final_xui_user = def_xui_user.value if should_add_xui else ""
+                                final_xui_pass = def_xui_pass.value if should_add_xui else ""
+
+                                new_server = {
+                                    'name': name, 
+                                    'group': '', 
+                                    'url': final_url,
+                                    'user': final_xui_user, 
+                                    'pass': final_xui_pass, 
+                                    'prefix': '',
+                                    'ssh_user': def_ssh_user.value, 
+                                    'ssh_port': target_ssh_port,
+                                    'ssh_auth_type': def_auth_type.value,
+                                    'ssh_password': def_ssh_pwd.value, 
+                                    'ssh_key': def_ssh_key.value,
+                                    'probe_installed': should_add_probe
+                                }
+
+                                SERVERS_CACHE.append(new_server)
+                                existing_urls.add(final_url)
+                                count += 1
+                                
+                                post_tasks.append(fast_resolve_single_server(new_server))
+                                
+                                if ADMIN_CONFIG.get('probe_enabled', False) and should_add_probe:
+                                    post_tasks.append(install_probe_on_server(new_server))
+
+                            if count > 0:
+                                await save_servers()
+                                render_sidebar_content.refresh()
+                                safe_notify(f"成功添加 {count} 台服务器", 'positive')
+                                d.close()
+                                
+                                if post_tasks:
+                                    safe_notify(f"正在后台处理 {len(post_tasks)} 个初始化任务...", "ongoing")
+                                    async def _run_bg_tasks():
+                                        await asyncio.gather(*post_tasks, return_exceptions=True)
+                                    asyncio.create_task(_run_bg_tasks())
+                                    
+                            else: safe_notify("未添加任何服务器 (可能已存在)", 'warning')
+
+                        ui.button('确认批量添加', icon='add_box', on_click=run_batch_import).classes('w-full bg-blue-600 text-white h-10')
     d.open()
 # ================= 渲染逻辑 =================
 
@@ -6523,116 +6829,79 @@ async def refresh_content(scope='ALL', data=None, force_refresh=False, sync_name
         now = time.time()
         last_sync = LAST_SYNC_MAP.get(cache_key, 0)
         
-        # --- 预计算当前页的服务器成分 (用于生成准确的提示语) ---
+        # --- 预计算当前页的服务器成分 ---
         targets = get_targets_by_scope(scope, data)
-        # 模拟分页切片
         start_idx = (page_num - 1) * PAGE_SIZE
         end_idx = start_idx + PAGE_SIZE
         current_page_servers = targets[start_idx:end_idx] if targets else []
         
-        has_probe = False
-        has_api_only = False
+        has_probe = any(s.get('probe_installed') for s in current_page_servers)
+        has_api_only = any(not s.get('probe_installed') for s in current_page_servers)
         
-        for s in current_page_servers:
-            if s.get('probe_installed', False):
-                has_probe = True
-            else:
-                has_api_only = True
+        # 2. 🛑 冷却逻辑与缓存渲染
+        # 如果不是强制刷新，且满足以下任一条件则直接使用缓存渲染：
+        # A. 在 30分钟 冷却时间内
+        # B. 这一页全是已安装探针的机器（数据本身就是最新的）
+        is_all_probe = has_probe and not has_api_only
         
-        # 2. 🛑 冷却逻辑判断
-        # 如果不是按钮强制点击，且在 30分钟内 -> 命中缓存
-        if not force_refresh and (now - last_sync < SYNC_COOLDOWN):
+        if not force_refresh and ((now - last_sync < SYNC_COOLDOWN) or is_all_probe):
+            CURRENT_VIEW_STATE.update({'scope': scope, 'data': data, 'page': page_num, 'render_token': now})
             
-            # 更新状态
-            CURRENT_VIEW_STATE['scope'] = scope
-            CURRENT_VIEW_STATE['data'] = data
-            CURRENT_VIEW_STATE['page'] = page_num
-            CURRENT_VIEW_STATE['render_token'] = now 
-            
-            # 渲染 UI 
+            # 执行初次渲染（从内存加载）
             await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
             
-            # 智能生成提示语 
-            mins_ago = int((now - last_sync) / 60)
-            
-            notify_msg = ""
-            notify_type = "ongoing"
-            
-            if not current_page_servers:
-                notify_msg = "列表为空"
-            elif has_probe and not has_api_only:
-                # 全是探针：缓存无关紧要，因为数据是实时的
-                notify_msg = "⚡ 实时数据 (探针秒级推送)"
-                notify_type = "positive" # 用绿色提示，表示状态很好
-            elif not has_probe and has_api_only:
-                # 全是 API：确实是旧缓存
-                notify_msg = f"🕒 显示缓存数据 ({mins_ago}分钟前)"
+            # 智能提示语
+            if is_all_probe:
+                safe_notify("⚡ 实时数据 (探针推送)", "positive", timeout=1000)
             else:
-                # 混合模式
-                notify_msg = f"⚡ 探针实时 + 🕒 API缓存 ({mins_ago}分前)"
-            
-            # 只有当确实存在 API 机器且使用了缓存时，才打印日志，探针模式不打扰日志
-            if has_api_only:
-                logger.info(f"❄️ [缓存命中] {cache_key} ({mins_ago}m ago)")
-            
-            safe_notify(notify_msg, notify_type, timeout=1500)
+                mins_ago = int((now - last_sync) / 60)
+                safe_notify(f"🕒 缓存数据 ({mins_ago}分前)", "ongoing", timeout=1000)
             return
 
-        # 3. 锁机制
+        # 3. 锁机制：防止同一个页面同时触发多个同步任务
         if lock_key in REFRESH_LOCKS:
-             if force_refresh: safe_notify(f"第 {page_num} 页正在更新中...", type='warning')
              return
 
-        # 4. 状态更新
-        CURRENT_VIEW_STATE['scope'] = scope
-        CURRENT_VIEW_STATE['data'] = data
-        CURRENT_VIEW_STATE['page'] = page_num
-        CURRENT_VIEW_STATE['render_token'] = now
+        # 4. 状态锁定：记录当前的 render_token，用于后台任务完成后核对
+        CURRENT_VIEW_STATE.update({'scope': scope, 'data': data, 'page': page_num, 'render_token': now})
         
-        # 5. 先渲染 UI (显示旧数据占位)
+        # 5. 立即渲染一次（显示当前内存中的“旧”数据，保证点击瞬间不白屏）
         await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
 
-        # 6. 准备后台同步 (仅针对 API 机器)
-        # 注意：fetch_inbounds_safe 内部已经有针对 probe_installed 的过滤逻辑，这里直接传进去即可
         if not current_page_servers: return
 
-        REFRESH_LOCKS.add(lock_key)
-
-        async def _background_fetch():
+        # 6. 启动后台抓取任务
+        async def _background_fetch(token_at_start):
+            REFRESH_LOCKS.add(lock_key)
             try:
-                with client:
-                    # 统计一下真正需要联网同步的机器数量 (API机器)
-                    real_sync_count = len([s for s in current_page_servers if not s.get('probe_installed', False)])
+                # 过滤出真正需要从接口拉取的机器（非探针机器）
+                sync_targets = [s for s in current_page_servers if not s.get('probe_installed')]
+                
+                if sync_targets:
+                    if force_refresh:
+                        safe_notify(f"🔄 正在同步 {len(sync_targets)} 台 API 节点...", "ongoing")
                     
-                    if real_sync_count > 0:
-                        log_msg = f"正在同步 {real_sync_count} 个 API 节点..."
-                        logger.info(f"🔄 [分页同步] {log_msg}")
-                        safe_notify(log_msg, "ongoing", timeout=1000)
-                    else:
-                        # 全是探针，不用弹窗干扰用户
-                        pass
-                    
-                    # 执行同步 (fetch_inbounds_safe 会自动跳过探针机器)
-                    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in current_page_servers]
+                    # 执行并发抓取
+                    tasks = [fetch_inbounds_safe(s, force_refresh=True, sync_name=sync_name_action) for s in sync_targets]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     
-                    try: render_sidebar_content.refresh()
-                    except: pass 
-                    
-                    # 同步完成，重绘界面
-                    await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
-                    
-                    # 更新时间戳
+                    # --- ✨ 关键点：核对身份 ---
+                    # 只有当抓取结束时，用户还没点别的页面（token没变），才触发重绘
+                    if CURRENT_VIEW_STATE.get('render_token') == token_at_start:
+                        with client:
+                            await _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client)
+                            # 记录同步成功的时间戳
+                            LAST_SYNC_MAP[cache_key] = time.time()
+                            if force_refresh: safe_notify("✅ 同步完成", "positive")
+                            try: render_sidebar_content.refresh()
+                            except: pass
+                else:
+                    # 全是探针机器，直接标记当前页已更新
                     LAST_SYNC_MAP[cache_key] = time.time()
-                    
-                    if real_sync_count > 0:
-                        logger.info(f"✅ [分页同步] 完成 (下次更新: 30分钟后)")
-                        if force_refresh: safe_notify(f"同步完成", "positive")
-                    
             finally:
                 REFRESH_LOCKS.discard(lock_key)
             
-        asyncio.create_task(_background_fetch())
+        asyncio.create_task(_background_fetch(now))
 
 # --- 辅助函数  ---
 async def _render_ui_internal(scope, data, page_num, force_refresh, sync_name_action, client):
@@ -6808,8 +7077,67 @@ async def render_single_server_view(server_conf, force_refresh=False):
 
         REFRESH_CURRENT_NODES = reload_and_refresh_ui
 
-        # ... (open_edit_custom_node 和 uninstall_and_delete 辅助函数保持不变，记得把它们的弹窗也改为深色) ...
-        # (这里为了节省篇幅，假设你已经会改简单的 ui.card().classes('bg-[#1e293b] ...') 了)
+        # ================== 辅助函数 (完整逻辑) ==================
+        def open_edit_custom_node(node_data):
+            with ui.dialog() as d, ui.card().classes('w-96 p-4'):
+                ui.label('编辑节点备注').classes('text-lg font-bold mb-4')
+                name_input = ui.input('节点名称', value=node_data.get('remark', '')).classes('w-full')
+                async def save():
+                    node_data['remark'] = name_input.value.strip()
+                    await save_servers()
+                    safe_notify('修改已保存', 'positive')
+                    d.close()
+                    render_node_list.refresh()
+                with ui.row().classes('w-full justify-end mt-4'):
+                    ui.button('取消', on_click=d.close).props('flat')
+                    ui.button('保存', on_click=save).classes('bg-blue-600 text-white')
+            d.open()
+
+        async def uninstall_and_delete(node_data):
+            with ui.dialog() as d, ui.card().classes('w-96 p-6'):
+                with ui.row().classes('items-center gap-2 text-red-600 mb-2'):
+                    ui.icon('delete_forever', size='md'); ui.label('卸载并清理环境').classes('font-bold text-lg')
+                ui.label(f"节点: {node_data.get('remark')}").classes('text-sm font-bold text-gray-800')
+                ui.label("即将执行以下操作：").classes('text-xs text-gray-500 mt-2')
+                
+                domain_to_del = None
+                raw_link = node_data.get('_raw_link', '')
+                if raw_link and '://' in raw_link:
+                    try:
+                        from urllib.parse import urlparse, parse_qs
+                        query = urlparse(raw_link).query; params = parse_qs(query)
+                        if 'sni' in params: domain_to_del = params['sni'][0]
+                        elif 'host' in params: domain_to_del = params['host'][0]
+                    except: pass
+                
+                with ui.column().classes('ml-2 gap-1 mt-1'):
+                    ui.label('1. 停止 Xray 服务并清除残留进程').classes('text-xs text-gray-600')
+                    ui.label('2. 删除 Xray 配置文件').classes('text-xs text-gray-600')
+                    if domain_to_del and ADMIN_CONFIG.get('cf_root_domain') in domain_to_del:
+                        ui.label(f'3. 🗑️ 自动删除 CF 解析: {domain_to_del}').classes('text-xs text-red-500 font-bold')
+                    else: ui.label('3. 跳过 DNS 清理 (非托管域名)').classes('text-xs text-gray-400')
+
+                async def start_uninstall():
+                    d.close(); notification = ui.notification(message='正在执行卸载与清理...', timeout=0, spinner=True)
+                    if domain_to_del:
+                        cf = CloudflareHandler()
+                        if cf.token and cf.root_domain and (cf.root_domain in domain_to_del):
+                            ok, msg = await cf.delete_record_by_domain(domain_to_del)
+                            if ok: safe_notify(f"☁️ {msg}", "positive")
+                            else: safe_notify(f"⚠️ DNS 删除失败: {msg}", "warning")
+                    success, output = await run.io_bound(lambda: _ssh_exec_wrapper(server_conf, XHTTP_UNINSTALL_SCRIPT))
+                    notification.dismiss()
+                    if success: safe_notify('✅ 服务已卸载，进程已清理', 'positive')
+                    else: safe_notify(f'⚠️ SSH 卸载可能有残留: {output}', 'warning')
+                    if 'custom_nodes' in server_conf and node_data in server_conf['custom_nodes']:
+                        server_conf['custom_nodes'].remove(node_data)
+                        await save_servers()
+                    await reload_and_refresh_ui()
+
+                with ui.row().classes('w-full justify-end mt-6 gap-2'):
+                    ui.button('取消', on_click=d.close).props('flat color=grey')
+                    ui.button('确认执行', color='red', on_click=start_uninstall).props('unelevated')
+            d.open()
 
         # ================= 布局构建 =================
         # --- 顶部卡片 (深色) ---
@@ -6827,13 +7155,35 @@ async def render_single_server_view(server_conf, force_refresh=False):
                     with ui.row().classes('items-center gap-2'):
                         ip_addr = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').split(':')[0]
                         ui.label(ip_addr).classes('text-xs font-mono font-bold text-slate-400 bg-[#0f172a] px-2 py-0.5 rounded border border-slate-700')
-                        if server_conf.get('_status') == 'online': ui.badge('Online', color='green').props('rounded outline size=xs')
-                        else: ui.badge('Offline', color='grey').props('rounded outline size=xs')
+                        
+                        # ✨✨✨ 核心修复：引入实时刷新机制，判断探针真实在线状态 ✨✨✨
+                        @ui.refreshable
+                        def live_status_badge():
+                            import time
+                            is_online = False
+                            now_ts = time.time()
+                            
+                            # 1. 优先判断探针实时心跳 (20秒内有更新算在线)
+                            probe_cache = PROBE_DATA_CACHE.get(server_conf['url'])
+                            if probe_cache and (now_ts - probe_cache.get('last_updated', 0) < 20):
+                                is_online = True
+                            # 2. 其次判断 API 探测结果
+                            elif server_conf.get('_status') == 'online':
+                                is_online = True
+                                
+                            if is_online:
+                                ui.badge('Online', color='green').props('rounded outline size=xs')
+                            else:
+                                ui.badge('Offline', color='grey').props('rounded outline size=xs')
+
+                        live_status_badge()
+                        # 每 3 秒静默刷新一次这个徽章，页面不会闪烁
+                        ui.timer(3.0, live_status_badge.refresh)
             
             with ui.row().classes('gap-3'):
                 ui.button('一键部署 XHTTP', icon='rocket_launch', on_click=lambda: open_deploy_xhttp_dialog(server_conf, reload_and_refresh_ui)).props('unelevated').classes(btn_blue)
                 ui.button('一键部署 Hy2', icon='bolt', on_click=lambda: open_deploy_hysteria_dialog(server_conf, reload_and_refresh_ui)).props('unelevated').classes(btn_blue)
-                
+                ui.button('一键部署 Snell', icon='security', on_click=lambda: open_deploy_snell_dialog(server_conf, reload_and_refresh_ui)).props('unelevated').classes(btn_blue)
                 if has_manager_access:
                     async def on_add_success(): 
                         ui.notify('添加节点成功'); await reload_and_refresh_ui()
@@ -6968,6 +7318,9 @@ async def render_single_server_view(server_conf, force_refresh=False):
             ssh_wrapper = ui.column().classes('w-full h-full p-0 gap-0')
             render_card_content()
 
+        # 如果配置了面板账号，且本地缓存为空，则在进入页面 0.2 秒后自动触发后台拉取
+        if has_manager_access and not NODES_DATA.get(server_conf['url']):
+            ui.timer(0.2, lambda: asyncio.create_task(reload_and_refresh_ui()), once=True)
 # ================= SSH 窗口 =================
 def render_ssh_window_full(server_conf):
     with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
@@ -7095,92 +7448,6 @@ def show_custom_node_info(node):
             ui.button('关闭', on_click=d.close).props('flat')
     d.open()
     
-# ================= 聚合视图渲染 (深色适配版) =================
-async def render_aggregated_view(server_list, show_ping=False, token=None, initial_page=1):
-    parent_client = ui.context.client
-    
-    # 容器背景已在 main_page 定义，这里只需处理内容间距
-    list_container = ui.column().classes('w-full gap-3 p-1')
-    
-    # 定义列宽
-    cols_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 1.5fr' 
-    cols_no_ping = 'grid-template-columns: 2fr 2fr 1.5fr 1.5fr 1fr 1fr 0.5fr 1.5fr'
-    
-    try:
-        is_all_servers = (len(server_list) == len(SERVERS_CACHE) and not show_ping)
-        use_special_mode = is_all_servers or show_ping
-        current_css = COLS_SPECIAL_WITH_PING if use_special_mode else COLS_NO_PING
-    except:
-        current_css = cols_ping if show_ping else cols_no_ping
-
-    # 分页计算
-    PAGE_SIZE = 30
-    total_items = len(server_list)
-    total_pages = (total_items + PAGE_SIZE - 1) // PAGE_SIZE
-    if initial_page > total_pages: initial_page = 1
-    if initial_page < 1: initial_page = 1
-
-    def render_page(page_num):
-        list_container.clear()
-        if 'CURRENT_VIEW_STATE' in globals(): CURRENT_VIEW_STATE['page'] = page_num
-
-        with list_container:
-            # === A. 顶部统计 ===
-            with ui.row().classes('w-full justify-between items-center px-2 mb-2'):
-                ui.label(f'共 {total_items} 台服务器 (第 {page_num}/{total_pages} 页)').classes('text-xs text-slate-400 font-bold')
-                if total_pages > 1:
-                    ui.pagination(1, total_pages, direction_links=True, value=page_num) \
-                        .props('dense flat color=blue text-color=slate-400 active-text-color=white') \
-                        .on_value_change(lambda e: handle_pagination_click(e.value))
-
-            # === B. 表头 (深色背景) ===
-            # bg-[#1e293b] border-slate-700
-            with ui.element('div').classes('grid w-full gap-4 font-bold text-slate-500 border-b border-slate-700 pb-2 px-6 mb-1 uppercase tracking-wider text-xs bg-[#1e293b] rounded-t-lg pt-3').style(current_css):
-                ui.label('服务器').classes('text-left pl-1')
-                ui.label('节点名称').classes('text-left pl-1')
-                if use_special_mode: ui.label('在线状态 / IP').classes('text-center')
-                else: ui.label('所在组').classes('text-center')
-                ui.label('已用流量').classes('text-center')
-                ui.label('协议').classes('text-center')
-                ui.label('端口').classes('text-center')
-                if not use_special_mode: ui.label('状态').classes('text-center')
-                ui.label('操作').classes('text-center')
-            
-            # === C. 数据切片 ===
-            start_idx = (page_num - 1) * PAGE_SIZE
-            end_idx = start_idx + PAGE_SIZE
-            current_page_data = server_list[start_idx:end_idx]
-
-            # === D. 渲染行 ===
-            for srv in current_page_data:
-                panel_n = NODES_DATA.get(srv['url'], []) or []
-                custom_n = srv.get('custom_nodes', []) or []
-                for cn in custom_n: cn['_is_custom'] = True
-                all_nodes = panel_n + custom_n
-                
-                if not all_nodes:
-                    draw_row(srv, None, current_css, use_special_mode, is_first=True)
-                    continue
-
-                for index, node in enumerate(all_nodes):
-                    draw_row(srv, node, current_css, use_special_mode, is_first=(index==0))
-            
-            # === E. 底部翻页器 ===
-            if total_pages > 1:
-                with ui.row().classes('w-full justify-center mt-4'):
-                    ui.pagination(1, total_pages, direction_links=True, value=page_num) \
-                        .props('dense flat color=blue text-color=slate-400 active-text-color=white') \
-                        .on_value_change(lambda e: handle_pagination_click(e.value))
-
-    def handle_pagination_click(new_page):
-        try: target_page = int(new_page)
-        except: return 
-        current_scope = CURRENT_VIEW_STATE.get('scope', 'ALL')
-        current_data = CURRENT_VIEW_STATE.get('data', None)
-        with parent_client:
-            asyncio.create_task(refresh_content(scope=current_scope, data=current_data, force_refresh=False, sync_name_action=True, page_num=target_page, manual_client=parent_client))
-
-    render_page(initial_page)
 
 # ================= 1. 列表单行渲染 (✅ 深色修复版) =================
 def draw_row(srv, node, css_style, use_special_mode, is_first=True):
@@ -7387,106 +7654,6 @@ async def render_aggregated_view(server_list, show_ping=False, token=None, initi
 
     # 初次渲染
     render_page(initial_page)
-
-# --- 辅助函数：绘制单行 (✅ 深色适配版) ---
-def draw_row(srv, node, css_style, use_special_mode, is_first=True):
-    # ✨ 修改点：背景 bg-[#1e293b], 边框 border-slate-700, 悬浮 bg-[#252f45]
-    card_cls = 'grid w-full gap-4 py-3 px-4 items-center group relative bg-[#1e293b] rounded-xl border border-slate-700 border-b-[3px] shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:border-blue-500 hover:bg-[#252f45] hover:-translate-y-[1px] mb-2'
-    
-    with ui.element('div').classes(card_cls).style(css_style):
-        # 1. 服务器名
-        srv_name = srv.get('name', '未命名')
-        if not is_first: ui.label(srv_name).classes('text-xs text-slate-700 truncate w-full text-left pl-2 font-mono')
-        else: ui.label(srv_name).classes('text-xs text-slate-400 font-bold truncate w-full text-left pl-2 font-mono group-hover:text-white')
-
-        # 无节点情况
-        if not node:
-            is_probe = srv.get('probe_installed', False)
-            msg = '同步中...' if not is_probe else '无节点配置'
-            ui.label(msg).classes('font-bold truncate text-slate-600 text-xs italic')
-            ui.label('--').classes('text-center text-slate-700')
-            ui.label('--').classes('text-center text-slate-700')
-            ui.label('UNK').classes('text-center text-slate-700 font-bold text-[10px]')
-            ui.label('--').classes('text-center text-slate-700')
-            if not use_special_mode: ui.element('div')
-            with ui.row().classes('gap-1 justify-center w-full no-wrap'):
-                 ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round color=grey')
-            return
-
-        # 2. 备注 (Slate-300 高亮文字)
-        remark = node.get('ps') or node.get('remark') or '未命名节点'
-        ui.label(remark).classes('font-bold truncate w-full text-left pl-2 text-slate-300 text-sm group-hover:text-blue-300')
-
-        # 3. 分组/IP
-        if use_special_mode:
-            with ui.row().classes('w-full justify-center items-center gap-1.5 no-wrap'):
-                is_online = srv.get('_status') == 'online'
-                color = 'text-green-500' if is_online else 'text-red-500'
-                if not srv.get('probe_installed') and not node.get('_is_custom'): color = 'text-orange-400'
-                ui.icon('bolt').classes(f'{color} text-sm')
-                display_ip = get_real_ip_display(srv['url'])
-                # IP 背景: Slate-900 (#0f172a)
-                ip_lbl = ui.label(display_ip).classes('text-[10px] font-mono text-slate-400 font-bold bg-[#0f172a] px-1.5 py-0.5 rounded select-all border border-slate-700')
-                bind_ip_label(srv['url'], ip_lbl)
-        else:
-            group_display = srv.get('group', '默认分组')
-            if group_display in ['默认分组', '自动注册', '未分组', '自动导入']:
-                try:
-                    detected = detect_country_group(srv.get('name', ''), None)
-                    if detected: group_display = detected
-                except: pass
-            # 分组背景: Slate-900 (#0f172a)
-            ui.label(group_display).classes('text-xs font-bold text-slate-400 w-full text-center truncate bg-[#0f172a] px-2 py-0.5 rounded-full border border-slate-700')
-
-        # 4. 流量
-        if node.get('_is_custom'): ui.label('-').classes('text-xs text-slate-600 w-full text-center font-mono')
-        else:
-            traffic = sum([node.get('up', 0), node.get('down', 0)])
-            ui.label(format_bytes(traffic)).classes('text-xs text-blue-400 w-full text-center font-mono font-bold')
-
-        # 5. 协议
-        proto = str(node.get('protocol', 'unk')).upper()
-        if 'HYSTERIA' in proto: proto = 'HY2'
-        if 'SHADOWSOCKS' in proto: proto = 'SS'
-        proto_color = 'text-slate-500'
-        if 'HY2' in proto: proto_color = 'text-purple-400'
-        elif 'VLESS' in proto: proto_color = 'text-blue-400'
-        elif 'VMESS' in proto: proto_color = 'text-green-400'
-        elif 'TROJAN' in proto: proto_color = 'text-orange-400'
-        ui.label(proto).classes(f'text-[11px] font-extrabold w-full text-center {proto_color} tracking-wide')
-
-        # 6. 端口
-        port_val = str(node.get('port', 0))
-        ui.label(port_val).classes('text-slate-400 font-mono w-full text-center font-bold text-xs')
-
-        # 7. 状态
-        if not use_special_mode:
-            with ui.element('div').classes('flex justify-center w-full'):
-                is_enable = node.get('enable', True)
-                dot_cls = "bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.6)]" if is_enable else "bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.6)]"
-                ui.element('div').classes(f'w-2 h-2 rounded-full {dot_cls}')
-
-        # 8. 操作按钮 (悬浮改为深色背景)
-        with ui.row().classes('gap-1 justify-center w-full no-wrap'):
-            # 复制链接
-            async def copy_link(n=node, s=srv):
-                link = n.get('_raw_link') or n.get('link')
-                if not link: link = generate_node_link(n, s['url'])
-                await safe_copy_to_clipboard(link)
-
-            ui.button(icon='content_copy', on_click=copy_link).props('flat dense size=sm round').tooltip('复制链接').classes('text-slate-500 hover:text-blue-400 hover:bg-slate-700')
-
-            # 明文配置
-            async def copy_detail():
-                host = srv['url'].split('://')[-1].split(':')[0]
-                text = generate_detail_config(node, host)
-                if text: await safe_copy_to_clipboard(text)
-                else: ui.notify('该协议不支持生成明文配置', type='warning')
-
-            ui.button(icon='description', on_click=copy_detail).props('flat dense size=sm round').tooltip('复制明文配置').classes('text-slate-500 hover:text-orange-400 hover:bg-slate-700')
-
-            # 设置按钮
-            ui.button(icon='settings', on_click=lambda _, s=srv: refresh_content('SINGLE', s)).props('flat dense size=sm round').tooltip('管理服务器').classes('text-slate-500 hover:text-white hover:bg-slate-700')
 
 
 
@@ -8910,22 +9077,32 @@ def main_page(request: Request):
     global content_container
     content_container = ui.column().classes('w-full h-full pl-4 pr-4 pt-4 overflow-y-auto bg-[#0f172a]')
     
-    # ================= 5. 后台任务 =================
+    # ================= 5. 后台任务：自动初始化用户环境 =================
     async def auto_init_system_settings():
         try:
-            current_origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
-            if not current_origin: return
+            # 1. 智能获取本次访问的真实域名
+            real_origin = get_dynamic_origin()
+            if "YOUR-DOMAIN" in real_origin:
+                real_origin = await ui.run_javascript('return window.location.origin', timeout=3.0)
+
+            if not real_origin: return
+
             stored_url = ADMIN_CONFIG.get('manager_base_url', '')
             need_save = False
+
             if 'session_version' not in ADMIN_CONFIG:
                 ADMIN_CONFIG['session_version'] = 'init_v1'
                 need_save = True
-            if not stored_url or 'xui-manager' in stored_url or '127.0.0.1' in stored_url:
-                ADMIN_CONFIG['manager_base_url'] = current_origin
+
+            # 2. 如果是第一次启动，或者之前存的是旧的/错误的IP，自动更新为用户的真实域名
+            if not stored_url or 'sijuly.nyc.mn' in stored_url or '127.0.0.1' in stored_url:
+                ADMIN_CONFIG['manager_base_url'] = real_origin
                 need_save = True
+
             if not ADMIN_CONFIG.get('probe_enabled'):
                 ADMIN_CONFIG['probe_enabled'] = True
                 need_save = True
+
             if need_save: await save_admin_config()
         except: pass
 
