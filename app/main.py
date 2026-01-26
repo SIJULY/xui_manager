@@ -7617,15 +7617,7 @@ async def render_aggregated_view(server_list, show_ping=False, token=None, initi
                         .props('dense flat color=blue text-color=slate-400 active-text-color=white') \
                         .on_value_change(lambda e: handle_pagination_click(e.value))
 
-    def handle_pagination_click(new_page):
-        try: target_page = int(new_page)
-        except: return 
-        current_scope = CURRENT_VIEW_STATE.get('scope', 'ALL')
-        current_data = CURRENT_VIEW_STATE.get('data', None)
-        with parent_client:
-            asyncio.create_task(refresh_content(scope=current_scope, data=current_data, force_refresh=False, sync_name_action=True, page_num=target_page, manual_client=parent_client))
 
-    render_page(initial_page)
 
     # ================= 🚀 核心逻辑：翻页事件处理 =================
     def handle_pagination_click(new_page):
@@ -9421,82 +9413,7 @@ app.on_shutdown(lambda: PROCESS_POOL.shutdown(wait=False) if PROCESS_POOL else N
 
 
 
-# ==========================================
-#飞线优化+定位+高亮地图
-# ==========================================
 
-# 1. 全局地图名称映射表
-MATCH_MAP = {
-    # --- 南美 ---
-    '🇨🇱': 'Chile', 'CHILE': 'Chile',
-    '🇧🇷': 'Brazil', 'BRAZIL': 'Brazil', 'BRA': 'Brazil', 'SAO PAULO': 'Brazil',
-    '🇦🇷': 'Argentina', 'ARGENTINA': 'Argentina', 'ARG': 'Argentina', # ⚠️已移除 'AR'，防止匹配 ARM
-    '🇨🇴': 'Colombia', 'COLOMBIA': 'Colombia', 'COL': 'Colombia',
-    '🇵🇪': 'Peru', 'PERU': 'Peru',
-    
-    # --- 北美 ---
-    '🇺🇸': 'United States', 'USA': 'United States', 'UNITED STATES': 'United States', 'AMERICA': 'United States',
-    '🇨🇦': 'Canada', 'CANADA': 'Canada', 'CAN': 'Canada',
-    '🇲🇽': 'Mexico', 'MEXICO': 'Mexico', 'MEX': 'Mexico',
-    
-    # --- 欧洲 ---
-    '🇬🇧': 'United Kingdom', 'UK': 'United Kingdom', 'GB': 'United Kingdom', 'UNITED KINGDOM': 'United Kingdom', 'LONDON': 'United Kingdom',
-    '🇩🇪': 'Germany', 'GERMANY': 'Germany', 'DEU': 'Germany', 'FRANKFURT': 'Germany',
-    '🇫🇷': 'France', 'FRANCE': 'France', 'FRA': 'France', 'PARIS': 'France',
-    '🇳🇱': 'Netherlands', 'NETHERLANDS': 'Netherlands', 'NLD': 'Netherlands', 'AMSTERDAM': 'Netherlands',
-    '🇷🇺': 'Russia', 'RUSSIA': 'Russia', 'RUS': 'Russia',
-    '🇮🇹': 'Italy', 'ITALY': 'Italy', 'ITA': 'Italy', 'MILAN': 'Italy',
-    '🇪🇸': 'Spain', 'SPAIN': 'Spain', 'ESP': 'Spain', 'MADRID': 'Spain',
-    '🇵🇱': 'Poland', 'POLAND': 'Poland', 'POL': 'Poland',
-    '🇺🇦': 'Ukraine', 'UKRAINE': 'Ukraine', 'UKR': 'Ukraine',
-    '🇸🇪': 'Sweden', 'SWEDEN': 'Sweden', 'SWE': 'Sweden',
-    '🇨🇭': 'Switzerland', 'SWITZERLAND': 'Switzerland', 'CHE': 'Switzerland',
-    '🇹🇷': 'Turkey', 'TURKEY': 'Turkey', 'TUR': 'Turkey',
-    '🇮🇪': 'Ireland', 'IRELAND': 'Ireland', 'IRL': 'Ireland',
-    '🇫🇮': 'Finland', 'FINLAND': 'Finland', 'FIN': 'Finland',
-    '🇳🇴': 'Norway', 'NORWAY': 'Norway', 'NOR': 'Norway',
-    '🇦🇹': 'Austria', 'AUSTRIA': 'Austria', 'AUT': 'Austria',
-    '🇧🇪': 'Belgium', 'BELGIUM': 'Belgium', 'BEL': 'Belgium',
-    '🇵🇹': 'Portugal', 'PORTUGAL': 'Portugal', 'PRT': 'Portugal',
-    '🇬🇷': 'Greece', 'GREECE': 'Greece', 'GRC': 'Greece',
-    
-    # --- 亚太 ---
-    '🇨🇳': 'China', 'CHINA': 'China', 'CHN': 'China', 'CN': 'China',
-    '🇭🇰': 'China', 'HONG KONG': 'China', 'HK': 'China',
-    '🇲🇴': 'China', 'MACAU': 'China', 'MO': 'China',
-    '🇹🇼': 'China', 'TAIWAN': 'China', 'TW': 'China',
-    '🇯🇵': 'Japan', 'JAPAN': 'Japan', 'JPN': 'Japan', 'TOKYO': 'Japan', 'OSAKA': 'Japan',
-    '🇰🇷': 'South Korea', 'KOREA': 'South Korea', 'KOR': 'South Korea', 'SEOUL': 'South Korea',
-    '🇸🇬': 'Singapore', 'SINGAPORE': 'Singapore', 'SGP': 'Singapore', 'SG': 'Singapore',
-    '🇮🇳': 'India', 'INDIA': 'India', 'IND': 'India', 'MUMBAI': 'India',
-    '🇦🇺': 'Australia', 'AUSTRALIA': 'Australia', 'AUS': 'Australia', 'SYDNEY': 'Australia',
-    '🇳🇿': 'New Zealand', 'NEW ZEALAND': 'New Zealand', 'NZL': 'New Zealand',
-    '🇻🇳': 'Vietnam', 'VIETNAM': 'Vietnam', 'VNM': 'Vietnam',
-    '🇹🇭': 'Thailand', 'THAILAND': 'Thailand', 'THA': 'Thailand', 'BANGKOK': 'Thailand',
-    '🇲🇾': 'Malaysia', 'MALAYSIA': 'Malaysia', 'MYS': 'Malaysia',
-    '🇮🇩': 'Indonesia', 'INDONESIA': 'Indonesia', 'IDN': 'Indonesia', 'JAKARTA': 'Indonesia',
-    '🇵🇭': 'Philippines', 'PHILIPPINES': 'Philippines', 'PHL': 'Philippines',
-    '🇰🇭': 'Cambodia', 'CAMBODIA': 'Cambodia', 'KHM': 'Cambodia',
-    
-    # --- 中东/非洲 ---
-    '🇦🇪': 'United Arab Emirates', 'UAE': 'United Arab Emirates', 'DUBAI': 'United Arab Emirates',
-    '🇿🇦': 'South Africa', 'SOUTH AFRICA': 'South Africa', 'ZAF': 'South Africa',
-    '🇸🇦': 'Saudi Arabia', 'SAUDI ARABIA': 'Saudi Arabia', 'SAU': 'Saudi Arabia',
-    '🇮🇱': 'Israel', 'ISRAEL': 'Israel', 'ISR': 'Israel',
-    '🇪🇬': 'Egypt', 'EGYPT': 'Egypt', 'EGY': 'Egypt',
-    '🇮🇷': 'Iran', 'IRAN': 'Iran', 'IRN': 'Iran',
-    '🇳🇬': 'Nigeria', 'NIGERIA': 'Nigeria', 'NGA': 'Nigeria'
-}
-
-# 2. 辅助函数
-def get_echarts_region_name(name_raw):
-    if not name_raw: return None
-    name = name_raw.upper()
-    # 按长度排序，优先匹配 Emoji 和 长单词
-    sorted_keys = sorted(MATCH_MAP.keys(), key=len, reverse=True)
-    for key in sorted_keys:
-        if key in name: return MATCH_MAP[key]
-    return None
     
 # ================= [手机端] 详情弹窗  =================
 def open_mobile_server_detail(server_conf):
