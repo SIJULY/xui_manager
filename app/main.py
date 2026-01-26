@@ -1112,7 +1112,7 @@ async def open_deploy_hysteria_dialog(server_conf, callback):
             btn_deploy = ui.button('开始部署', on_click=start_process).props('unelevated').classes('bg-blue-600 text-white')
     d.open()
 
-# ================= Snell v5 安装脚本模板 (版本修复 + 防火墙自适应版) =================
+# ================= Snell v5 安装脚本模板 (极致校验修复版) =================
 SNELL_INSTALL_SCRIPT_TEMPLATE = r"""
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
@@ -1120,16 +1120,17 @@ export DEBIAN_FRONTEND=noninteractive
 # 接收参数
 PORT="{port}"
 PSK="{psk}"
+TARGET_IP="{target_ip}"
 
 # 1. 安装基础依赖
 if [ -f /etc/debian_version ]; then
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y wget unzip iptables >/dev/null 2>&1
+    apt-get install -y curl unzip iptables >/dev/null 2>&1
 elif [ -f /etc/redhat-release ]; then
-    yum install -y wget unzip iptables >/dev/null 2>&1
+    yum install -y curl unzip iptables >/dev/null 2>&1
 fi
 
-# 2. 检测系统架构 (双花括号是为防止 Python 误解析)
+# 2. 检测系统架构
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64) S_ARCH="amd64" ;;
@@ -1141,13 +1142,16 @@ esac
 systemctl stop snell 2>/dev/null
 rm -rf /usr/local/bin/snell-server
 
-# 4. 下载 v5.0.1 版本二进制文件 (已修复官方 5.0.2 不存在的问题)
+# 4. 安全下载 (使用 curl -f 遇到 404 直接失败)
 DOWNLOAD_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-${{S_ARCH}}.zip"
 
-wget -O /tmp/snell.zip "$DOWNLOAD_URL"
-if [ ! -f /tmp/snell.zip ]; then echo "下载失败，请检查网络或版本链接"; exit 1; fi
+echo "正在下载: $DOWNLOAD_URL"
+curl -fsSL "$DOWNLOAD_URL" -o /tmp/snell.zip
+if [ $? -ne 0 ]; then echo "❌ 下载失败，请检查网络或版本是否已更新"; exit 1; fi
 
-unzip -o /tmp/snell.zip -d /usr/local/bin/
+unzip -o /tmp/snell.zip -d /usr/local/bin/ >/dev/null 2>&1
+if [ ! -f /usr/local/bin/snell-server ]; then echo "❌ 解压失败，未找到二进制文件"; exit 1; fi
+
 chmod +x /usr/local/bin/snell-server
 rm -f /tmp/snell.zip
 
@@ -1160,7 +1164,7 @@ psk = $PSK
 ipv6 = false
 EOF
 
-# 6. 核心机制：自动放行防火墙端口 (适配甲骨文云等)
+# 6. 配置防火墙放行
 if command -v ufw >/dev/null 2>&1; then
     ufw allow $PORT/tcp >/dev/null 2>&1
     ufw allow $PORT/udp >/dev/null 2>&1
@@ -1168,7 +1172,6 @@ fi
 if command -v iptables >/dev/null 2>&1; then
     iptables -I INPUT -p tcp --dport $PORT -j ACCEPT
     iptables -I INPUT -p udp --dport $PORT -j ACCEPT
-    # 尝试保存规则以防重启失效
     netfilter-persistent save >/dev/null 2>&1 || service iptables save >/dev/null 2>&1
 fi
 
@@ -1188,21 +1191,30 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
-# 8. 启动服务
+# 8. 启动服务并验证
 systemctl daemon-reload
 systemctl enable --now snell >/dev/null 2>&1
+sleep 1.5
 
-# 9. 输出结果供 Python 后端捕获 (固定 version=5)
-IP=$(curl -s https://api.ipify.org)
-echo "SNELL_DEPLOY_SUCCESS_LINK: snell://$PSK@$IP:$PORT?version=5#Snell-Node"
+# 9. 核心修复：检查进程是否真的在运行
+if systemctl is-active --quiet snell; then
+    # 尝试获取公网IP，如果超时失败，则使用Python传入的兜底IP
+    PUBLIC_IP=$(curl -s --max-time 3 https://api.ipify.org)
+    [ -z "$PUBLIC_IP" ] && PUBLIC_IP="$TARGET_IP"
+    
+    echo "SNELL_DEPLOY_SUCCESS_LINK: snell://$PSK@$PUBLIC_IP:$PORT?version=5#Snell-Node"
+else
+    echo "❌ 服务启动失败！可能端口被占用，请执行 journalctl -u snell 查看原因。"
+    exit 1
+fi
 """
 
 # ================= 一键部署 Snell (Surge 专用 - V5 纯净深色版) =================
 async def open_deploy_snell_dialog(server_conf, callback):
+    # 解析目标 IP 作为兜底
     target_host = server_conf.get('ssh_host') or server_conf.get('url', '').replace('http://', '').replace('https://', '').split(':')[0]
     import random, string, uuid, urllib.parse
 
-    # 主卡片适配深色：bg-[#1e293b] border border-slate-700
     with ui.dialog() as d, ui.card().classes('w-[500px] p-0 gap-0 overflow-hidden rounded-xl bg-[#1e293b] border border-slate-700 shadow-2xl'):
         # 顶部标题栏
         with ui.column().classes('w-full bg-[#0f172a] border-b border-slate-700 p-6 gap-2'):
@@ -1222,10 +1234,10 @@ async def open_deploy_snell_dialog(server_conf, callback):
                 port_input = ui.number('端口', value=rand_port, format='%.0f').props('outlined dense dark').classes('w-1/3')
                 psk_input = ui.input('密钥 (PSK)', value=rand_psk).props('outlined dense dark').classes('flex-grow')
                 
-            # 日志区 (纯黑背景更显眼)
+            # 日志区
             log_area = ui.log().classes('w-full h-48 bg-black text-green-400 text-[11px] font-mono p-3 rounded border border-slate-700 hidden transition-all')
 
-        # 底部操作栏 (适配深色：bg-[#0f172a] border-slate-700)
+        # 底部操作栏
         with ui.row().classes('w-full p-4 bg-[#0f172a] border-t border-slate-700 justify-end gap-3'):
             btn_cancel = ui.button('取消', on_click=d.close).props('flat color=grey')
             
@@ -1234,9 +1246,9 @@ async def open_deploy_snell_dialog(server_conf, callback):
                 try:
                     params = {
                         "port": int(port_input.value),
-                        "psk": psk_input.value
+                        "psk": psk_input.value,
+                        "target_ip": target_host # 传入兜底 IP
                     }
-                    # ✨✨✨ 这里修复了之前的语法错误 ✨✨✨
                     script_content = SNELL_INSTALL_SCRIPT_TEMPLATE.format(**params)
                     deploy_cmd = f"cat > /tmp/install_snell.sh << 'EOF_SCRIPT'\n{script_content}\nEOF_SCRIPT\nbash /tmp/install_snell.sh"
                     
@@ -1248,7 +1260,7 @@ async def open_deploy_snell_dialog(server_conf, callback):
                         match = re.search(r'SNELL_DEPLOY_SUCCESS_LINK: (snell://.*)', output)
                         if match:
                             link = match.group(1).strip()
-                            log_area.push("🎉 Snell v5 部署成功！")
+                            log_area.push("🎉 Snell v5 部署成功并已启动！")
                             
                             custom_name = name_input.value.strip() or f"Snell-v5-{target_host[-3:]}"
                             
@@ -1275,9 +1287,10 @@ async def open_deploy_snell_dialog(server_conf, callback):
                             await asyncio.sleep(1); d.close()
                             if callback: await callback()
                         else: 
-                            log_area.push("❌ 未捕获链接"); log_area.push(output[-500:])
+                            log_area.push("❌ 部署失败：未能成功启动服务。")
+                            log_area.push(output[-500:]) # 打印最后的错误日志
                     else: 
-                        log_area.push(f"❌ SSH 失败: {output}")
+                        log_area.push(f"❌ SSH 连接失败: {output}")
                 finally:
                     btn_cancel.enable(); btn_deploy.props(remove='loading')
 
@@ -3503,21 +3516,34 @@ def generate_detail_config(node, server_host):
         address = node.get('listen') or clean_host
         port = node['port'] # 数据库里存的是 "20000-50000"
         
-        # === A. 自定义节点 (Hy2) ===
+        # === A. 自定义节点 (Snell / Hy2 / XHTTP) ===
         if node.get('_is_custom'):
             raw_link = node.get('_raw_link', '')
-            if raw_link.startswith('hy2://'):
+            
+            # [新增] Snell 解析逻辑
+            if raw_link.startswith('snell://'):
+                from urllib.parse import urlparse, parse_qs
+                parsed = urlparse(raw_link)
+                psk = parsed.username
+                s_host = parsed.hostname or address 
+                s_port = parsed.port or port
+                
+                params = parse_qs(parsed.query)
+                version = params.get('version', ['4'])[0]
+                
+                return f"{remark} = snell, {s_host}, {s_port}, psk={psk}, version={version}, tfo=true, reuse=true"
+
+            # [原有] Hy2 解析逻辑
+            elif raw_link.startswith('hy2://'):
                 from urllib.parse import urlparse, parse_qs
                 parsed = urlparse(raw_link)
                 password = parsed.username
                 h_host = parsed.hostname or address 
                 
                 # ✨✨✨ 修复核心：优先使用范围字符串 ✨✨✨
-                # 如果 port 字段包含 '-'，说明是范围，直接用它
                 if str(port) and '-' in str(port):
                     h_port = port
                 else:
-                    # 否则才用链接里的单端口
                     h_port = parsed.port or port
                 
                 params = parse_qs(parsed.query)
@@ -3527,14 +3553,11 @@ def generate_detail_config(node, server_host):
                 if sni: line += f", sni={sni}"
                 line += ", skip-cert-verify=true, download-bandwidth=500, udp-relay=true"
                 return line
+                
             elif raw_link.startswith('vless://'):
                  return f"// Surge 暂未原生支持 XHTTP: {remark}"
 
         # === B. 面板标准节点 (VMess / Trojan) ===
-        # ... (以下部分保持你原代码不变，省略以节省空间) ...
-        # 请保留原函数中 VMess 和 Trojan 的处理逻辑
-        
-        # 为了完整性，这里补全剩余逻辑，你可以直接覆盖整个函数：
         protocol = node['protocol']
         settings = json.loads(node['settings']) if isinstance(node['settings'], str) else node['settings']
         stream = json.loads(node['streamSettings']) if isinstance(node['streamSettings'], str) else node['streamSettings']
