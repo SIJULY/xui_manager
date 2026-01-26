@@ -7321,110 +7321,7 @@ async def render_single_server_view(server_conf, force_refresh=False):
         # 如果配置了面板账号，且本地缓存为空，则在进入页面 0.2 秒后自动触发后台拉取
         if has_manager_access and not NODES_DATA.get(server_conf['url']):
             ui.timer(0.2, lambda: asyncio.create_task(reload_and_refresh_ui()), once=True)
-# ================= SSH 窗口 =================
-def render_ssh_window_full(server_conf):
-    with ui.card().classes('w-full h-[750px] flex-shrink-0 p-0 rounded-xl border border-gray-300 border-b-[4px] border-b-gray-400 shadow-lg overflow-hidden bg-slate-900 flex flex-col'):
-        ssh_state = {'active': False, 'instance': None}
 
-        def render_ssh_area():
-            with ui.row().classes('w-full h-10 bg-slate-800 items-center justify-between px-4 flex-shrink-0 border-b border-slate-700'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.icon('terminal').classes('text-white text-sm')
-                    ui.label(f"SSH Console: {server_conf.get('ssh_user','root')}@{server_conf.get('ssh_host') or 'IP'}").classes('text-gray-300 text-xs font-mono font-bold')
-                if ssh_state['active']: 
-                    ui.button(icon='link_off', on_click=stop_ssh).props('flat dense round color=red size=sm').tooltip('断开连接')
-                else: 
-                    ui.label('Disconnected').classes('text-[10px] text-gray-500')
-
-            box_cls = 'w-full flex-grow bg-[#0f0f0f] overflow-hidden'
-            if not ssh_state['active']: box_cls += ' flex justify-center items-center'
-            else: box_cls += ' relative block'
-
-            terminal_box = ui.element('div').classes(box_cls)
-            with terminal_box:
-                if not ssh_state['active']:
-                    with ui.column().classes('items-center gap-4'):
-                        ui.icon('dns', size='4rem').classes('text-gray-800')
-                        ui.label('安全终端已就绪').classes('text-gray-600 text-sm font-bold')
-                        ui.button('立即连接 SSH', icon='login', on_click=start_ssh).classes('bg-blue-600 text-white font-bold px-6 py-2 rounded-lg border-b-4 border-blue-800 active:border-b-0 active:translate-y-[2px] transition-all')
-                else:
-                    ssh = WebSSH(terminal_box, server_conf)
-                    ssh_state['instance'] = ssh
-                    ui.timer(0.1, lambda: asyncio.create_task(ssh.connect()), once=True)
-
-            # 快捷命令栏
-            with ui.row().classes('w-full min-h-[60px] bg-slate-800 border-t border-slate-700 px-4 py-4 gap-3 items-center flex-wrap'):
-                ui.label('快捷命令:').classes('text-xs font-bold text-gray-400 mr-2')
-                commands = ADMIN_CONFIG.get('quick_commands', [])
-                for cmd_obj in commands:
-                    cmd_name = cmd_obj.get('name', '未命名'); cmd_text = cmd_obj.get('cmd', '')
-                    with ui.element('div').classes('flex items-center bg-slate-700 rounded overflow-hidden border-b-2 border-slate-900 transition-all active:border-b-0 active:translate-y-[2px] hover:bg-slate-600'):
-                        ui.button(cmd_name, on_click=lambda c=cmd_text: exec_quick_cmd(c)).props('unelevated').classes('bg-transparent text-[11px] font-bold text-slate-300 px-3 py-1.5 hover:text-white rounded-none')
-                        ui.element('div').classes('w-[1px] h-4 bg-slate-500 opacity-50')
-                        ui.button(icon='settings', on_click=lambda c=cmd_obj: open_cmd_editor(c)).props('flat dense size=xs').classes('text-slate-400 hover:text-white px-1 py-1.5 rounded-none')
-                ui.button(icon='add', on_click=lambda: open_cmd_editor(None)).props('flat dense round size=sm color=green').tooltip('添加常用命令')
-
-        async def start_ssh():
-            ssh_state['active'] = True
-            ssh_wrapper.clear()
-            with ssh_wrapper:
-                render_ssh_area()
-
-        async def stop_ssh():
-            if ssh_state['instance']: 
-                ssh_state['instance'].close()
-                ssh_state['instance'] = None
-            ssh_state['active'] = False
-            ssh_wrapper.clear()
-            with ssh_wrapper:
-                render_ssh_area()
-
-        def exec_quick_cmd(cmd_text):
-            if ssh_state['instance'] and ssh_state['instance'].active:
-                ssh_state['instance'].channel.send(cmd_text + "\n")
-                ui.notify(f"已发送: {cmd_text[:20]}...", type='positive', position='bottom')
-            else: ui.notify("请先连接 SSH", type='warning', position='bottom')
-
-        def open_cmd_editor(existing_cmd=None):
-            with ui.dialog() as d, ui.card().classes('w-96 p-5 bg-[#1e293b] border border-slate-600 shadow-2xl'):
-                with ui.row().classes('w-full justify-between items-center mb-4'):
-                    ui.label('管理快捷命令').classes('text-lg font-bold text-white')
-                    ui.button(icon='close', on_click=d.close).props('flat round dense color=grey')
-                name_input = ui.input('按钮名称', value=existing_cmd['name'] if existing_cmd else '').classes('w-full mb-3').props('outlined dense dark bg-color="slate-800"')
-                cmd_input = ui.textarea('执行命令', value=existing_cmd['cmd'] if existing_cmd else '').classes('w-full mb-4').props('outlined dense dark bg-color="slate-800" rows=4')
-                
-                async def save():
-                    name = name_input.value.strip(); cmd = cmd_input.value.strip()
-                    if not name or not cmd: return ui.notify("内容不能为空", type='negative')
-                    if 'quick_commands' not in ADMIN_CONFIG: ADMIN_CONFIG['quick_commands'] = []
-                    if existing_cmd: existing_cmd['name'] = name; existing_cmd['cmd'] = cmd
-                    else: ADMIN_CONFIG['quick_commands'].append({'name': name, 'cmd': cmd, 'id': str(uuid.uuid4())[:8]})
-                    await save_admin_config()
-                    d.close()
-                    ssh_wrapper.clear()
-                    with ssh_wrapper:
-                        render_ssh_area()
-                    ui.notify("命令已保存", type='positive')
-
-                async def delete_current():
-                    if existing_cmd and 'quick_commands' in ADMIN_CONFIG:
-                        ADMIN_CONFIG['quick_commands'].remove(existing_cmd)
-                        await save_admin_config()
-                        d.close()
-                        ssh_wrapper.clear()
-                        with ssh_wrapper:
-                            render_ssh_area()
-                        ui.notify("命令已删除", type='positive')
-
-                with ui.row().classes('w-full justify-between mt-2'):
-                    if existing_cmd: ui.button('删除', icon='delete', color='red', on_click=delete_current).props('flat dense')
-                    else: ui.element('div')
-                    ui.button('保存', icon='save', on_click=save).classes('bg-blue-600 text-white font-bold rounded-lg border-b-4 border-blue-800 active:border-b-0 active:translate-y-[2px]')
-            d.open()
-
-        ssh_wrapper = ui.column().classes('w-full h-full p-0 gap-0')
-        with ssh_wrapper:
-            render_ssh_area()
             
 # ================= 聚合视图 (局部静默刷新 + 自动状态更新) =================
 # 全局字典，用于存储每行 UI 元素的引用，以便局部更新
@@ -9917,32 +9814,7 @@ def open_pc_server_detail(server_conf):
         d.on('hide', lambda: timer.cancel())
     except Exception as e:
         print(f"PC Detail Error: {e}")
-
-# ================= 自动判断路由函数 =================
-def open_dark_server_detail(server_conf):
-    # 简单的 JS 判断：如果屏幕宽度 > 768px (iPad竖屏宽度)，认为是电脑，否则是手机
-    ui.run_javascript(f'''
-        if (window.innerWidth > 768) {{
-            window.location.href = "javascript:void(0)"; // 占位
-        }}
-    ''')
-    
-    # 由于 NiceGUI 服务端渲染的特性，要在 Python 里即时知道客户端宽度比较困难。
-    # 为了最稳妥，建议直接在调用处区分（例如 render_mobile_status_page 调用 mobile 版，render_desktop 调用 PC 版）。
-    # 或者，我们利用一个折中方案：默认调用 PC 版，但在手机页面入口调用 Mobile 版。
-    
-    # 但为了方便您直接替换，这里做一个简单的假设：
-    # 如果当前处于 Mobile 渲染函数中（render_mobile_status_page），直接调 mobile 版。
-    # 否则默认调 PC 版。
-    
-    # ⚠️ 既然您有两个完全不同的渲染函数 (render_mobile_status_page 和 render_desktop_status_page)
-    # 请手动去 render_mobile_status_page 里把调用改成 open_mobile_server_detail(s)
-    # 去 render_desktop_status_page 里把调用改成 open_pc_server_detail(s)
-    
-    # 既然函数名没变，我就默认打开 PC 版 (因为您刚才是在 PC 调试)，
-    # **请务必去您的 render_mobile_status_page 函数里，把调用的函数名改为 open_mobile_server_detail**
-    open_pc_server_detail(server_conf)
-        
+       
 # ================= 全局变量 =================
 # 用于记录当前探针页面选中的标签，防止刷新重置
 CURRENT_PROBE_TAB = 'ALL' 
