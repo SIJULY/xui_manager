@@ -62,32 +62,28 @@ def sync_ping_worker(host, port):
     except:
         return -1
 
-# ================= 辅助：全局 GeoIP 和 智能命名逻辑 =================
-
-# 从 IP 获取地理信息 (全局版)
+# ================= 辅助：全局 GeoIP 和 智能命名逻辑 (已升级：增加省份识别) =================
 def fetch_geo_from_ip(host):
     try:
         clean_host = host.split('://')[-1].split(':')[0]
-        # 跳过内网
         if clean_host.startswith('192.168.') or clean_host.startswith('10.') or clean_host == '127.0.0.1':
             return None
         if clean_host in IP_GEO_CACHE:
             return IP_GEO_CACHE[clean_host]
         
-        # 请求 ip-api (lang=zh-CN)
         with requests.Session() as s:
-            url = f"http://ip-api.com/json/{clean_host}?lang=zh-CN&fields=status,lat,lon,country"
+            # ✨ 修改点：fields 里增加了 regionName (省份/州) 和 city (城市)
+            url = f"http://ip-api.com/json/{clean_host}?lang=zh-CN&fields=status,lat,lon,country,regionName,city"
             r = s.get(url, timeout=3)
             if r.status_code == 200:
                 data = r.json()
                 if data.get('status') == 'success':
-                    result = (data['lat'], data['lon'], data['country'])
+                    # ✨ 修改点：返回结果包含了 国家 和 省份
+                    result = (data['lat'], data['lon'], data['country'], data.get('regionName', '未知'))
                     IP_GEO_CACHE[clean_host] = result
                     return result
-    except: 
-        pass
+    except: pass
     return None
-
 
 # =================强制 GeoIP 命名与分组任务  =================
 async def force_geoip_naming_task(server_conf, max_retries=10):
@@ -8354,9 +8350,9 @@ def render_single_sidebar_row(s):
     # 注册到全局索引
     SIDEBAR_UI_REFS['rows'][s['url']] = row
     return row
+    
 # ================= 侧边栏渲染 (深色适配版) =================
 _current_dragged_group = None 
-
 @ui.refreshable
 def render_sidebar_content():
     global _current_dragged_group
@@ -8372,7 +8368,19 @@ def render_sidebar_content():
     # 顶部容器背景：Slate-800 (#1e293b)
     with ui.column().classes('w-full p-4 border-b border-slate-700 bg-[#1e293b] flex-shrink-0 relative overflow-hidden'):
         ui.label('X-Fusion').classes('absolute top-2 right-6 text-[3rem] font-black text-slate-800 opacity-20 pointer-events-none -rotate-12 select-none z-0 tracking-tighter leading-tight')
-        ui.label('控制中心').classes('text-sm font-black mb-4 z-10 relative text-blue-500 tracking-widest uppercase')
+        
+        # ✨✨✨ 修改点：原本这里只是一个控制中心文字，现在改为了文字+IP显示 ✨✨✨
+        sidebar_ip = app.storage.user.get('last_known_ip', 'Unknown')
+        with ui.row().classes('w-full items-center justify-between mb-4 z-10 relative'):
+            ui.label('控制中心').classes('text-sm font-black text-blue-500 tracking-widest uppercase')
+            
+            # 右侧：登陆IP显示 (深色背景，蓝色字体，绿色盾牌)
+            with ui.row().classes('items-center gap-1 bg-[#0f172a] px-2 py-0.5 rounded border border-slate-700 shadow-sm'):
+                ui.label('登陆IP:').classes('text-[11px] font-bold text-blue-500')
+                ui.icon('security', color='green-500').classes('text-xs')
+                ui.label(sidebar_ip).classes('text-[11px] font-mono font-bold text-blue-500')
+        # ✨✨✨ 修改点结束 ✨✨✨
+
         with ui.column().classes('w-full gap-2 z-10 relative'):
             ui.button('仪表盘', icon='dashboard', on_click=lambda: asyncio.create_task(load_dashboard_stats())).props('flat align=left').classes(btn_top_style)
             ui.button('探针设置', icon='tune', on_click=render_probe_page).props('flat align=left').classes(btn_top_style)
@@ -8522,9 +8530,26 @@ def render_sidebar_content():
         ui.button('全局 SSH 设置', icon='vpn_key', on_click=open_global_settings_dialog).props('flat align=left').classes(bottom_btn_3d)
         ui.button('数据备份 / 恢复', icon='save', on_click=open_data_mgmt_dialog).props('flat align=left').classes(bottom_btn_3d)
         
-# ================== 登录与 MFA 逻辑  ==================
+# ================== 登录与 MFA 逻辑 (升级版：含设备指纹与地理围栏)  ==================
 @ui.page('/login')
 def login_page(request: Request): 
+    # ✨ 核心注入：在页面加载时植入 JS，生成并保存永久设备指纹
+    ui.add_head_html('''
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 尝试从本地存储获取指纹
+            let fp = localStorage.getItem('fp_device_id');
+            if (!fp) {
+                // 如果没有，生成一个高随机性的唯一 ID
+                fp = 'dev-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36);
+                localStorage.setItem('fp_device_id', fp);
+            }
+            // 将指纹写入 Cookie，有效期设置为 10 年，供后端 Python 提取
+            document.cookie = "fp_device_id=" + fp + "; path=/; max-age=315360000";
+        });
+    </script>
+    ''')
+
     # 容器：用于切换登录步骤 (账号密码 -> MFA)
     container = ui.card().classes('absolute-center w-full max-w-sm p-8 shadow-2xl rounded-xl bg-white')
 
@@ -8628,11 +8653,23 @@ def login_page(request: Request):
             ADMIN_CONFIG['session_version'] = str(uuid.uuid4())[:8]
         app.storage.user['session_version'] = ADMIN_CONFIG['session_version']
         
-        # 3. 记录 IP (用于主页的变动检测弹窗)
+        # ✨✨✨ 3. 核心修改：记录 IP、指纹 以及 地理位置 ✨✨✨
         try:
+            # 从请求头中提取真实 IP 和 Cookie 中的指纹
             client_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
-            # 变量名必须是 last_known_ip，与主页对应
+            client_device_id = request.cookies.get('fp_device_id', 'Unknown_Device')
+            
+            # 记录 IP 和 设备指纹
             app.storage.user['last_known_ip'] = client_ip
+            app.storage.user['device_id'] = client_device_id 
+            
+            # 获取并记录登录地的省份/国家 (依赖之前升级的 fetch_geo_from_ip 函数)
+            geo = fetch_geo_from_ip(client_ip)
+            if geo and len(geo) >= 4:
+                # geo[2] 是国家，geo[3] 是省份/地区
+                app.storage.user['login_region'] = f"{geo[2]}-{geo[3]}" 
+            else:
+                app.storage.user['login_region'] = "未知区域"
         except: pass
 
         ui.navigate.to('/')
@@ -8718,15 +8755,19 @@ def main_page(request: Request):
     if not check_auth(request): 
         return RedirectResponse('/login')
 
-    # ================= 3. IP 变动检测 =================
+    # ================= 3. 高级安全风控 (IP 地理围栏 + 指纹核对) =================
     try:
         current_ip = request.headers.get("X-Forwarded-For", request.client.host).split(',')[0].strip()
+        current_device_id = request.cookies.get('fp_device_id', 'Unknown')
     except:
-        current_ip = "Unknown"
+        current_ip = "Unknown"; current_device_id = "Unknown"
+        
     display_ip = current_ip 
     last_ip = app.storage.user.get('last_known_ip', '')
-    app.storage.user['last_known_ip'] = current_ip
+    last_device_id = app.storage.user.get('device_id', '')
+    login_region = app.storage.user.get('login_region', '未知区域')
     
+    # 辅助函数：一键踢出
     async def reset_global_session(dialog_ref=None):
         new_ver = str(uuid.uuid4())[:8]
         ADMIN_CONFIG['session_version'] = new_ver
@@ -8737,24 +8778,47 @@ def main_page(request: Request):
         app.storage.user.clear()
         ui.navigate.to('/login')
 
-    if last_ip and last_ip != current_ip:
-        def open_ip_alert():
-            with ui.dialog() as d, ui.card().classes('w-96 p-5 border-t-4 border-red-500 shadow-2xl bg-[#1e293b]'):
-                with ui.row().classes('items-center gap-2 text-red-500 mb-2'):
-                    ui.icon('security', size='md')
-                    ui.label('安全警告：登录 IP 变动').classes('font-bold text-lg')
-                ui.label('检测到您的登录 IP 发生了变化：').classes('text-sm text-slate-400')
-                with ui.grid().classes('grid-cols-2 gap-2 my-4 bg-red-900/20 p-3 rounded border border-red-500/30'):
-                    ui.label('上次 IP:').classes('text-xs font-bold text-slate-500')
-                    ui.label(last_ip).classes('text-xs font-mono font-bold text-slate-300')
-                    ui.label('本次 IP:').classes('text-xs font-bold text-slate-500')
-                    ui.label(current_ip).classes('text-xs font-mono font-bold text-blue-400')
-                ui.label('如果是您切换了网络，请忽略。').classes('text-xs text-slate-500')
-                with ui.row().classes('w-full justify-end gap-2 mt-4'):
-                    ui.button('我知道了', on_click=d.close).props('flat dense color=grey')
-                    ui.button('强制下线', color='red', icon='gpp_bad', on_click=lambda: reset_global_session(d)).props('unelevated dense')
-            d.open()
-        ui.timer(0.5, open_ip_alert, once=True)
+    # 定义高危弹窗
+    def trigger_geo_alert(new_ip, old_ip, old_loc, new_loc):
+        app.storage.user['last_known_ip'] = new_ip # 暂时更新防止无限弹窗
+        with ui.dialog() as d, ui.card().classes('w-[450px] p-5 border-t-4 border-red-500 shadow-2xl bg-[#1e293b]'):
+            with ui.row().classes('items-center gap-2 text-red-500 mb-2'):
+                ui.icon('gpp_bad', size='md')
+                ui.label('⚠️ 安全拦截：异地/异常设备登录').classes('font-bold text-lg')
+            ui.label('系统检测到您的会话出现了异常跳变，可能存在 Cookie 劫持风险：').classes('text-sm text-slate-300')
+            
+            with ui.grid().classes('grid-cols-1 gap-2 my-4 bg-red-900/30 p-3 rounded border border-red-500/50'):
+                ui.label(f'🔒 原始登录地: {old_ip} ({old_loc})').classes('text-xs font-mono font-bold text-slate-400')
+                ui.label(f'🚨 当前请求源: {new_ip} ({new_loc})').classes('text-xs font-mono font-bold text-red-400')
+            
+            ui.label('如果您正在使用代理节点访问面板，请忽略；如果不是您本人的操作，请立即强制下线所有设备！').classes('text-xs text-red-300 font-bold')
+            
+            with ui.row().classes('w-full justify-end gap-3 mt-4'):
+                ui.button('是本人操作 (忽略)', on_click=d.close).props('outline color=grey')
+                ui.button('冻结并强制下线', color='red', icon='block', on_click=lambda: reset_global_session(d)).props('unelevated')
+        d.open()
+
+    # ✨✨✨ 修复：将风控逻辑封装为异步函数 ✨✨✨
+    async def run_security_check():
+        if last_ip and last_ip != current_ip:
+            # IP 变了，先看指纹对不对
+            if last_device_id and last_device_id == current_device_id:
+                # 指纹是对的，异步查询地理位置
+                current_geo = await run.io_bound(fetch_geo_from_ip, current_ip)
+                current_region = f"{current_geo[2]}-{current_geo[3]}" if current_geo else "未知区域"
+                
+                if current_region == login_region or "未知" in current_region:
+                    # ✅ 同一省份，静默放行
+                    app.storage.user['last_known_ip'] = current_ip
+                else:
+                    # ❌ 异地跳变，触发拦截
+                    trigger_geo_alert(current_ip, last_ip, login_region, current_region)
+            else:
+                # ❌ 新设备新IP，触发拦截
+                trigger_geo_alert(current_ip, last_ip, "旧设备", "未知新设备")
+
+    # ✨✨✨ 修复：页面加载完成后 0.5 秒自动执行检查，不卡顿主界面 ✨✨✨
+    ui.timer(0.5, run_security_check, once=True)
 
     # ================= 4. UI 构建 (深色布局核心) =================
     
@@ -8762,16 +8826,15 @@ def main_page(request: Request):
     with ui.left_drawer(value=True, fixed=True).classes('bg-[#1e293b] border-r border-slate-700').props('width=360 bordered') as drawer:
         render_sidebar_content()
 
-    # ✨ 修改点：顶部导航栏背景色
+    # ✨ 恢复顶栏：移除 IP，保持简洁
     with ui.header().classes('bg-[#0f172a] text-white h-14 border-b border-slate-800 shadow-md'):
         with ui.row().classes('w-full items-center justify-between'):
-            # 左侧
+            # 左侧：菜单与标题
             with ui.row().classes('items-center gap-2'):
                 ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round dense color=white')
                 ui.label('X-Fusion Panel').classes('text-lg font-bold ml-2 tracking-wide text-blue-400')
-                ui.label(f"[{display_ip}]").classes('text-xs text-slate-500 font-mono pt-1 hidden sm:block')
 
-            # 右侧按钮区
+            # 右侧：操作按钮区
             with ui.row().classes('items-center gap-3 mr-2'):
                 with ui.button(icon='gpp_bad', color='red', on_click=lambda: reset_global_session(None)).props('flat dense round size=sm').tooltip('安全重置'):
                      ui.badge('Reset', color='orange').props('floating rounded')
