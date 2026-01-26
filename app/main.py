@@ -6656,9 +6656,9 @@ async def open_data_mgmt_dialog():
                                     'prefix': '',
                                     'ssh_user': def_ssh_user.value, 
                                     'ssh_port': target_ssh_port,
-                                    'ssh_auth_type': def_auth_type.value,
-                                    'ssh_password': def_ssh_pwd.value, 
-                                    'ssh_key': def_ssh_key.value,
+                                    'ssh_auth_type': def_auth.value,
+                                    'ssh_password': def_pwd.value,
+                                    'ssh_key': '',
                                     'probe_installed': should_add_probe
                                 }
 
