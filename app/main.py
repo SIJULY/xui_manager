@@ -6073,30 +6073,65 @@ async def open_server_dialog(idx=None):
                 if not (x_url_raw and x_user and x_pass): 
                     safe_notify("必填项不能为空", "negative"); return
 
+                # === ✨ 核心修改：智能 URL 解析逻辑 (支持自动提取路径) ===
+                # 1. 补全协议头
                 if '://' not in x_url_raw: x_url_raw = f"http://{x_url_raw}"
+                
+                from urllib.parse import urlparse
                 try:
-                    parts = x_url_raw.split('://')
-                    body = parts[1]
-                    if ':' not in body:
-                        x_url_raw = f"{x_url_raw}:54321"
-                        safe_notify(f"已自动添加默认端口: {x_url_raw}", "positive")
-                except: pass
+                    parsed = urlparse(x_url_raw)
+                    
+                    # 2. 处理端口 (如果 netloc 里没有冒号且不是IPv6，说明没端口，补全默认)
+                    netloc = parsed.netloc
+                    if ':' not in netloc and ']' not in netloc:
+                        netloc = f"{netloc}:54321"
+                        safe_notify(f"已自动添加默认端口: 54321", "positive")
+                    
+                    # 3. 重组纯净的 Base URL (Scheme + Host + Port，不带路径)
+                    final_base_url = f"{parsed.scheme}://{netloc}"
+                    
+                    # 4. 智能提取路径作为 Prefix
+                    # 逻辑：如果输入栏的 URL 自带了路径(如 /my-path)，则优先使用它作为前缀
+                    # 否则使用下方 "API 前缀" 输入框的值
+                    path_from_url = parsed.path.strip().strip('/')
+                    
+                    if path_from_url:
+                        final_prefix = f"/{path_from_url}"
+                        # 可选：更新 UI 上的前缀输入框显示，给用户反馈
+                        if 'xui_prefix' in inputs:
+                            inputs['xui_prefix'].value = final_prefix
+                        safe_notify(f"已自动识别路径: {final_prefix}", "positive")
+                    else:
+                        # URL 里没路径，读取手动填写的
+                        final_prefix = inputs['xui_prefix'].value.strip()
+                        
+                except Exception as e:
+                    # 解析异常兜底
+                    logger.error(f"URL Parse Error: {e}")
+                    final_base_url = x_url_raw
+                    final_prefix = inputs['xui_prefix'].value.strip()
 
                 probe_val = inputs['probe_chk'].value
                 new_server_data.update({
-                    'url': x_url_raw, 'user': x_user, 'pass': x_pass,
-                    'prefix': inputs['xui_prefix'].value.strip(),
+                    'url': final_base_url, 
+                    'user': x_user, 
+                    'pass': x_pass,
+                    'prefix': final_prefix,
                     'probe_installed': probe_val
                 })
                 
                 if probe_val:
                     if not new_server_data.get('ssh_host'):
-                        if '://' in x_url_raw: new_server_data['ssh_host'] = x_url_raw.split('://')[-1].split(':')[0]
-                        else: new_server_data['ssh_host'] = x_url_raw.split(':')[0]
+                        # 从解析后的 URL 中提取 Host
+                        try:
+                            # 再次解析 final_base_url 提取纯 IP/域名
+                            clean_host = urlparse(final_base_url).hostname or final_base_url.split('://')[-1].split(':')[0]
+                            new_server_data['ssh_host'] = clean_host
+                        except:
+                            new_server_data['ssh_host'] = final_base_url.split('://')[-1].split(':')[0]
                     if not new_server_data.get('ssh_port'): new_server_data['ssh_port'] = '22'
                     if not new_server_data.get('ssh_user'): new_server_data['ssh_user'] = 'root'
                     if not new_server_data.get('ssh_auth_type'): new_server_data['ssh_auth_type'] = '全局密钥'
-
 
             if not final_name:
                 safe_notify("正在生成名称...", "ongoing")
@@ -6178,7 +6213,7 @@ async def open_server_dialog(idx=None):
                 with ui.row().classes('w-full gap-2'):
                     inputs['xui_user'] = ui.input(value=data.get('user',''), label='账号').classes('flex-1').props('outlined dense')
                     inputs['xui_pass'] = ui.input(value=data.get('pass',''), label='密码', password=True).classes('flex-1').props('outlined dense')
-                inputs['xui_prefix'] = ui.input(value=data.get('prefix',''), label='API 前缀 (选填)').classes('w-full').props('outlined dense')
+                inputs['xui_prefix'] = ui.input(value=data.get('prefix',''), label='面板根路径 (选填)').classes('w-full').props('outlined dense')
 
                 ui.separator().classes('my-1')
                 
